@@ -43,6 +43,10 @@
 //! each WAD with the chain that rebuilds it from its original file or the install it is found in
 //! ([`corpus`]); PS3 disc images are read through [`iso9660`].
 //!
+//! [`luacalls`] lists every call an image's code makes to a Lua script function by name, through the
+//! by-name callers of `data/lua_callers.tsv`; [`bindingargs`] the arguments each Lua binding reads,
+//! through the argument readers of `data/lua_readers.tsv`.
+//!
 //! [`canonical`] finds every catalogued PC build by sha256 in the canonical tree of PC builds.
 //!
 //! [`xmap`] translates a function between any two images through the match graph of [`matcher`]
@@ -51,6 +55,7 @@
 //! other image of the graph, as JSON Lines for a search corpus.
 
 pub mod annotate;
+pub mod bindingargs;
 pub mod canonical;
 pub mod catalogue;
 pub mod corpus;
@@ -61,6 +66,7 @@ pub mod image;
 pub mod images;
 pub mod iso9660;
 pub use mercs2_formats::luachunk;
+pub mod luacalls;
 pub mod luaindex;
 pub mod lualink;
 pub mod luapair;

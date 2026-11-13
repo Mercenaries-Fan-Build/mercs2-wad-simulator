@@ -69,6 +69,78 @@ fn every_site_resolves_in_every_reference_build() {
     }
 }
 
+/// The debugger's sites: `luaU_undump` and `luaD_poscall`, read with objdump in the v1.0 dump and found
+/// with the same bytes 0x220 later in the v1.1 dump.
+#[test]
+fn debug_sites_resolve_in_every_reference_build() {
+    use mercs2_formats::lua_sites::{resolve_debug, DebugSites};
+    for (id, v11, bytes) in images() {
+        let s = resolve_debug(&Image::from_file(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let want = if v11 { DebugSites { undump: 0x8713f0, poscall: 0x868a70 } } else { DebugSites { undump: 0x8711d0, poscall: 0x868850 } };
+        assert_eq!(s, want, "{id} debug sites");
+    }
+}
+
+/// The debugger names engine bindings by running `luareg` over the game's executable; every reference build
+/// carries the same named registry (62 tables, 31 named, 1,375 entries; the counts of `exemap luareg` over
+/// the v1.0 and v1.1 dumps and the shipped v1.1 exe), at its own function addresses.
+#[test]
+fn every_reference_build_names_its_engine_bindings() {
+    use mercs2_exemap::luareg::tables;
+    for (id, v11, bytes) in images() {
+        let t = tables(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let named = t.iter().filter(|t| t.namespace.is_some()).count();
+        let entries: usize = t.iter().map(|t| t.entries.len()).sum();
+        assert_eq!((t.len(), named, entries), (62, 31, 1375), "{id}");
+        // `string.byte`, the first row of the first table, read from both dumps' luareg output.
+        let byte = t.iter().flat_map(|t| &t.entries).find(|(n, _)| n == "byte").map(|e| e.1);
+        assert_eq!(byte, Some(if v11 { 0x8638c0 } else { 0x8636a0 }), "{id}");
+    }
+}
+
+/// `exemap lua-calls` over the three PC images of images.tsv (the builds pc-v10, pc-v10-drmfree and
+/// pc-v11 are): the call sites of each by-name caller, and rows read with objdump. The 124 `call` sites
+/// of pc-v10's 0x5a0cc0 equal an objdump pass over every `E8` to it, value for value; the three more are
+/// push-push-ret calls in moved code.
+#[test]
+fn lua_calls_read_every_by_name_call_of_the_pc_images() {
+    use mercs2_exemap::luacalls::{x86_calls, Callers, Functions, Val};
+    let c = Catalogue::embedded().unwrap_or_else(|e| panic!("embedded catalogue: {e}"));
+    let table = mercs2_exemap::images::Images::embedded(&c).unwrap_or_else(|e| panic!("{e}"));
+    let callers = Callers::embedded(&table).unwrap_or_else(|e| panic!("{e}"));
+    let none = Functions::parse("", "no export").unwrap_or_else(|e| panic!("{e}"));
+    let by_build = |b: &str| table.images.iter().find(|i| i.build_id.as_deref() == Some(b)).map(|i| i.id.clone()).expect(b);
+    // (build, sites per caller in lua_callers.tsv order)
+    let want: [(&str, [usize; 2]); 3] =
+        [("dump-v10-pmcbb-unpacked", [127, 12]), ("v10-drmfree-laa", [127, 12]), ("dump-v11-securom-unpacked", [126, 10])];
+    let all = images();
+    for (build, counts) in want {
+        let bytes = &all.iter().find(|(id, ..)| *id == build).expect(build).2;
+        let id = by_build(build);
+        let rows: Vec<_> = callers.of(&id).collect();
+        assert_eq!(rows.len(), 2, "{id}: the by-name caller and the object dispatcher");
+        for (caller, n) in rows.iter().zip(counts) {
+            let (sites, calls) = x86_calls(bytes, &none, caller).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!((sites, calls.len()), (n, n), "{id} caller 0x{:08x}", caller.va);
+            if id != "pc-v11" {
+                let at = |s: u32| calls.iter().find(|k| k.site == Some(s)).unwrap_or_else(|| panic!("{id} site 0x{s:08x}"));
+                if caller.va == 0x005a0cc0 {
+                    let k = at(0x006f5c95);
+                    assert_eq!((&k.module, &k.name), (&Val::Known(0x51ee_8f14), &Val::Known("NetSafePlayCheapCinematic".into())));
+                    let k = at(0x006fea91);
+                    assert_eq!((&k.module, &k.name), (&Val::Computed, &Val::Known("NetEventCallback".into())));
+                    // the object dispatcher's own forward, in moved code whose junk bytes no decode lands through
+                    assert_eq!(at(0x006c6f46).name, Val::Unread);
+                } else {
+                    assert_eq!(at(0x0066c33b).name, Val::Known("OnActivate".into()));
+                    assert_eq!(at(0x0066c33b).module, Val::Object);
+                    assert_eq!(at(0x028b712a).name, Val::Known("OnUse".into()), "the push-push-ret call");
+                }
+            }
+        }
+    }
+}
+
 /// The v1.1 dump's family vtables, in family order, from its `.rdata` (the structural scan).
 const V11_VTABLES: [u32; 45] = [
     0xbe88cc, 0xbaadd0, 0xbe84a4, 0xbac878, 0xbab148, 0xbe8938, 0xbab598, 0xbab580, 0xbaaedc, 0xbac604, 0xbaade8, 0xbac304,

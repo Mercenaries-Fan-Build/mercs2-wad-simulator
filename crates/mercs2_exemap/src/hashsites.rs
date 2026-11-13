@@ -642,7 +642,7 @@ pub fn scan_function(decomp: &str, va: u32, mem: &dyn Memory, pointer_strings: b
 
 /// At an identifier `base` at `i` in `( base ± K )` that follows `*(T *)`, the word loaded: `base`
 /// is `unaff_r2` (the TOC) or a local holding a TOC-loaded word.
-fn toc_load(toks: &[Tok], i: usize, toc: Option<u32>, held: &HashMap<String, u32>, mem: &dyn Memory) -> Option<u32> {
+pub(crate) fn toc_load(toks: &[Tok], i: usize, toc: Option<u32>, held: &HashMap<String, u32>, mem: &dyn Memory) -> Option<u32> {
     let Tok::Ident(base) = &toks[i] else { return None };
     let base_val = if base == "unaff_r2" { toc? } else { *held.get(base)? };
     if !(punct(toks.get(i.checked_sub(1)?), "(") && punct(toks.get(i.checked_sub(2)?), ")") && punct(toks.get(i.checked_sub(3)?), "*")) {
@@ -664,7 +664,7 @@ fn toc_load(toks: &[Tok], i: usize, toc: Option<u32>, held: &HashMap<String, u32
 
 /// The local a statement starting `local = ` assigns, when the load at `i` is that statement's
 /// whole right-hand side (after casts).
-fn assigned_local(toks: &[Tok], i: usize) -> Option<String> {
+pub(crate) fn assigned_local(toks: &[Tok], i: usize) -> Option<String> {
     let mut j = i;
     let mut eq = None;
     while j > 0 {

@@ -309,6 +309,42 @@ fn reg_rows(rdata: &Section, text: &Section, name: &[u8]) -> Vec<(u32, u32)> {
     rows
 }
 
+/// The sites only the Lua debugger (`lua_debug`) detours, resolved apart from [`LuaSites`] so a build
+/// where one is missing loses the debugger, not every mod's Lua host. Roles, from the pc-v10 disassembly:
+///
+/// | site | VA (unpacked) | what it is |
+/// |---|---|---|
+/// | `undump` | `0x008711D0` | `luaU_undump(L, z, buff, name)`, cdecl, returns the chunk's main `Proto*` |
+/// | `poscall` | `0x00868850` | `luaD_poscall`, L in `ECX`, first result in `EAX`, plain `ret` |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DebugSites {
+    pub undump: u32,
+    pub poscall: u32,
+}
+
+/// push ebp; mov ebp,esp; and esp,-8; mov ecx,[ebp+0x14] (name); mov al,[ecx]; sub esp,0x10; cmp al,'@';
+/// push esi; push edi; je; cmp al,'='; je; cmp al,0x1b; jne; mov [esp+0x14],"binary string"; jmp;
+/// add ecx,1; mov [esp+0x14],ecx; mov eax,[ebp+0xc]; mov ecx,[ebp+0x10]; mov esi,[ebp+8]
+const UNDUMP: &str = "55 8b ec 83 e4 f8 8b 4d 14 8a 01 83 ec 10 3c 40 56 57 74 12 3c 3d 74 0e 3c 1b 75 0d c7 44 24 14 \
+                      ?? ?? ?? ?? eb 07 83 c1 01 89 4c 24 14 8b 45 0c 8b 4d 10 8b 75 08";
+/// push ecx; push esi; mov esi,ecx (L); test byte [esi+0x36],2 (hookmask & ret); je; call callrethooks;
+/// mov edx,[esi+0x14] (ci); push ebx; push edi; lea edi,[edx-0x18]; mov [esi+0x14],edi (L->ci--); ...
+const POSCALL: &str = "51 56 8b f1 f6 46 36 02 74 05 e8 ?? ?? ?? ?? 8b 56 14 53 57 8d 7a e8 89 7e 14 8b 5a 10 85 db \
+                       8b 4a 04 8b 3f 89 7e 0c 8b 52 f4 89 56 18";
+
+/// Resolve the debugger's sites: each pattern must match exactly once in `.text`.
+pub fn resolve_debug(img: &Image) -> Result<DebugSites, String> {
+    let text = img.section(".text").ok_or("the image has no .text section")?;
+    let one = |name: &str, pattern: &str| -> Result<u32, String> {
+        let hits = Pattern::parse(pattern).expect("built-in pattern parses").find_all(text.bytes);
+        match hits[..] {
+            [at] => Ok(text.va + at as u32),
+            _ => Err(format!("{name} matched {} time(s), not once", hits.len())),
+        }
+    };
+    Ok(DebugSites { undump: one("luaU_undump", UNDUMP)?, poscall: one("luaD_poscall", POSCALL)? })
+}
+
 /// Resolve every site in `img` and check that they belong together.
 pub fn resolve(img: &Image) -> Result<LuaSites, LuaSitesError> {
     let text = img.section(".text").ok_or(LuaSitesError::NoSection(".text"))?;

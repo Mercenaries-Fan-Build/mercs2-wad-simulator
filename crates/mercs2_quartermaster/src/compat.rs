@@ -28,6 +28,9 @@ use std::path::{Component, Path, PathBuf};
 /// and the plan's `quartermaster` field.
 pub const QUARTERMASTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The Lua binding qm's generated outfit code applies a chatter set with (`crate::outfits`).
+pub const CHATTER_BINDING: &str = "Human.SetChatterSet";
+
 /// One request item as [`plan`] sees it: the caller's id and the opened Shipment.
 #[derive(Debug, Clone, Copy)]
 pub struct PlanInput<'a> {
@@ -225,7 +228,7 @@ fn error(
     refs: Vec<FindingRef>,
 ) -> Finding {
     Finding {
-        code,
+        code: code.to_string(),
         severity: FindingSeverity::Error,
         message,
         items,
@@ -302,6 +305,65 @@ pub fn plan(
             placed_files,
             data_files: crate::shader::data_files(m),
         });
+    }
+
+    // M0263: an outfit offered in a level the set does not have. The main campaign is always there;
+    // a custom level is one a Shipment of the set adds.
+    let set_levels: Vec<&str> = (0..inputs.len())
+        .flat_map(|i| manifest(i).contributions.iter())
+        .filter_map(|c| match c {
+            crate::manifest::Contribution::AddLevel { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for i in 0..inputs.len() {
+        for (index, c) in manifest(i).contributions.iter().enumerate() {
+            let crate::manifest::Contribution::AddOutfit { slug, levels: Some(levels), .. } = c else { continue };
+            for l in levels {
+                if l != crate::level::VZ && !set_levels.contains(&l.as_str()) {
+                    findings.push(error(
+                        "M0263",
+                        format!(
+                            "{} contributions[{index}] add_outfit {slug} is offered in level {l:?}, which is \
+                             neither {} nor a level a Shipment of the set adds{}",
+                            manifest(i).shipment.name,
+                            crate::level::VZ,
+                            if set_levels.is_empty() { String::new() } else { format!(" ({})", set_levels.join(", ")) }
+                        ),
+                        vec![id(i)],
+                        vec![at(Section::Items, i)],
+                    ));
+                }
+            }
+        }
+    }
+
+    // M0264: an outfit's chatter set is applied with `Human.SetChatterSet`, which the PC executable does
+    // not register (the Lua the DLC's PC port runs needs it added: BIUA's plugin, `client/src/registry.rs`).
+    // A Shipment of the set must declare it among its `native_hook` touches, or the first join that
+    // applies a set fails.
+    let adds_chatter = (0..inputs.len()).any(|i| {
+        manifest(i).contributions.iter().any(|c| {
+            matches!(c, crate::manifest::Contribution::NativeHook { touches, .. } if touches.iter().any(|t| t.0 == CHATTER_BINDING))
+        })
+    });
+    if !adds_chatter {
+        for i in 0..inputs.len() {
+            for (index, c) in manifest(i).contributions.iter().enumerate() {
+                if let crate::manifest::Contribution::AddOutfit { slug, chatter: Some(set), .. } = c {
+                    findings.push(error(
+                        "M0264",
+                        format!(
+                            "{} contributions[{index}] add_outfit {slug} sets chatter {set:?} through {CHATTER_BINDING}, \
+                             which the game does not register, and no Shipment of the set declares it in a native_hook's touches",
+                            manifest(i).shipment.name
+                        ),
+                        vec![id(i)],
+                        vec![at(Section::Items, i)],
+                    ));
+                }
+            }
+        }
     }
 
     // M0203: exactly one copy per name.
@@ -743,6 +805,8 @@ pub fn plan(
         } else {
             Vec::new()
         },
+        // Only `qm link` knows what it splices; it fills this from the list it loads.
+        libraries: None,
         findings,
     })
 }

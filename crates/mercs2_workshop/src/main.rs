@@ -91,7 +91,10 @@ mod live_world;
 mod luaview;
 mod lua_source;
 mod blueprint;
+mod engine_calls; // Which script functions the game's executables call by name, and its engine bindings
 mod missions;
+mod missions_debug;
+mod missions_layout; // Where the Missions canvas puts each node, and how readable that is
 mod publish;
 mod retarget;
 // The preview-only half (`rebind_matrices` / `animation_rig`) is an extension trait now that the

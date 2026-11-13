@@ -18,6 +18,7 @@ const RETRY: Duration = Duration::from_millis(50);
 const HEADER_BYTES: usize = 0x1000;
 
 static SITES: OnceLock<LuaSites> = OnceLock::new();
+static DEBUG: OnceLock<Result<mercs2_formats::lua_sites::DebugSites, String>> = OnceLock::new();
 static SHADERS: OnceLock<ShaderSites> = OnceLock::new();
 static TREES: OnceLock<TreeSites> = OnceLock::new();
 
@@ -57,6 +58,17 @@ fn publish(s: LuaSites) -> &'static LuaSites {
     }
     rt_log::line(&format!("script host at {:#x}", s.host()));
     s
+}
+
+/// The debugger's sites, resolved once (after the Lua sites, so `.text` is decrypted).
+pub(crate) fn debug() -> Result<mercs2_formats::lua_sites::DebugSites, String> {
+    DEBUG
+        .get_or_init(|| {
+            let d = mapped().and_then(|img| mercs2_formats::lua_sites::resolve_debug(&img))?;
+            rt_log::line(&format!("debug sites: luaU_undump {:#x}, luaD_poscall {:#x}", d.undump, d.poscall));
+            Ok(d)
+        })
+        .clone()
 }
 
 /// The sites, resolving them now when that has not been done; `Err` names what did not resolve.

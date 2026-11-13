@@ -27,6 +27,16 @@
 //!   mercs2_probe overlays <profile>
 //!   mercs2_probe --wad D:/game/data/vz.wad comp-probe
 //!
+//! The standalone tools (`block-neuter`, `c3-veg-forge`, `jc2-blockrt`, `jc2-script-probe`,
+//! `jc2-template-mint`, `lod-neuter`, `lua-vehicle-hashes`, `phy2-probe`, `place-forge`,
+//! `place-lift`, `probe-group`, `probe-mtrl`, `ragdoll-probe`, `shaderforge`,
+//! `survey-frankenstein`, `worldentity-probe`) are dispatched before `vz.wad` is resolved: each
+//! parses the arguments after its name itself and opens its own inputs, so `--wad` does not apply.
+//! Their usage is in each module's header.
+//!   mercs2_probe phy2-probe <container.ucfx>
+//!   mercs2_probe place-forge --list <block.bin> --near X,Z --radius R
+//!   mercs2_probe shaderforge store-id PgSkyFP --low
+//!
 //! Beside this multiplexed binary the crate also ships ~100 single-purpose dev bins under
 //! `src/bin/` (`cargo run -p mercs2_probe --bin <name>`), each a standalone investigation of one
 //! question: model/LOD assembly (`lod_chunks`, `segm_join`, `viewstate_probe`, ...), the
@@ -39,7 +49,9 @@
 //! registry), others from a WAD path argument, a `--wad` flag, or `game_paths`' local config.
 
 mod anim_table;
+mod block_neuter;
 mod bone_census;
+mod c3_veg_forge;
 mod chunk_compare;
 mod dlc_census;
 mod pws_survey;
@@ -56,12 +68,28 @@ mod ecs_survey;
 mod ess_live;
 mod ess_menu_check;
 mod facefx;
+mod jc2_blockrt;
+mod jc2_script_probe;
+mod jc2_template_mint;
 mod layer;
+mod lod_neuter;
+mod lua_debug_live;
+mod lua_vehicle_hashes;
+mod phy2_probe;
+mod place_forge;
+mod place_lift;
+mod probe_group;
+mod probe_mtrl;
+mod ragdoll_probe;
+mod shaderforge;
+mod survey_frankenstein;
 mod terrain_cell;
 mod gfx_golden;
 mod prof_samples;
 mod splice_emu;
+mod stockpile_restore;
 mod we_template;
+mod worldentity_probe;
 
 use mercs2_engine::diag;
 use mercs2_engine::wad;
@@ -97,8 +125,10 @@ fn usage() -> ! {
          \x20 gfx-run <movies_dir> <frames>                 (play every movie; report script failures and gaps)\n\
          \x20 ess-live [--addr host:port] [--menu <scripts-rel path>] [--spawn <template>] [--spawn-dist <m>]   (live game, no WAD)\n\
          \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
+         \x20 lua-debug --module <name> [--bank resident|vz|shell] [--line <corpus line>]... [--then continue|wait|disconnect] [--repl] [--seconds S] [--addr host:port]   (the Missions debugger's protocol against the live game: line tables from the WAD and the corpus)\n\
          \x20 extract --model H [--type T] <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
+         \x20 stockpile-restore <profile> --expect restored|dropped   (run --wad's wifpmcinterior on the save's HQ stockpile mark: BUG-015)\n\
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
          \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
          \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
@@ -127,6 +157,23 @@ fn usage() -> ! {
          \x20 dump-pool <capture-dir> <name|0xVA> [--key 0xK] [--bytes N] [--limit N]   (one container's live records)\n\
          \x20 dump-spawnlists <capture>                     (the runtime unit lists built from PopulationList)\n\
          \x20 dump-hibernation <capture>                    (the hibernation grid: viewers, rows, awake count)\n\
+         standalone tools (their own arguments and inputs; --wad does not apply):\n\
+         \x20 block-neuter <block.bin> <out.bin>            (collapse every UCFX container's drawing groups in a block)\n\
+         \x20 lod-neuter <rung.ucfx> <out.ucfx> --name-hash 0xH   (empty every drawing group of a finer LOD rung)\n\
+         \x20 phy2-probe <container.ucfx>                   (a container's PHY2 collision shapes)\n\
+         \x20 probe-group <block.bin> <ord>...              (DECL64 groups: weights, dominant bones, Y range)\n\
+         \x20 probe-mtrl <block.bin>                        (MTRL materials and each PRMG group's material)\n\
+         \x20 survey-frankenstein <block.bin>...            (every drawing group of each block with its bones)\n\
+         \x20 place-forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z [...] | --list <block.bin> [--near X,Z] [--radius R]\n\
+         \x20 place-lift <in.bin> <out.bin> --key 0xKEY [--key ...] --dy <f32> | <in.bin> --list --key 0xKEY [...]\n\
+         \x20 c3-veg-forge --base-wad <vz.wad> --out <overlay.wad> [--x X --z Z --radius M] [--donor-cell ID] [--model 0xH] [--max-cells N] [--advertise]\n\
+         \x20 jc2-blockrt [vz.wad]                           (worldentity block round-trip; writes ../../output/block3185_original.bin)\n\
+         \x20 jc2-script-probe [vz.wad|block.bin] [name ...|--summary]   (resident-script INFO/DEPS/BINN structure)\n\
+         \x20 jc2-template-mint [vz.wad]                     (mint the JC2 template; reads and writes ../../output)\n\
+         \x20 worldentity-probe [vz.wad] [0xHANDLE ...]      (worldentity COMP groups and template recipes)\n\
+         \x20 ragdoll-probe [--hashes] [--extract-fixture]  (Havok physics classes across vz.wad)\n\
+         \x20 lua-vehicle-hashes [out.csv]                  (vehicle names in the decompiled Lua; run from the notes repo root)\n\
+         \x20 shaderforge <list|static-vs|consts|splice|bundle|disasm|roles> <shader3.bin> [rec|role|out] [out] | asm <in.asm> <out.sho> [--target T] | store-id <stem> [--low]\n\
          (vz.wad auto-discovers from MERCS2_GAME_DIR / VZ_WAD, then the registry; override with --wad <path>)"
     );
     std::process::exit(2);
@@ -322,7 +369,7 @@ fn save_dump(profile_path: &str, needle: Option<&str>) -> Result<(), String> {
     let bytes = std::fs::read(profile_path).map_err(|e| format!("read {profile_path}: {e}"))?;
     let p = mercs2_formats::save::parse(&bytes)?;
     println!(
-        "[save-dump] '{}' | contract {} | playtime {}s | cash {} | fuel {}/{} | character(0x4D) {} | upgrade(0x4F) {} | unlocked_costumes(0x24A) {} | unk(0x24B) {} | flags4C {:#x} | ts {}",
+        "[save-dump] '{}' | contract {} | playtime {}s | cash {} | fuel {}/{} | character(0x4D) {} | costume(0x4F) {} | unlocked_costumes(0x24A) {} | unk(0x24B) {} | flags4C {:#x} | ts {}",
         p.save_name(),
         p.active_contract(),
         p.play_time_seconds,
@@ -330,7 +377,7 @@ fn save_dump(profile_path: &str, needle: Option<&str>) -> Result<(), String> {
         p.fuel,
         p.fuel_capacity,
         p.character_index,
-        p.upgrade_index,
+        p.costume_index,
         p.unlocked_costumes,
         p.unknown_0x24b,
         p.flags_0x4c,
@@ -1223,6 +1270,34 @@ fn main() {
         return;
     }
 
+    // Standalone tools: each parses its own arguments and opens its own inputs (a block or container
+    // file, or the vz.wad it is given or finds through `game_paths`), so `--wad` does not apply.
+    match cmd.as_str() {
+        "block-neuter" => return block_neuter::run(&args),
+        "c3-veg-forge" => {
+            if let Err(e) = c3_veg_forge::run(&args) {
+                eprintln!("c3-veg-forge: error: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        "jc2-blockrt" => return jc2_blockrt::run(&args),
+        "jc2-script-probe" => return jc2_script_probe::run(&args),
+        "jc2-template-mint" => return jc2_template_mint::run(&args),
+        "lod-neuter" => std::process::exit(lod_neuter::run(&args)),
+        "lua-vehicle-hashes" => return lua_vehicle_hashes::run(&args),
+        "phy2-probe" => return phy2_probe::run(&args),
+        "place-forge" => std::process::exit(place_forge::run(&args)),
+        "place-lift" => std::process::exit(place_lift::run(&args)),
+        "probe-group" => return probe_group::run(&args),
+        "probe-mtrl" => return probe_mtrl::run(&args),
+        "ragdoll-probe" => return ragdoll_probe::run(&args),
+        "shaderforge" => std::process::exit(shaderforge::run(&args)),
+        "survey-frankenstein" => return survey_frankenstein::run(&args),
+        "worldentity-probe" => return worldentity_probe::run(&args),
+        _ => {}
+    }
+
     // Resolve vz.wad: explicit --wad (a folder or the file), else $MERCS2_GAME_DIR / $VZ_WAD, else
     // the registry key.
     let wadpath = match wad::resolve_vz_wad(flag_val(&args, "--wad").as_deref()) {
@@ -1251,6 +1326,7 @@ fn main() {
     };
 
     match cmd.as_str() {
+        "lua-debug" => std::process::exit(lua_debug_live::cli(&wadpath, &args)),
         "c3-meta" => {
             let out = first_positional(&args).unwrap_or_else(|| "c3_meta.ndjson".to_string());
             run(diag::c3_meta(&wadpath, &out));
@@ -1472,6 +1548,7 @@ fn main() {
             };
             run(save_dump(&prof, needle.as_deref()));
         }
+        "stockpile-restore" => std::process::exit(stockpile_restore::main(&wadpath, &args)),
         "anim-table" => {
             let name = first_positional(&args).unwrap_or_else(|| {
                 eprintln!("anim-table: usage: mercs2_probe anim-table <name|0xH> [--handle 0xH] [--list <column>]");

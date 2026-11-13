@@ -54,7 +54,7 @@ Both take the **next** argument as their value; a next argument that starts with
 
 | Flag | Value | Default | What it does |
 | --- | --- | --- | --- |
-| *(none)* | — | — | **Retail flow.** Scans `SaveGames\*.profile` (header-only) and opens the main menu (`menu::Menu`); the player picks Continue / New Game / Load Game / Quit and the chosen save drives the world boot in-loop. New Game uses Mattias, upgrade tier 0, default skin. Only reached when there is no explicit profile, no `--plan`, and no `--stream`. |
+| *(none)* | — | — | **Retail flow.** Scans `SaveGames\*.profile` (header-only) and opens the main menu (`menu::Menu`); the player picks Continue / New Game / Load Game / Quit and the chosen save drives the world boot in-loop. New Game uses Mattias in the default skin. Only reached when there is no explicit profile, no `--plan`, and no `--stream`. |
 | `--plan` | — | off | Resolve the profile (explicit or newest), parse it to header + `SaveState`, print the boot-state banner (profile name, active contract, playtime/cash/fuel, flow chain, active missions, `vz_state` overlay layers, and the resume-branch spawn marker `Pmc_Entry1`), then **return without rendering**. No window opens. |
 | `--stream` | — | off | Boot the alternate **free-fly streaming world** (`mercs2_engine::game_world::run_game_world`) at the PMC-interior spawn with the save's overlay layers, populating the PMC interior via `populate_pmc_interior`. Suppresses the shell menu. |
 | `--interior-orbit` | — | off | Adds the engine's **debug orbit camera** to the interior. Read only in the shell-menu boot and the default full-world boot; **ignored under `--stream`** (that branch never consults it). |
@@ -121,9 +121,9 @@ Flag-interaction summary:
   save at runtime).
 - **`--interior-orbit` is only meaningful in the menu boot and the default full-world boot.** It is
   read but has no effect under `--plan` (nothing renders) and is not read at all under `--stream`.
-- **The heroes' look differs by path.** The menu's New Game always boots Mattias / upgrade tier 0 /
-  default skin (`player_model_candidates(1,0,0)`). A direct profile boot (default full-world path)
-  instead uses **this profile's** `character_index` (header `@0x4D`, 1-based) and `upgrade_index`
+- **The heroes' look differs by path.** The menu's New Game always boots Mattias / default skin
+  (`player_model_candidates(1, 0)`). A direct profile boot (default full-world path)
+  instead uses **this profile's** `character_index` (header `@0x4D`, 1-based) and `costume_index`
   (`@0x4F`), so the on-screen character and skin change with the save. `--stream` does not select a
   player model this way.
 - **The save drives the interior content** on both rendering paths: `unlocked_starters` →

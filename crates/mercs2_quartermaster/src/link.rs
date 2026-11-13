@@ -130,12 +130,18 @@ pub const SCRIPT_BLOCKS: &[(&str, &str)] = &[
 pub const SHELL_SCRIPT_BLOCKS: &[(&str, &str)] =
     &[(r"\Shell\resident_P000_Q3.block", r"blocks\Shell\resident_P000_Q3.block")];
 
+/// The script the engine itself queues first in the front end: pc-v10 `0x4C05E0`–`0x4C05EC` queues
+/// `0x49031655` when `Sys.AutoLoad` is clear, which it is in retail. Each GUI layout loads after it,
+/// by name (`dynamic_import` through `MrxGuiBase.LoadGUIFile`).
+pub const FRONT_END_ROOTS: &[&str] = &["shellbootstrap"];
+
+/// The script the engine queues first in the world load, before the level's master: pc-v10's
+/// shell-to-game stepper requests `0x40CC2CB3` as a script (`0x4BC94D`), and its pass finishes before
+/// `LevelBootstrap.LoadLevel` requests the master (live dump: its pass 29, `vz`'s 43).
+pub const WORLD_BOOT_ROOT: &str = "gamebootstrap";
+
 /// The corpus subfolders the `vz.wad` blocks' base sources are searched in, in order.
 pub const VZ_SOURCE_DIRS: &[&str] = &["vz", "resident", "shell"];
-
-/// The corpus subfolders the `shell.wad` block's base sources are searched in: the shell's own
-/// copies, which differ from the resident ones for some scripts (`mrxgui`).
-pub const SHELL_SOURCE_DIRS: &[&str] = &["shell"];
 
 /// One Shipment's declared edit to one script.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +165,8 @@ pub struct ScriptAddition {
     pub name: String,
     /// Full Lua source text to compile.
     pub source: String,
+    /// When qm's loader brings the module up, for a library ([`crate::manifest::LibraryLoad`]).
+    pub load: Option<crate::manifest::LibraryLoad>,
 }
 
 /// One Shipment's declaration of a wholesale REPLACE on an existing script's bytecode.
@@ -218,6 +226,13 @@ pub enum LinkError {
         first: String,
         second: String,
     },
+    /// qm's hook and library code could not be generated for this set ([`crate::loader::host_tails`]):
+    /// a library at a hook qm does not generate, or in a session that hook does not fire in.
+    Hooks(String),
+    /// The set's outfits could not be linked into a level ([`crate::outfits`]): its wardrobe or player
+    /// script could not be read, an outfit was refused, or the heroes' own chatter sets could not be
+    /// named.
+    Outfits(String),
     Block(String),
 }
 
@@ -258,6 +273,8 @@ impl std::fmt::Display for LinkError {
                 "the novel shop module {module:?} is minted from two sources, by {first} and by \
                  {second}; one module name has one source — rename one"
             ),
+            LinkError::Hooks(m) => write!(f, "qm's hooks and library loader: {m}"),
+            LinkError::Outfits(m) => write!(f, "the set's outfits: {m}"),
             LinkError::Block(m) => write!(f, "{m}"),
         }
     }
@@ -279,220 +296,58 @@ pub struct LinkedScript {
     pub block: usize,
 }
 
-/// A literal `import("x")` whose `x` nothing in the link provides (M0209, a warning).
-///
-/// Resolved means: after every script is linked and every module minted, some loaded block holds a
-/// script named `x` — a shipped script, an `add_script` module, a minted support module — or `x`
-/// is `qm_modloader`. Anything else will fail at runtime unless something provides it by other
-/// means, which the linker cannot see.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnresolvedImport {
-    /// The Shipment whose source carries the import.
-    pub shipment: String,
-    /// The module name inside the literal.
-    pub module: String,
-    /// Which source it is in, for the message: `patch_lua append to <target>`, `add_script <name>`,
-    /// `replace_lua <target>`, or `support module <name>`.
-    pub source: String,
-}
-
-impl std::fmt::Display for UnresolvedImport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}: import({:?}) in its {} names no script in the linked blocks, no add_script in \
-             the set and no module the Quartermaster mints, so it will fail at runtime unless \
-             something provides it another way",
-            self.shipment, self.module, self.source
-        )
-    }
-}
-
 /// What [`link_into_blocks`] produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkOutput {
     /// Every script linked, replaced or minted.
     pub scripts: Vec<LinkedScript>,
-    /// Literal imports nothing provides (M0209), in the order they were found.
-    pub unresolved_imports: Vec<UnresolvedImport>,
+    /// The import findings of the Shipment Lua the link put into scripts ([`crate::imports::check`]):
+    /// M0209, M0313 and M0314, sorted. The caller decides what each refuses.
+    pub findings: Vec<crate::imports::ImportFinding>,
+    /// Every script module the link added, for the load plan's `libraries`: the libraries qm's loader
+    /// loads, in the order it loads them, then the modules only an `import` loads, in mint order.
+    pub modules: Vec<LinkedModule>,
 }
 
-/// Every literal `import("x")` / `import('x')` in `source`: the `x` of each call to the global
-/// `import` whose only argument is one short string literal.
-///
-/// A small Lua 5.1 lexer, so that comments and string contents are never read as code: `--` line
-/// and `--[[ ]]` / `--[==[ ]==]` long comments, `"…"` / `'…'` short strings with their escapes, and
-/// `[[ ]]` / `[==[ ]==]` long strings. A call counts only when `import` is not a field or method
-/// (`t.import(…)`, `t:import(…)`) and is not being defined (`function import(…)`).
-///
-/// **Not checked, by design:** `dynamic_import(…)`, `import(<expression>)`, a concatenated name
-/// (`import("a" .. b)`), the call forms without parentheses (`import "x"`), and module names reached
-/// through data such as a task's `sModuleName`. Those are resolved at runtime and the linker cannot
-/// see them.
-pub fn literal_imports(source: &str) -> Vec<String> {
-    let tokens = lua_tokens(source);
-    let mut out = Vec::new();
-    for i in 0..tokens.len() {
-        if tokens[i] != LuaToken::Name("import".into()) {
-            continue;
-        }
-        let before = i.checked_sub(1).map(|p| &tokens[p]);
-        let is_field_or_definition = matches!(
-            before,
-            Some(LuaToken::Punct(".")) | Some(LuaToken::Punct(":"))
-        ) || before == Some(&LuaToken::Name("function".into()));
-        if is_field_or_definition {
-            continue;
-        }
-        if let (Some(LuaToken::Punct("(")), Some(LuaToken::ShortString(module)), Some(LuaToken::Punct(")"))) =
-            (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
-        {
-            out.push(module.clone());
-        }
-    }
-    out
-}
-
-/// A Lua token, as far as [`literal_imports`] needs one.
+/// One script module a link added to a session: a row of the load plan's `libraries`
+/// (`mercs2_formats::load_plan::LibraryRow`, which names the Shipment by its request id).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum LuaToken {
-    Name(String),
-    /// A `"…"` or `'…'` string, escapes decoded.
-    ShortString(String),
-    /// A `[[…]]` string.
-    LongString,
-    Number,
-    Punct(&'static str),
+pub struct LinkedModule {
+    pub module: String,
+    /// The Shipment that adds it; `None` for qm's own loaders.
+    pub shipment: Option<String>,
+    pub session: crate::manifest::LoadSession,
+    /// The hook qm's loader loads it at; `None` when only an `import` loads it.
+    pub when: Option<String>,
+    /// Whether the session's settle hook checks it is ready ([`crate::loader::settles`]).
+    pub settles: bool,
 }
 
-/// The level of a long bracket opening at `b[i]` (`[[` is 0, `[==[` is 2), or `None`.
-fn long_bracket_level(b: &[u8], i: usize) -> Option<usize> {
-    if b.get(i) != Some(&b'[') {
-        return None;
+/// The rows of the libraries a link loads in `session`, from the list it splices: `qm`, qm's own
+/// loader when the link loads one, first, then the Shipments' `libraries`.
+fn library_modules(
+    session: crate::manifest::LoadSession,
+    qm: Option<&crate::loader::Library>,
+    libraries: &[crate::loader::Library],
+) -> Result<Vec<LinkedModule>, LinkError> {
+    let row = |lib: &crate::loader::Library, shipment: Option<String>| {
+        let hook = crate::hooks::hook(&lib.when)
+            .ok_or_else(|| LinkError::Hooks(format!("hook {} is not in qm's catalogue (data/hooks.tsv)", lib.when)))?;
+        Ok(LinkedModule { module: lib.module.clone(), shipment, session, when: Some(lib.when.clone()), settles: crate::loader::settles(hook) })
+    };
+    let mut rows = Vec::with_capacity(libraries.len() + 1);
+    if let Some(q) = qm {
+        rows.push(row(q, None)?);
     }
-    let mut j = i + 1;
-    while b.get(j) == Some(&b'=') {
-        j += 1;
+    for lib in libraries {
+        rows.push(row(lib, Some(lib.owner.clone()))?);
     }
-    (b.get(j) == Some(&b'[')).then_some(j - i - 1)
+    Ok(rows)
 }
 
-/// The index just past the long bracket close `]=*]` of `level` at or after `from`, or the end of
-/// the input when it is unterminated (the compiler reports that; here it only has to stop).
-fn long_bracket_end(b: &[u8], from: usize, level: usize) -> usize {
-    let mut k = from;
-    while k < b.len() {
-        if b[k] == b']' {
-            let mut j = k + 1;
-            while b.get(j) == Some(&b'=') {
-                j += 1;
-            }
-            if j - k - 1 == level && b.get(j) == Some(&b']') {
-                return j + 1;
-            }
-        }
-        k += 1;
-    }
-    b.len()
-}
-
-fn lua_tokens(source: &str) -> Vec<LuaToken> {
-    const PUNCT: &[&str] = &[
-        "...", "..", "==", "~=", "<=", ">=", "(", ")", "{", "}", "[", "]", ";", ":", ",", ".", "+",
-        "-", "*", "/", "%", "^", "#", "<", ">", "=",
-    ];
-    let b = source.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let c = b[i];
-        if c.is_ascii_whitespace() {
-            i += 1;
-        } else if c == b'-' && b.get(i + 1) == Some(&b'-') {
-            match long_bracket_level(b, i + 2) {
-                Some(level) => i = long_bracket_end(b, i + 2 + level + 2, level),
-                None => {
-                    while i < b.len() && b[i] != b'\n' {
-                        i += 1;
-                    }
-                }
-            }
-        } else if let Some(level) = long_bracket_level(b, i) {
-            i = long_bracket_end(b, i + level + 2, level);
-            out.push(LuaToken::LongString);
-        } else if c == b'"' || c == b'\'' {
-            let (text, next) = short_string(b, i + 1, c);
-            out.push(LuaToken::ShortString(text));
-            i = next;
-        } else if c.is_ascii_alphabetic() || c == b'_' {
-            let start = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
-                i += 1;
-            }
-            out.push(LuaToken::Name(source[start..i].to_string()));
-        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(u8::is_ascii_digit)) {
-            // A numeral, including `0x1F`, `1e-5` and `.5`: letters, digits, `.`, and a sign right
-            // after an exponent marker.
-            i += 1;
-            while i < b.len() {
-                let d = b[i];
-                let signed_exponent = (d == b'+' || d == b'-') && matches!(b[i - 1], b'e' | b'E');
-                if d.is_ascii_alphanumeric() || d == b'.' || signed_exponent {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            out.push(LuaToken::Number);
-        } else if let Some(p) = PUNCT.iter().find(|p| b[i..].starts_with(p.as_bytes())) {
-            out.push(LuaToken::Punct(p));
-            i += p.len();
-        } else {
-            // A byte Lua itself would reject; the compiler reports it. Stepping over it keeps the
-            // scan going without inventing a token. Non-ASCII bytes only occur inside strings and
-            // comments in valid Lua 5.1, and those are consumed above.
-            i += 1;
-        }
-    }
-    out
-}
-
-/// Decode a short string whose body starts at `b[start]` and ends at the unescaped `quote`, and
-/// return it with the index just past the closing quote. Lua 5.1's escapes: `\a \b \f \n \r \t
-/// \v \\ \" \'`, a backslash-newline, and `\ddd` (up to three decimal digits).
-fn short_string(b: &[u8], start: usize, quote: u8) -> (String, usize) {
-    let mut bytes = Vec::new();
-    let mut i = start;
-    while i < b.len() && b[i] != quote && b[i] != b'\n' {
-        if b[i] == b'\\' && i + 1 < b.len() {
-            let e = b[i + 1];
-            i += 2;
-            match e {
-                b'a' => bytes.push(0x07),
-                b'b' => bytes.push(0x08),
-                b'f' => bytes.push(0x0C),
-                b'n' | b'\n' => bytes.push(b'\n'),
-                b'r' => bytes.push(b'\r'),
-                b't' => bytes.push(b'\t'),
-                b'v' => bytes.push(0x0B),
-                d if d.is_ascii_digit() => {
-                    let mut value = u32::from(d - b'0');
-                    let mut n = 1;
-                    while n < 3 && i < b.len() && b[i].is_ascii_digit() {
-                        value = value * 10 + u32::from(b[i] - b'0');
-                        i += 1;
-                        n += 1;
-                    }
-                    bytes.push(value as u8);
-                }
-                other => bytes.push(other),
-            }
-        } else {
-            bytes.push(b[i]);
-            i += 1;
-        }
-    }
-    (String::from_utf8_lossy(&bytes).into_owned(), (i + 1).min(b.len()))
+/// The row of a module the link mints that only an `import` loads.
+fn imported_module(module: &str, shipment: &str, session: crate::manifest::LoadSession) -> LinkedModule {
+    LinkedModule { module: module.to_string(), shipment: Some(shipment.to_string()), session, when: None, settles: false }
 }
 
 /// One candidate scripts block, with the PTHS path the overlay must carry for it.
@@ -510,8 +365,7 @@ pub struct TargetBlock<'a> {
 /// Find a script's decompiled source under the corpus.
 ///
 /// Searched in `subfolders`, in order, then the stub directory. The `vz.wad` blocks pass
-/// [`VZ_SOURCE_DIRS`] and the `shell.wad` block [`SHELL_SOURCE_DIRS`]. On a miss, every path tried
-/// comes back.
+/// [`VZ_SOURCE_DIRS`]. On a miss, every path tried comes back.
 pub fn base_source_path(corpus_root: &Path, subfolders: &[&str], target: &str) -> Result<PathBuf, Vec<PathBuf>> {
     let mut tried = Vec::new();
     for sub in subfolders {
@@ -720,28 +574,6 @@ pub fn linked_source(
     Ok((out, contributors))
 }
 
-/// The `_tOutfits` row for one outfit, as source.
-///
-/// `_tOutfits` is a GLOBAL declared without `local`, so a mod never needs an AST edit — appending a
-/// `table.insert` after the base source is enough, and N of them union by plain concatenation. The
-/// row's three fields are three distinct strings: `Model` is the asset name `Player.SetOutfit`
-/// receives, `Name` is the unlock/tracking key, and `PlayerVisibleName` is what the wardrobe shows.
-///
-/// **Append only, never insert.** Index 2 is reserved for the unlock-code outfit, and a saved
-/// costume is a POSITION into this list — inserting would silently re-dress every existing player.
-pub fn outfit_row_append(wearer: &str, slug: &str, model: &str, display: &str) -> String {
-    // Normalize to the RUNTIME `_tOutfits` key — the game's third key is `jennifer`, so an outfit
-    // authored with the preferred `jen` must land there, not in an empty `_tOutfits.jen` the game
-    // never reads. An unknown wearer falls through as-written; M0140 already flags it.
-    let key = crate::manifest::wearer_table_key(wearer).unwrap_or(wearer);
-    format!(
-        "table.insert(_tOutfits.{key}, {{ Name = {}, Model = {}, PlayerVisibleName = {} }})\n",
-        lua_string(slug),
-        lua_string(model),
-        lua_string(display),
-    )
-}
-
 /// The `tUnlockStatus` table literal for a shop item: `{ <Fac> = 1, … }` when unlocked in every
 /// listed vendor, or `{}` when it should ship locked. Locked matters only in Eva's obscured shop
 /// (where a locked item is unbuyable); in the five faction shops a locked item is still purchasable.
@@ -762,10 +594,14 @@ pub fn shop_unlock_table(shops: &[crate::manifest::ShopVendor], unlocked: bool) 
 
 /// A SUPPORT-catalog row appended to `mrxsupportdata` for one shop item.
 ///
-/// Wrapped in `do … end` so the `local oSupport` is scoped per item and N appended rows never
-/// collide. `tSupportData` is a module-global, so a top-level append lands before `Init()`'s
-/// auto-name loop runs — the loop then picks the row up. The item key uses bracket form so an
-/// arbitrary author id is safe.
+/// Wrapped in a function called where it is defined, so the `local oSupport` is scoped per item and N
+/// appended rows never collide, and so the INFO globals count is computable: that model runs only the
+/// main function and takes every call to return nil, so `oSupport:SetCargo` on the result of
+/// `Create()` in the main function is "a method call on nil" to it
+/// ([`mercs2_formats::script_meta::count_globals`]); the row sets no global. The function inherits
+/// the module's environment, as any function the main function creates does. `tSupportData` is a
+/// module-global, so a top-level append lands before `Init()`'s auto-name loop runs — the loop then
+/// picks the row up. The item key uses bracket form so an arbitrary author id is safe.
 #[allow(clippy::too_many_arguments)]
 pub fn shop_support_row_append(
     id: &str,
@@ -782,7 +618,8 @@ pub fn shop_support_row_append(
     delivery_vehicle: Option<&str>,
 ) -> String {
     let mut b = String::new();
-    b.push_str("do\n");
+    // Inside `do`, the `(` cannot be read as a call on whatever the appended-to source ends with.
+    b.push_str("do (function()\n");
     b.push_str(&format!("  local oSupport = {module}:Create()\n"));
     if let Some(c) = cargo {
         b.push_str(&format!("  oSupport:SetCargo({})\n", lua_string(c)));
@@ -803,7 +640,7 @@ pub fn shop_support_row_append(
         lua_string(item_type),
         unlock_table,
     ));
-    b.push_str("end\n");
+    b.push_str("end)() end\n");
     b
 }
 
@@ -854,13 +691,14 @@ pub fn shop_reward_append(id: &str, field: &str, shops: &[crate::manifest::ShopV
 ///
 /// `import` resolves a module by `(hash of its name, script type 0x42498680)` through the typed-asset
 /// lookup, with no block or WAD in the key (`_SYS._IMPORT` = `FUN_005AE2D0`, decomp 219707-219760),
-/// so a script minted into any mounted block resolves. It lands in the block of its trampoline host
-/// `wifpmcinterior`, `scripts_vz`.
+/// so a script minted into any mounted block resolves. It lands in the block that carries
+/// `wifpmcinterior`, `scripts_vz`, beside every other script the link mints. qm's world entry
+/// (`world.scripts_loaded`) loads it as a library ([`crate::loader`]).
 pub const QM_MODLOADER_NAME: &str = "qm_modloader";
 
 /// The name of the front end's mod loader — a NEW script the linker mints into `shell.wad`'s
-/// scripts block ([`SHELL_SCRIPT_BLOCKS`]) beside its trampoline host `mrxsound`. It loads and
-/// unloads every front-end sound bank ([`qm_shell_modloader_source`]).
+/// scripts block ([`SHELL_SCRIPT_BLOCKS`]). qm's front-end entry (`shell.boot`) loads it as a library,
+/// and it loads and unloads every front-end sound bank ([`qm_shell_modloader_source`]).
 pub const QM_SHELL_MODLOADER_NAME: &str = "qm_shell_modloader";
 
 /// One `add_ui` registration, resolved to the movie the loader must show. The linker collects these
@@ -925,13 +763,28 @@ pub struct SupportRegistration {
 pub struct SoundBankRegistration {
     /// Which Shipment asked for it — the tie-break for the deterministic bake order.
     pub shipment: String,
-    /// The bank name `MrxSoundBanks` is given.
+    /// The bank name `MrxSoundBanks` is given; for a stream, the stream's name without `.pws`.
     pub bank: String,
-    /// Whether the soundbank is loaded as well as the wavebank.
-    pub soundbank: bool,
+    /// What the loader loads under that name.
+    pub load: SoundLoad,
     /// The sessions whose loader loads it: the gameplay loader ([`qm_modloader_source`]) and the
     /// front end's ([`qm_shell_modloader_source`]).
     pub sessions: BTreeSet<crate::manifest::LoadSession>,
+}
+
+/// What a [`SoundBankRegistration`] has its loader load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SoundLoad {
+    /// A bank qm ships: its wavebank, and its soundbank as well when `soundbank` (an `add_sound` bank).
+    Shipped { soundbank: bool },
+    /// The soundbank of a bank qm does not ship: the game's, or a level asset's (`load_sound`).
+    SoundBank,
+    /// The wavebank of a bank qm does not ship (`load_sound`).
+    WaveBank,
+    /// A stream file (`load_sound`), opened before any bank of the session loads, as retail opens its
+    /// own (`mrxsoundbanks.lua:89-108`): `<folder>\<audio dir>\<localized name>.pws`, under the alias
+    /// `<name>.pws`, and closed after the session's banks unload.
+    Stream { folder: String },
 }
 
 /// The registrations of `regs` that `session`'s loader loads, in load `order`, then by bank name.
@@ -945,60 +798,121 @@ fn session_sounds<'a>(
     Ok(out)
 }
 
-/// The `load_sounds` / `unload_sounds` functions of a loader whose state table is `table`: the ONE
-/// generator both loaders use.
+/// The hook subscriptions that load and unload `regs`' banks, at `load` and `unload`: the ONE
+/// generator both loaders use. Each bank's two handlers are subscribed under its Shipment's name, so a
+/// failure names the Shipment.
 ///
 /// Each bank is loaded with the calls retail makes for its own banks — the wavebank, then, for an
 /// `add_sound` bank, the soundbank (`mrxsoundbootstrap.lua:195-217`) — and unloaded with their
-/// mirrors, in `regs` order. `table.loaded[bank]` records a load, so a second `load_sounds` in one
-/// session loads nothing again and `unload_sounds` unloads only what was loaded. No callback is
-/// passed: `MrxSoundBanks` keeps ONE batch callback (`_funcBatchComplete`, `mrxsoundbanks.lua:10-36`)
-/// and a new one replaces the caller's, which for the front end is retail's `_StartShellMusic`.
-/// `MrxSoundBanks` reports no failure: `_FlagAssetOpComplete` takes no argument
-/// (`mrxsoundbanks.lua:141-152`) and the engine's callback carries no flag (`audio_code_map.md`
-/// §11.2), so a bank's presence is checked at build time
+/// mirrors, in `regs` order. `QM.sounds[bank]` records a load, so a second `load` in one session loads
+/// nothing again and `unload` unloads only what was loaded. No callback is passed: `MrxSoundBanks`
+/// keeps ONE batch callback (`_funcBatchComplete`, `mrxsoundbanks.lua:10-36`) and a new one replaces
+/// the caller's, which for the front end is retail's `_StartShellMusic`. `MrxSoundBanks` reports no
+/// failure: `_FlagAssetOpComplete` takes no argument (`mrxsoundbanks.lua:141-152`) and the engine's
+/// callback carries no flag (`audio_code_map.md` §11.2), so a bank's presence is checked at build time
 /// ([`crate::sound::check_loader_banks`]).
-fn sound_loader_functions(table: &str, regs: &[&SoundBankRegistration]) -> String {
-    let mut load = String::new();
-    let mut unload = String::new();
-    for r in regs {
-        let n = lua_string(&r.bank);
-        let owner = lua_string(&r.shipment);
-        let (sb_load, sb_unload) = if r.soundbank {
-            (format!("    MrxSoundBanks.LoadSoundBank({n})\n"), format!("    MrxSoundBanks.UnloadSoundBank({n})\n"))
-        } else {
-            (String::new(), String::new())
-        };
-        load.push_str(&format!(
-            "  -- {owner}\n  if not {table}.loaded[{n}] then\n    MrxSoundBanks.LoadWaveBank({n})\n{sb_load}    \
-             {table}.loaded[{n}] = true\n  end\n"
-        ));
-        unload.push_str(&format!(
-            "  -- {owner}\n  if {table}.loaded[{n}] then\n    MrxSoundBanks.UnloadWaveBank({n})\n{sb_unload}    \
-             {table}.loaded[{n}] = nil\n  end\n"
-        ));
+///
+/// A stream ([`SoundLoad::Stream`]) is opened before every bank and closed after every bank unloads, as
+/// retail opens its streams before it loads a bank (`mrxsoundbanks.lua:110-111`): its handlers are
+/// subscribed first for the load and last for the unload. The path is the one the DLC opens its own
+/// streams by (`dlctest01_soundbootstrap.lua:186-193`), with the folder in place of
+/// `Net.DLCGetMountPoint()`, the name localized by retail's `MrxSoundBanks._GetLocalizedName`.
+fn sound_subscriptions(load: &str, unload: &str, regs: &[&SoundBankRegistration]) -> String {
+    let (load, unload) = (lua_string(load), lua_string(unload));
+    let subscribe = |hook: &str, key: &str, test: &str, calls: &str, mark: &str, owner: &str| {
+        format!("QM.on({hook}, function()\n  if {test}QM.sounds[{key}] then\n{calls}    QM.sounds[{key}] = {mark}\n  end\nend, {owner})\n")
+    };
+    let streams: Vec<&&SoundBankRegistration> = regs.iter().filter(|r| matches!(r.load, SoundLoad::Stream { .. })).collect();
+    let banks: Vec<&&SoundBankRegistration> = regs.iter().filter(|r| !matches!(r.load, SoundLoad::Stream { .. })).collect();
+    let stream_path = |r: &SoundBankRegistration, folder: &str| {
+        format!(
+            "{} .. \"\\\\\" .. string.upper(Sound.GetAudioDir()) .. \"\\\\\" .. string.upper(MrxSoundBanks._GetLocalizedName({})) .. \".PWS\"",
+            lua_string(folder),
+            lua_string(&r.bank)
+        )
+    };
+    let mut out = String::new();
+    for r in &streams {
+        let SoundLoad::Stream { folder } = &r.load else { unreachable!("filtered on streams") };
+        let key = lua_string(&format!("{}.pws", r.bank));
+        let calls = format!(
+            "    Sound.OpenStreamFile({path}, {key})\n    print(\"[qm] sound: stream \" .. {key} .. \" opened from \" .. {path})\n",
+            path = stream_path(r, folder)
+        );
+        out.push_str(&subscribe(&load, &key, "not ", &calls, "true", &lua_string(&r.shipment)));
     }
-    format!(
-        "{table}.loaded = {table}.loaded or {{}}\n\
-         function {table}.load_sounds()\n{load}end\n\
-         function {table}.unload_sounds()\n{unload}end\n"
-    )
+    for r in &banks {
+        let n = lua_string(&r.bank);
+        let (key, on, off) = match &r.load {
+            SoundLoad::Shipped { soundbank } => {
+                let sb = |verb: &str| if *soundbank { format!("    MrxSoundBanks.{verb}SoundBank({n})\n") } else { String::new() };
+                (n.clone(), format!("    MrxSoundBanks.LoadWaveBank({n})\n{}", sb("Load")), format!("    MrxSoundBanks.UnloadWaveBank({n})\n{}", sb("Unload")))
+            }
+            SoundLoad::SoundBank => (
+                lua_string(&format!("soundbank {}", r.bank)),
+                format!("    MrxSoundBanks.LoadSoundBank({n})\n"),
+                format!("    MrxSoundBanks.UnloadSoundBank({n})\n"),
+            ),
+            SoundLoad::WaveBank => (
+                lua_string(&format!("wavebank {}", r.bank)),
+                format!("    MrxSoundBanks.LoadWaveBank({n})\n"),
+                format!("    MrxSoundBanks.UnloadWaveBank({n})\n"),
+            ),
+            SoundLoad::Stream { .. } => unreachable!("filtered out"),
+        };
+        let owner = lua_string(&r.shipment);
+        out.push_str(&subscribe(&load, &key, "not ", &on, "true", &owner));
+        out.push_str(&subscribe(&unload, &key, "", &off, "nil", &owner));
+    }
+    for r in &streams {
+        let SoundLoad::Stream { folder } = &r.load else { unreachable!("filtered on streams") };
+        let key = lua_string(&format!("{}.pws", r.bank));
+        let calls = format!(
+            "    Sound.CloseStreamFile({path}, {key})\n    print(\"[qm] sound: stream \" .. {key} .. \" closed\")\n",
+            path = stream_path(r, folder)
+        );
+        out.push_str(&subscribe(&unload, &key, "", &calls, "nil", &lua_string(&r.shipment)));
+    }
+    out
+}
+
+/// The `qm_modloader` library: every library [`crate::loader`] loads for qm itself in gameplay, when
+/// any UI, layer, support or gameplay sound registration needs it.
+pub fn qm_modloader_library() -> crate::loader::Library {
+    crate::loader::Library {
+        module: QM_MODLOADER_NAME.to_string(),
+        owner: crate::loader::QM_OWNER.to_string(),
+        when: "world.scripts_loaded".to_string(),
+        sessions: vec![crate::manifest::LoadSession::Gameplay],
+    }
+}
+
+/// The `qm_shell_modloader` library, when any registration loads a bank in the front end.
+pub fn qm_shell_modloader_library() -> crate::loader::Library {
+    crate::loader::Library {
+        module: QM_SHELL_MODLOADER_NAME.to_string(),
+        owner: crate::loader::QM_OWNER.to_string(),
+        when: "shell.boot".to_string(),
+        sessions: vec![crate::manifest::LoadSession::FrontEnd],
+    }
 }
 
 /// The whole `qm_modloader` script, baked from every UI, layer, support and gameplay sound
 /// registration.
 ///
-/// This is the "expandable load space": the game's scripts stay untouched but for the trampolines
-/// ([`qm_trampoline_append`], [`qm_sound_exit_append`]); everything a mod adds lives *here*, in a
-/// script Quartermaster owns and re-mints each link. It publishes its state as `_G._QM`, the way
-/// retail publishes a table other modules read (`_G.Hud = HudInterface`, `mrxguiinterface.lua:13`):
-/// a module's own globals live in its own environment, so the trampolines reach `_QM` through `_G`.
+/// This is the "expandable load space": everything a mod adds lives *here*, in a script Quartermaster
+/// owns and re-mints each link, and the game's scripts carry only qm's hooks. qm's world entry loads it
+/// as a library ([`qm_modloader_library`]); its body subscribes each registration to qm's hooks through
+/// `_G._QM` ([`crate::loader`]), under the Shipment that declared it, so a registration that fails
+/// stops the game naming its Shipment (the error policy).
 ///
-/// Sound banks load and unload through `_QM.load_sounds()` / `_QM.unload_sounds()`
-/// ([`sound_loader_functions`]), with each bank's state in `_QM.loaded`. `_OnEnter` calls
-/// `load_sounds` on every entry and the `ExitGame` trampoline calls `unload_sounds`. The UI, layer
-/// and support registrations run once, from `_QM.run()`: `_registered`/`_ran` guards make a
-/// re-import or a re-entered interior a no-op, and each of them runs under `pcall`.
+/// The UI, layer and support registrations run at `world.begin`, each once per VM (`QM.ran`, keyed by
+/// the Shipment and the registration, so two Shipments' registrations of one name both run). Sound
+/// banks load at `world.begin` and unload at `world.sound_exit`, after retail's own `UnloadBanks`
+/// ([`sound_subscriptions`]). Every module a registration calls is imported at the top, so it is a
+/// DEPS child of this script and loaded before it runs: `MrxGuiBase` for `MrxGuiBase.FlashWidget`
+/// (retail's own form, `mrxguipda.lua:802`), `MrxLayerManager`, `MrxSupportData`, `MrxRewardData`,
+/// `MrxSoundBanks`, and each support subclass.
 ///
 /// Registrations are baked in the resolved load `order` — the same order [`linked_source`] follows —
 /// and within one Shipment by movie / layer / id / bank, so one request bakes byte-identically
@@ -1011,90 +925,83 @@ pub fn qm_modloader_source(
     sounds: &[SoundBankRegistration],
     order: &[String],
 ) -> Result<String, LinkError> {
-    let mut inits = String::new();
+    let mut imports = String::new();
+    let mut subs = String::new();
+    let once = |key: &str, owner: &str, body: &str| {
+        format!(
+            "QM.on(\"world.begin\", function()\n  if QM.ran[{key}] then\n    return\n  end\n  QM.ran[{key}] = true\n{body}end, {owner})\n",
+            key = lua_string(key),
+            owner = lua_string(owner),
+        )
+    };
 
     let sounds = session_sounds(sounds, crate::manifest::LoadSession::Gameplay, order)?;
-    let sound_import = if sounds.is_empty() { "" } else { "import(\"MrxSoundBanks\")\n" };
-    let sound_fns = sound_loader_functions("_QM", &sounds);
+    if !sounds.is_empty() {
+        imports.push_str("import(\"MrxSoundBanks\")\n");
+    }
 
     let mut ordered: Vec<&UiRegistration> = regs.iter().collect();
     sort_by_order(&mut ordered, order, |r| r.shipment.as_str(), |r| r.movie.clone())?;
-
+    if !ordered.is_empty() {
+        imports.push_str("import(\"MrxGuiBase\")\n");
+    }
     for r in &ordered {
         let n = lua_string(&r.movie);
-        // The creation sequence — new → SetSwfFile → Play → SetVisible — is the proven one from
-        // decompiled mrxgui.lua (`loadingscreen_standalone`). Existence-checked so a stripped widget
-        // table degrades rather than errors; the handle is parked in `_QM.ui[name]` for the author.
-        inits.push_str(&format!(
-            "  -- {shipment}: {movie}\n  \
-             table.insert(_QM._inits, function()\n    \
-             local w = FlashWidget:new(); w:SetSwfFile({n})\n    \
-             if w.Play then w:Play() end\n    \
-             if w.SetVisible then w:SetVisible(true) end\n    \
-             _QM.ui[{n}] = w\n  \
-             end)\n",
-            shipment = r.shipment,
-            movie = r.movie,
+        // The creation sequence — new → SetSwfFile → Play → SetVisible — is the one from decompiled
+        // mrxgui.lua (`loadingscreen_standalone`); the handle is parked in `QM.ui[name]` for the author.
+        subs.push_str(&format!("-- {}: {}\n", r.shipment, r.movie));
+        subs.push_str(&once(
+            &format!("{} ui {}", r.shipment, r.movie),
+            &r.shipment,
+            &format!("  local w = MrxGuiBase.FlashWidget:new()\n  w:SetSwfFile({n})\n  w:Play()\n  w:SetVisible(true)\n  QM.ui[{n}] = w\n"),
         ));
     }
 
-    // Layer activations bake into the SAME `_QM._inits` list, so they run under the same once-guard
-    // and the same `pcall` as the UI widgets. Each is `MarkForRemoval`(old) then `MarkForAddition`
-    // (new) — the vanilla-contract order (remove pristine, add act) so the two never both apply.
-    // Ordered by load order, then `add`, for the byte-identical bake. `MarkForAddition`/
-    // `MarkForRemoval` are the immediate mark forms (no callback), existence-checked so a stripped
-    // table degrades.
+    // Each layer activation is `MarkForRemoval`(old) then `MarkForAddition`(new) — the vanilla-contract
+    // order (remove pristine, add act) so the two never both apply. The immediate mark forms (no
+    // callback), ordered by load order, then `add`.
     let mut ordered_layers: Vec<&LayerRegistration> = layers.iter().collect();
     sort_by_order(&mut ordered_layers, order, |r| r.shipment.as_str(), |r| r.add.clone())?;
+    if !ordered_layers.is_empty() {
+        imports.push_str("import(\"MrxLayerManager\")\n");
+    }
     for r in &ordered_layers {
-        let add = lua_string(&r.add);
         let mut body = String::new();
         for rem in &r.remove {
-            body.push_str(&format!(
-                "      if MrxLayerManager.MarkForRemoval then MrxLayerManager.MarkForRemoval({}) end\n",
-                lua_string(rem),
-            ));
+            body.push_str(&format!("  MrxLayerManager.MarkForRemoval({})\n", lua_string(rem)));
         }
-        body.push_str(&format!(
-            "      if MrxLayerManager.MarkForAddition then MrxLayerManager.MarkForAddition({add}) end\n"
-        ));
-        inits.push_str(&format!(
-            "  -- {shipment}: activate {layer}\n  \
-             table.insert(_QM._inits, function()\n    \
-             if MrxLayerManager then\n{body}    end\n  \
-             end)\n",
-            shipment = r.shipment,
-            layer = r.add,
-        ));
+        body.push_str(&format!("  MrxLayerManager.MarkForAddition({})\n", lua_string(&r.add)));
+        subs.push_str(&format!("-- {}: activate {}\n", r.shipment, r.add));
+        subs.push_str(&once(&format!("{} layer {}", r.shipment, r.add), &r.shipment, &body));
     }
 
-    // Novel-behaviour shop items bake into the SAME once-guarded, `pcall`-wrapped `_inits` list. Each
-    // imports its minted subclass, constructs `oSupport`, DEFERS the catalog + reward rows (the eager
-    // append can't — the module is nil at resident-load), re-applies the `SetSupportName` the
-    // `mrxsupportdata.Init` tail loop already ran without, and nulls the never-invalidated
-    // `gtAllSupport` cache so the next shop Open rebuilds with the new id. Ordered by load order,
-    // then `id`.
+    // Each novel-behaviour shop item constructs `oSupport` from its minted subclass, DEFERS the catalog
+    // + reward rows (the eager append can't — the module is nil at resident-load), re-applies the
+    // `SetSupportName` the `mrxsupportdata.Init` tail loop already ran without, applies the item's
+    // saved unlock status and stock (`_QM.saved`, which retail could not restore into a row that did
+    // not exist yet), and nulls the never-invalidated `gtAllSupport` cache so the next shop Open
+    // rebuilds with the new id. Ordered by load order, then `id`.
     let mut ordered_support: Vec<&SupportRegistration> = support.iter().collect();
     sort_by_order(&mut ordered_support, order, |r| r.shipment.as_str(), |r| r.id.clone())?;
+    if !ordered_support.is_empty() {
+        imports.push_str("import(\"MrxSupportData\")\nimport(\"MrxRewardData\")\n");
+    }
+    let mut imported: BTreeSet<&str> = BTreeSet::new();
     for r in &ordered_support {
+        if imported.insert(r.module.as_str()) {
+            imports.push_str(&format!("import({})\n", lua_string(&r.module)));
+        }
         let mut body = String::new();
-        body.push_str(&format!("    import({})\n", lua_string(&r.module)));
-        body.push_str(&format!("    local oSupport = {}:Create()\n", r.module));
+        body.push_str(&format!("  local oSupport = {}:Create()\n", r.module));
         if let Some(c) = &r.cargo {
-            body.push_str(&format!("    oSupport:SetCargo({})\n", lua_string(c)));
+            body.push_str(&format!("  oSupport:SetCargo({})\n", lua_string(c)));
         }
         if let Some(dv) = &r.delivery_vehicle {
-            body.push_str(&format!(
-                "    oSupport:SetDeliveryVehicle({})\n",
-                lua_string(dv)
-            ));
+            body.push_str(&format!("  oSupport:SetDeliveryVehicle({})\n", lua_string(dv)));
         }
+        body.push_str(&format!("  oSupport:SetSupportName({})\n", lua_string(&r.id)));
         body.push_str(&format!(
-            "    if oSupport.SetSupportName then oSupport:SetSupportName({}) end\n",
-            lua_string(&r.id)
-        ));
-        body.push_str(&format!(
-            "    MrxSupportData.tSupportData[{}] = {{ sName = {}, sDescription = {}, sIcon = {}, \
+            "  MrxSupportData.tSupportData[{}] = {{ sName = {}, sDescription = {}, sIcon = {}, \
              nMaxStock = {}, nCashCost = {}, nFuelCost = {}, oSupport = oSupport, sType = {}, \
              tUnlockStatus = {} }}\n",
             lua_string(&r.id),
@@ -1107,144 +1014,68 @@ pub fn qm_modloader_source(
             lua_string(&r.item_type),
             r.unlock_table,
         ));
+        // Retail restored the save's shop state during the world load, before this row existed; apply
+        // this item's the way MrxSupportData.LoadSingleton does (mrxsupportdata.lua:2452-2455).
+        body.push_str(&format!(
+            "  local tSaved = QM.saved and QM.saved.tSupportData and QM.saved.tSupportData[{id}]\n  \
+             if tSaved then\n    \
+             MrxSupportData.tSupportData[{id}].tUnlockStatus = tSaved.tUnlockStatus\n    \
+             MrxSupportData.tSupportData[{id}].nGlobalStock = tSaved.nGlobalStock\n  \
+             end\n",
+            id = lua_string(&r.id),
+        ));
         for fac in &r.shops {
             body.push_str(&format!(
-                "    MrxRewardData._tRewards[{}] = {{ sFactionId = {}, tSupport = {{ {{ {}, {} }} }} }}\n",
+                "  MrxRewardData._tRewards[{}] = {{ sFactionId = {}, tSupport = {{ {{ {}, {} }} }} }}\n",
                 lua_string(&format!("{}Reward_{}", r.id, fac)),
                 lua_string(fac),
                 lua_string(&r.id),
                 lua_string(fac),
             ));
         }
-        body.push_str("    MrxRewardData.gtAllSupport = nil\n");
-        inits.push_str(&format!(
-            "  -- {shipment}: shop ability {id} ({module})\n  \
-             table.insert(_QM._inits, function()\n    \
-             if MrxSupportData and MrxRewardData then\n{body}    end\n  \
-             end)\n",
-            shipment = r.shipment,
-            id = r.id,
-            module = r.module,
-        ));
+        body.push_str("  MrxRewardData.gtAllSupport = nil\n");
+        subs.push_str(&format!("-- {}: shop ability {} ({})\n", r.shipment, r.id, r.module));
+        subs.push_str(&once(&format!("{} support {}", r.shipment, r.id), &r.shipment, &body));
     }
+
+    subs.push_str(&sound_subscriptions("world.begin", "world.sound_exit", &sounds));
 
     Ok(format!(
         "-- {name} — Quartermaster's expandable mod load space (generated; do not hand-edit).\n\
          --\n\
-         -- The trampolines import this by name; it publishes _G._QM with load_sounds(), unload_sounds()\n\
-         -- and run(). Every modded registration lives here, so the game's scripts carry only the\n\
-         -- [Quartermaster] trampolines appended to wifpmcinterior and mrxsoundbootstrap.\n\
-         {sound_import}\
-         _G._QM = _G._QM or {{}}\n\
-         _QM.ui = _QM.ui or {{}}\n\
-         {sound_fns}\
-         if not _QM._registered then\n\
-         \x20 _QM._registered = true\n\
-         \x20 _QM._inits = {{}}\n\
-         {inits}\
-         \x20 function _QM.run()\n\
-         \x20   if _QM._ran then return end\n\
-         \x20   _QM._ran = true\n\
-         \x20   for _, f in ipairs(_QM._inits) do pcall(f) end\n\
-         \x20 end\n\
-         end\n",
+         -- qm's world entry loads this as a library. Its body subscribes every registration to qm's\n\
+         -- hooks through _G._QM, under the Shipment that declared it.\n\
+         {imports}\
+         local QM = _G._QM\n\
+         QM.ui = QM.ui or {{}}\n\
+         QM.sounds = QM.sounds or {{}}\n\
+         QM.ran = QM.ran or {{}}\n\
+         {subs}",
         name = QM_MODLOADER_NAME,
     ))
 }
 
 /// The whole `qm_shell_modloader` script: the front end's sound loader, baked from every
-/// registration whose sessions include the front end.
+/// registration whose sessions include the front end, in load `order`, then by bank name.
 ///
-/// It publishes `_G._QMS` with `load_sounds()` / `unload_sounds()` from the same generator the
-/// gameplay loader uses ([`sound_loader_functions`]), in load `order`, then by bank name. The
-/// trampoline appended to the front end's `mrxsound` ([`qm_shell_trampoline_append`]) calls them
-/// after retail's `EnterShellState` / `ExitShellState`. A contributor missing from `order` is
-/// [`LinkError::NotInOrder`].
+/// qm's front-end entry loads it as a library ([`qm_shell_modloader_library`]). Its body subscribes
+/// each bank to `shell.open`, after retail's `EnterShellState` loads the shell's own banks, and to
+/// `shell.sound_exit`, after retail's `ExitShellState` unloads them ([`sound_subscriptions`]). A
+/// contributor missing from `order` is [`LinkError::NotInOrder`].
 pub fn qm_shell_modloader_source(sounds: &[SoundBankRegistration], order: &[String]) -> Result<String, LinkError> {
     let sounds = session_sounds(sounds, crate::manifest::LoadSession::FrontEnd, order)?;
     Ok(format!(
         "-- {name} — Quartermaster's front-end sound loader (generated; do not hand-edit).\n\
          --\n\
-         -- The [Quartermaster] trampoline appended to MrxSound imports this by name and calls\n\
-         -- _QMS.load_sounds() after EnterShellState and _QMS.unload_sounds() after ExitShellState.\n\
+         -- qm's front-end entry loads this as a library. Its body subscribes each bank to qm's\n\
+         -- shell.open and shell.sound_exit hooks through _G._QM, under the Shipment that declared it.\n\
          import(\"MrxSoundBanks\")\n\
-         _G._QMS = _G._QMS or {{}}\n\
-         {fns}",
+         local QM = _G._QM\n\
+         QM.sounds = QM.sounds or {{}}\n\
+         {subs}",
         name = QM_SHELL_MODLOADER_NAME,
-        fns = sound_loader_functions("_QMS", &sounds),
+        subs = sound_subscriptions("shell.open", "shell.sound_exit", &sounds),
     ))
-}
-
-/// The trampoline appended to `wifpmcinterior`.
-///
-/// It wraps `_OnEnter` (the PMC-interior entry hook, `wifpmcinterior.lua:386`: GUI is fully up by
-/// then, it fires every session, and it is file-local so this concatenated append can wrap it — the
-/// same property the `_tOutfits` append relies on). The wrapper calls retail's `_OnEnter`, then
-/// synchronously `import`s `qm_modloader`, loads its sound banks (each once per session,
-/// `_QM.loaded`) and runs its other registrations once (`_QM.run`'s `_ran`). Nothing here grows as
-/// mods are added — new mods only enlarge `qm_modloader`.
-pub fn qm_trampoline_append() -> String {
-    format!(
-        "\n-- [Quartermaster] mod-loader trampoline. The expandable load space is {name}, imported by\n\
-         -- name; this is the only code wifpmcinterior carries.\n\
-         do\n\
-         \x20 local _qm_prev_OnEnter = _OnEnter\n\
-         \x20 _OnEnter = function(...)\n\
-         \x20   _qm_prev_OnEnter(...)\n\
-         \x20   import({name_lit})\n\
-         \x20   _QM.load_sounds()\n\
-         \x20   _QM.run()\n\
-         \x20 end\n\
-         end\n",
-        name = QM_MODLOADER_NAME,
-        name_lit = lua_string(QM_MODLOADER_NAME),
-    )
-}
-
-/// The trampoline appended to the gameplay `mrxsoundbootstrap` when any registration loads a bank in
-/// gameplay: `ExitGame` calls retail's (`UnloadBanks`, `mrxsoundbootstrap.lua:188-190`), then
-/// imports `qm_modloader` and unloads its banks. `vz`'s `ResetSingleton` calls
-/// `MrxSoundBootstrap.ExitGame()` on the way out of the game (`vz/xQ!L.lua:612`).
-pub fn qm_sound_exit_append() -> String {
-    format!(
-        "\n-- [Quartermaster] sound-unload trampoline into {name}.\n\
-         do\n\
-         \x20 local _qm_prev_ExitGame = ExitGame\n\
-         \x20 ExitGame = function(...)\n\
-         \x20   _qm_prev_ExitGame(...)\n\
-         \x20   import({name_lit})\n\
-         \x20   _QM.unload_sounds()\n\
-         \x20 end\n\
-         end\n",
-        name = QM_MODLOADER_NAME,
-        name_lit = lua_string(QM_MODLOADER_NAME),
-    )
-}
-
-/// The trampoline appended to the front end's `mrxsound`: `EnterShellState` and `ExitShellState`
-/// (`shell/mrxsound.lua:5-27`, called from `mrxguishell.lua:505` / `:589` and
-/// `mrxsoundshellbootstrap.lua:99`) each call retail's first, then import `qm_shell_modloader` and
-/// load or unload its banks.
-pub fn qm_shell_trampoline_append() -> String {
-    format!(
-        "\n-- [Quartermaster] front-end sound-loader trampoline into {name}.\n\
-         do\n\
-         \x20 local _qm_prev_EnterShellState = EnterShellState\n\
-         \x20 EnterShellState = function(...)\n\
-         \x20   _qm_prev_EnterShellState(...)\n\
-         \x20   import({name_lit})\n\
-         \x20   _QMS.load_sounds()\n\
-         \x20 end\n\
-         \x20 local _qm_prev_ExitShellState = ExitShellState\n\
-         \x20 ExitShellState = function(...)\n\
-         \x20   _qm_prev_ExitShellState(...)\n\
-         \x20   import({name_lit})\n\
-         \x20   _QMS.unload_sounds()\n\
-         \x20 end\n\
-         end\n",
-        name = QM_SHELL_MODLOADER_NAME,
-        name_lit = lua_string(QM_SHELL_MODLOADER_NAME),
-    )
 }
 
 /// A Lua string literal with quotes and backslashes escaped, so an author-supplied `display:`
@@ -1263,57 +1094,6 @@ fn lua_string(s: &str) -> String {
     }
     out.push('"');
     out
-}
-
-/// Source the Quartermaster appends ONCE per target, after every Shipment's contribution.
-///
-/// For the wardrobe this is the availability lift. `GetAvailableCostumes()` returns
-/// `_nAvailableCostumes or 1`, and the menu only offers entry `i` when the count is `>= i` — so an
-/// appended outfit is in the WAD, in the table, and **unreachable** unless the count grows too.
-///
-/// It is emitted here rather than by each Shipment precisely because "exactly once" is the
-/// property: two Shipments each hard-coding `shipped + 1` produce the same number, the later
-/// definition wins, and one outfit stays invisible. Deriving it from the final list length is the
-/// only form that survives N contributors.
-///
-/// Curated per target and empty by default, in the same fail-closed spirit as the merge classes.
-pub fn derived_epilogue(target: &str) -> Option<String> {
-    match target {
-        "wifpmcinterior" => Some(
-            "\n-- [Quartermaster] derived: the wardrobe gate is a COUNT, and the menu only offers\n\
-             -- entry i when it is >= i. Derived from the final list length so it is correct for\n\
-             -- any number of appended outfits.\n\
-             function GetAvailableCostumes()\n\
-             \x20 local n = 1\n\
-             \x20 for _, list in pairs(_tOutfits) do\n\
-             \x20   if #list > n then n = #list end\n\
-             \x20 end\n\
-             \x20 return n\n\
-             end\n"
-                .to_string(),
-        ),
-        _ => None,
-    }
-}
-
-/// Link every mutation into `block`, returning what changed.
-///
-/// `block` is the base game's `scripts_vz`, already parsed. Mutations targeting the same script are
-/// merged; mutations targeting different scripts are independent.
-///
-/// The single-block convenience case of [`link_into_blocks`]. `order` is the resolved load order of
-/// the contributing Shipments' names.
-pub fn link_into(
-    block: &mut ScriptsBlock,
-    corpus_root: &Path,
-    mutations: &[ScriptMutation],
-    order: &[String],
-) -> Result<LinkOutput, LinkError> {
-    let mut blocks = [TargetBlock {
-        path: String::new(),
-        block,
-    }];
-    link_into_blocks(&mut blocks, corpus_root, mutations, &[], &[], &[], &[], &[], &[], order)
 }
 
 /// Compile each target of `mutations` once, its base source (found under `subfolders`,
@@ -1352,10 +1132,7 @@ fn link_appends(
             })?;
         let block = &mut *blocks[bi].block;
         if spliced.contains(&crate::manifest::asset_hash(target)) {
-            let (mut source, contributors) = linked_source("", &group, order)?;
-            if let Some(epilogue) = derived_epilogue(target) {
-                source.push_str(&epilogue);
-            }
+            let (source, contributors) = linked_source("", &group, order)?;
             let fail = |message: String| LinkError::Compile { target: target.to_string(), message };
             // A level's script can keep a name of its own under a retail asset: `mrxplayer` is
             // `dlc01_player` in the DLC.
@@ -1386,12 +1163,7 @@ fn link_appends(
             message: format!("reading base source {}: {e}", source_path.display()),
         })?;
 
-        let (mut source, contributors) = linked_source(&base, &group, order)?;
-        // Emitted once, AFTER every Shipment's append — see `derived_epilogue`. Putting it here
-        // rather than in each Shipment is what makes "exactly once" structural.
-        if let Some(epilogue) = derived_epilogue(target) {
-            source.push_str(&epilogue);
-        }
+        let (source, contributors) = linked_source(&base, &group, order)?;
         // BARE chunk name — see the module note. `@name.lua` produces a chunk 5 bytes off retail.
         let bytecode = mercs2_luac::compile(&source, target).map_err(|e| LinkError::Compile {
             target: target.to_string(),
@@ -1414,55 +1186,332 @@ fn link_appends(
     Ok(linked)
 }
 
-/// Link the front end's sound loader into `shell.wad`'s scripts block ([`SHELL_SCRIPT_BLOCKS`]).
+/// Splice `tail` onto the script at `idx` of `block`, returning the new chunk's size. Nothing is
+/// recompiled from the corpus: the tail compiles on its own, under the host's INFO name, and runs at
+/// the end of the host's chunk ([`mercs2_luac::splice::append_chunk`]), after any Shipment append
+/// already linked into it.
 ///
-/// When any of `sound_regs` loads a bank in the front end, the trampoline
-/// ([`qm_shell_trampoline_append`]) is appended to `mrxsound` — its base source from the corpus's
-/// `shell/` ([`SHELL_SOURCE_DIRS`]) — and `qm_shell_modloader` ([`qm_shell_modloader_source`]) is
-/// minted into the same block, beside it. With no front-end registration, nothing is linked and the
-/// output is empty. Every touched block must still CSUM-verify.
+/// The host's main chunk must return only at its end, where the tail runs; an earlier `return` is
+/// [`LinkError::Hooks`], since the tail would not run on that path. Each function the tail wraps must
+/// be one the host's main chunk defines in that bytecode; one it does not define is [`LinkError::Hooks`]
+/// naming the hooks and the host, rather than a wrapper that fails on every boot. Both are read with
+/// [`mercs2_formats::script_meta::main_run`].
+fn splice_tail(block: &mut ScriptsBlock, idx: usize, tail: &crate::loader::Tail) -> Result<usize, LinkError> {
+    let fail_name = mercs2_formats::scripts_block::container_info(&block.entries[idx].bytes);
+    let name = fail_name.map_err(|message| LinkError::Splice { target: format!("script entry {idx}"), message })?.name;
+    let fail = |message: String| LinkError::Compile { target: name.clone(), message };
+    let base = block.extract_lua(idx).map_err(&fail)?;
+    let run = mercs2_formats::script_meta::main_run(&base)
+        .map_err(|e| LinkError::Hooks(format!("reading {name}'s main chunk, to splice qm's hooks onto it: {e}")))?;
+    if let Some(at) = run.early_return {
+        return Err(LinkError::Hooks(format!(
+            "{name}'s main chunk can return at instruction {at}, before its end, where qm's hooks run; \
+             a master or host script must not return from its top level"
+        )));
+    }
+    for (target, ids) in &tail.wraps {
+        if !run.functions.contains(target) {
+            return Err(LinkError::Hooks(format!(
+                "hook {} wraps {name}.{target}, and {name}'s main chunk defines no function {target}",
+                ids.join(", ")
+            )));
+        }
+    }
+    let appended = mercs2_luac::compile(&tail.source, &name).map_err(|e| fail(e.to_string()))?;
+    let bytecode = mercs2_luac::splice::append_chunk(&base, &appended, &name).map_err(|e| fail(e.to_string()))?;
+    block
+        .append_lua(idx, &bytecode, &appended)
+        .map_err(|e| LinkError::Splice { target: name.clone(), message: e })?;
+    Ok(bytecode.len())
+}
+
+/// Splice each `(host, tail)` of [`crate::loader::host_tails`] onto its host script, in whichever of
+/// `blocks` carries it first ([`splice_tail`]).
+pub fn splice_tails(blocks: &mut [TargetBlock<'_>], tails: &[(String, crate::loader::Tail)]) -> Result<Vec<LinkedScript>, LinkError> {
+    let mut linked = Vec::new();
+    for (host, tail) in tails {
+        let (bi, idx) = blocks
+            .iter()
+            .enumerate()
+            .find_map(|(bi, tb)| tb.block.find_script_by_name(host).map(|idx| (bi, idx)))
+            .ok_or_else(|| LinkError::UnknownScript { target: host.clone(), shipment: MODLOADER_CONTRIBUTOR.to_string() })?;
+        let bytecode_bytes = splice_tail(blocks[bi].block, idx, tail)?;
+        linked.push(LinkedScript {
+            target: host.clone(),
+            contributors: vec![MODLOADER_CONTRIBUTOR.to_string()],
+            base_source_bytes: 0,
+            linked_source_bytes: tail.source.len(),
+            bytecode_bytes,
+            block: bi,
+        });
+    }
+    Ok(linked)
+}
+
+/// The block index and entry index of the first script named `name` among `blocks`.
+fn find_script(blocks: &[TargetBlock<'_>], name: &str) -> Option<(usize, usize)> {
+    blocks.iter().enumerate().find_map(|(bi, tb)| tb.block.find_script_by_name(name).map(|idx| (bi, idx)))
+}
+
+/// Link the set's `outfits` into `level` ([`crate::outfits`]): read the level's retail lists from its
+/// wardrobe and player scripts as the link has them so far (every append and replacement applied),
+/// generate each hero's list in load `order`, and splice the tails onto the wardrobe, the player script
+/// and the master (a custom level's `master` block, else [`crate::hooks::MASTER_HOST`] in `blocks`).
+/// The heroes' own chatter sets are read from the worldentity of the resident block in `blocks` only when
+/// a row has one. A level the set adds no outfit to is left as it ships.
+fn link_outfits(
+    blocks: &mut [TargetBlock<'_>],
+    master: Option<&mut ScriptsBlock>,
+    level: &str,
+    outfits: &[crate::outfits::AddedOutfit],
+    order: &[String],
+) -> Result<Vec<LinkedScript>, LinkError> {
+    use crate::outfits::{WARDROBE_SCRIPT, PLAYER_SCRIPT};
+    if outfits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fail = |m: String| LinkError::Outfits(format!("{level}: {m}"));
+    let mut added: Vec<&crate::outfits::AddedOutfit> = outfits.iter().collect();
+    sort_by_order(&mut added, order, |a| a.shipment.as_str(), |_| ())?;
+    let added: Vec<crate::outfits::AddedOutfit> = added.into_iter().cloned().collect();
+    let chunk = |blocks: &[TargetBlock<'_>], name: &str| -> Result<Vec<u8>, LinkError> {
+        let (bi, idx) = find_script(blocks, name).ok_or_else(|| fail(format!("no {name} script in the blocks linked")))?;
+        blocks[bi].block.extract_lua(idx).map_err(|m| fail(format!("{name}: {m}")))
+    };
+    let retail = crate::outfits::RetailLevel::read(&chunk(blocks, WARDROBE_SCRIPT)?, &chunk(blocks, PLAYER_SCRIPT)?).map_err(&fail)?;
+    let lists = crate::outfits::generate(level, &retail, &added).map_err(&fail)?;
+    let hero_chatter = if lists.heroes.iter().any(|h| h.rows.iter().any(|r| r.chatter.is_some())) {
+        let (bi, idx) = blocks
+            .iter()
+            .enumerate()
+            .find_map(|(bi, tb)| crate::fx::worldentity_entry(tb.block).ok().map(|idx| (bi, idx)))
+            .ok_or_else(|| fail("no block linked holds the worldentity, which names the heroes' chatter sets".into()))?;
+        let we = mercs2_formats::worldentity::WorldEntity::parse(&blocks[bi].block.entries[idx].bytes)
+            .map_err(|m| fail(format!("the worldentity in {}: {m}", blocks[bi].path)))?;
+        Some(crate::outfits::hero_chatter(&we, &retail).map_err(&fail)?)
+    } else {
+        None
+    };
+    let Some(tails) = crate::outfits::tails(&lists, &retail, hero_chatter.as_ref()).map_err(&fail)? else {
+        return Ok(Vec::new());
+    };
+    let mut contributors: Vec<String> = Vec::new();
+    for a in &added {
+        if !contributors.contains(&a.shipment) {
+            contributors.push(a.shipment.clone());
+        }
+    }
+    let mut linked = Vec::new();
+    let mut on_block = |blocks: &mut [TargetBlock<'_>], host: &str, tail: &crate::loader::Tail| -> Result<(), LinkError> {
+        let (bi, idx) = find_script(blocks, host).ok_or_else(|| fail(format!("no {host} script in the blocks linked")))?;
+        let bytecode_bytes = splice_tail(blocks[bi].block, idx, tail)?;
+        linked.push(LinkedScript {
+            target: host.to_string(),
+            contributors: contributors.clone(),
+            base_source_bytes: 0,
+            linked_source_bytes: tail.source.len(),
+            bytecode_bytes,
+            block: bi,
+        });
+        Ok(())
+    };
+    on_block(blocks, WARDROBE_SCRIPT, &tails.wardrobe)?;
+    on_block(blocks, PLAYER_SCRIPT, &tails.player)?;
+    if let Some(briefing) = &tails.briefing {
+        on_block(blocks, crate::outfits::BRIEFING_SCRIPT, briefing)?;
+    }
+    match master {
+        Some(master) => {
+            splice_tail(master, 0, &tails.master)?;
+            master.verify_csums().map_err(|e| LinkError::Block(format!("CSUMs after splicing the level's master: {e}")))?;
+        }
+        None => on_block(blocks, crate::hooks::MASTER_HOST, &tails.master)?,
+    }
+    Ok(linked)
+}
+
+/// The libraries of `additions` that load in `session`, in load order.
+fn session_libraries(additions: &[ScriptAddition], session: crate::manifest::LoadSession, order: &[String]) -> Result<Vec<crate::loader::Library>, LinkError> {
+    let mut libs: Vec<&ScriptAddition> = additions.iter().filter(|a| a.load.as_ref().is_some_and(|l| l.sessions.contains(&session))).collect();
+    sort_by_order(&mut libs, order, |a| a.shipment.as_str(), |_| ())?;
+    Ok(libs
+        .into_iter()
+        .map(|a| {
+            let load = a.load.as_ref().expect("filtered on load");
+            crate::loader::Library { module: a.name.clone(), owner: a.shipment.clone(), when: load.when.clone(), sessions: vec![session] }
+        })
+        .collect())
+}
+
+/// Whether an `add_script` is minted into the blocks of `session`'s WAD: a library loads there, and a
+/// module with no `load:` is imported by gameplay code, as before `load:` existed.
+fn mints_in(a: &ScriptAddition, session: crate::manifest::LoadSession) -> bool {
+    match &a.load {
+        Some(l) => l.sessions.contains(&session),
+        None => session == crate::manifest::LoadSession::Gameplay,
+    }
+}
+
+/// Generate `session`'s host tails ([`crate::loader::generated_hooks`], [`crate::loader::host_tails`])
+/// for `libraries` and splice them onto `blocks` ([`splice_tails`]). In a custom level, `master` is the
+/// level's own master script, a block of that one entry, and the master's tail
+/// ([`crate::hooks::MASTER_HOST`]) goes onto it instead; it is not one of `blocks`, so it is not in the
+/// result.
+fn link_session_hooks(
+    blocks: &mut [TargetBlock<'_>],
+    libraries: &[crate::loader::Library],
+    session: crate::manifest::LoadSession,
+    master: Option<&mut ScriptsBlock>,
+) -> Result<Vec<LinkedScript>, LinkError> {
+    let hooks = crate::loader::generated_hooks(session, libraries).map_err(LinkError::Hooks)?;
+    let tails = crate::loader::host_tails(&hooks, libraries).map_err(LinkError::Hooks)?;
+    let mut tails: Vec<(String, crate::loader::Tail)> =
+        tails.into_iter().filter(|((s, _), _)| *s == session).map(|((_, host), t)| (host, t)).collect();
+    if let Some(master) = master {
+        if master.entries.len() != 1 {
+            return Err(LinkError::Block(format!("internal error: a level's master block holds {} entries, not 1", master.entries.len())));
+        }
+        if let Some(at) = tails.iter().position(|(h, _)| h == crate::hooks::MASTER_HOST) {
+            let (_, tail) = tails.remove(at);
+            splice_tail(master, 0, &tail)?;
+            master.verify_csums().map_err(|e| LinkError::Block(format!("CSUMs after splicing the level's master: {e}")))?;
+        }
+    }
+    splice_tails(blocks, &tails)
+}
+
+/// Link qm's front-end hooks and loader into `shell.wad`'s scripts block ([`SHELL_SCRIPT_BLOCKS`]), as
+/// `hooks` says.
+///
+/// Each `add_script` library that loads in the front end is minted into the block that carries
+/// `shellbootstrap`, in load order. When any of `sound_regs` loads a bank in the front end,
+/// `qm_shell_modloader` ([`qm_shell_modloader_source`]) is minted beside them and loads as qm's own
+/// library. Then the front end's hooks are spliced onto their hosts ([`link_session_hooks`]): the entry
+/// `shell.boot` onto `shellbootstrap`, which loads the libraries. Nothing is recompiled from the corpus.
+/// Every touched block must still CSUM-verify.
 pub fn link_front_end(
     blocks: &mut [TargetBlock<'_>],
-    corpus_root: &Path,
     sound_regs: &[SoundBankRegistration],
+    additions: &[ScriptAddition],
     order: &[String],
+    hooks: QmHooks,
 ) -> Result<LinkOutput, LinkError> {
-    let sounds = session_sounds(sound_regs, crate::manifest::LoadSession::FrontEnd, order)?;
-    if sounds.is_empty() {
-        return Ok(LinkOutput { scripts: Vec::new(), unresolved_imports: Vec::new() });
-    }
-    let trampoline = ScriptMutation {
-        shipment: MODLOADER_CONTRIBUTOR.into(),
-        target: "mrxsound".into(),
-        append: qm_shell_trampoline_append(),
+    let session = crate::manifest::LoadSession::FrontEnd;
+    let sounds = session_sounds(sound_regs, session, order)?;
+    let shipment_libraries = session_libraries(additions, session, order)?;
+    let splice = match hooks {
+        QmHooks::Always => true,
+        QmHooks::ForLibraries => !sounds.is_empty() || !shipment_libraries.is_empty(),
     };
-    let mut linked = link_appends(blocks, corpus_root, SHELL_SOURCE_DIRS, &[trampoline], order, &BTreeSet::new())?;
-    let bi = linked[0].block;
+    if !splice {
+        return Ok(LinkOutput { scripts: Vec::new(), findings: Vec::new(), modules: Vec::new() });
+    }
+    let before = deps_graph(blocks, None)?;
+    let bi = blocks
+        .iter()
+        .position(|tb| tb.block.find_script_by_name("shellbootstrap").is_some())
+        .ok_or_else(|| LinkError::UnknownScript { target: "shellbootstrap".to_string(), shipment: MODLOADER_CONTRIBUTOR.to_string() })?;
+    let mut linked = Vec::new();
+    let mut minted: Vec<&ScriptAddition> = additions.iter().filter(|a| mints_in(a, session)).collect();
+    sort_by_order(&mut minted, order, |a| a.shipment.as_str(), |_| ())?;
+    for a in minted {
+        refuse_taken(blocks, &a.name, &a.shipment)?;
+        let bytecode = mercs2_luac::compile(&a.source, &a.name).map_err(|e| LinkError::Compile { target: a.name.clone(), message: e.to_string() })?;
+        blocks[bi].block.add_script(&a.name, &bytecode).map_err(|m| LinkError::Splice { target: a.name.clone(), message: m })?;
+        linked.push(LinkedScript {
+            target: a.name.clone(),
+            contributors: vec![a.shipment.clone()],
+            base_source_bytes: 0,
+            linked_source_bytes: a.source.len(),
+            bytecode_bytes: bytecode.len(),
+            block: bi,
+        });
+    }
+    if !sounds.is_empty() {
+        let source = qm_shell_modloader_source(sound_regs, order)?;
+        refuse_taken(blocks, QM_SHELL_MODLOADER_NAME, MODLOADER_CONTRIBUTOR)?;
+        let bytecode = mercs2_luac::compile(&source, QM_SHELL_MODLOADER_NAME).map_err(|e| LinkError::Compile {
+            target: QM_SHELL_MODLOADER_NAME.to_string(),
+            message: e.to_string(),
+        })?;
+        blocks[bi].block.add_script(QM_SHELL_MODLOADER_NAME, &bytecode).map_err(|m| LinkError::Splice {
+            target: QM_SHELL_MODLOADER_NAME.to_string(),
+            message: m,
+        })?;
+        let mut names: Vec<&String> = sounds.iter().map(|r| &r.shipment).collect();
+        names.dedup();
+        linked.push(LinkedScript {
+            target: QM_SHELL_MODLOADER_NAME.to_string(),
+            contributors: names.into_iter().cloned().collect(),
+            base_source_bytes: 0,
+            linked_source_bytes: source.len(),
+            bytecode_bytes: bytecode.len(),
+            block: bi,
+        });
+    }
+    // qm's own loader loads first.
+    let qm = (!sounds.is_empty()).then(qm_shell_modloader_library);
+    let libraries: Vec<crate::loader::Library> = qm.iter().chain(&shipment_libraries).cloned().collect();
+    linked.extend(link_session_hooks(blocks, &libraries, session, None)?);
+    for b in linked.iter().map(|l| l.block).collect::<BTreeSet<_>>() {
+        blocks[b]
+            .block
+            .verify_csums()
+            .map_err(|e| LinkError::Block(format!("CSUMs after linking {}: {e}", blocks[b].path)))?;
+    }
+    // Every module minted here is a library (`mints_in`), so the libraries are every row.
+    let modules = library_modules(session, qm.as_ref(), &shipment_libraries)?;
+    let sources: Vec<crate::imports::Source<'_>> = additions
+        .iter()
+        .filter(|a| mints_in(a, session))
+        .map(|a| crate::imports::Source { shipment: &a.shipment, what: format!("add_script {}", a.name), script: &a.name, source: &a.source })
+        .collect();
+    let findings = import_findings(blocks, None, FRONT_END_ROOTS, &before, &sources, &[], &linked)?;
+    Ok(LinkOutput { scripts: linked, findings, modules })
+}
 
-    let source = qm_shell_modloader_source(sound_regs, order)?;
-    let bytecode = mercs2_luac::compile(&source, QM_SHELL_MODLOADER_NAME).map_err(|e| LinkError::Compile {
-        target: QM_SHELL_MODLOADER_NAME.to_string(),
-        message: e.to_string(),
-    })?;
-    blocks[bi].block.add_script(QM_SHELL_MODLOADER_NAME, &bytecode).map_err(|m| LinkError::Splice {
-        target: QM_SHELL_MODLOADER_NAME.to_string(),
-        message: m,
-    })?;
-    let mut names: Vec<&String> = sounds.iter().map(|r| &r.shipment).collect();
-    names.dedup();
-    linked.push(LinkedScript {
-        target: QM_SHELL_MODLOADER_NAME.to_string(),
-        contributors: names.into_iter().cloned().collect(),
-        base_source_bytes: 0,
-        linked_source_bytes: source.len(),
-        bytecode_bytes: bytecode.len(),
-        block: bi,
-    });
-    blocks[bi]
-        .block
-        .verify_csums()
-        .map_err(|e| LinkError::Block(format!("CSUMs after linking {}: {e}", blocks[bi].path)))?;
-    Ok(LinkOutput { scripts: linked, unresolved_imports: Vec::new() })
+/// The DEPS graph of every script of `blocks` and of a level's own `master` block
+/// ([`crate::imports::DepsGraph`]).
+fn deps_graph(blocks: &[TargetBlock<'_>], master: Option<&ScriptsBlock>) -> Result<crate::imports::DepsGraph, LinkError> {
+    crate::imports::DepsGraph::of(blocks.iter().map(|tb| &*tb.block).chain(master)).map_err(LinkError::Block)
+}
+
+/// The script a level's link loads first: a custom level's own master (its `master` block's one
+/// entry), else the catalogue's master ([`crate::hooks::MASTER_HOST`]).
+fn level_master(master: Option<&ScriptsBlock>) -> Result<String, LinkError> {
+    let Some(m) = master else { return Ok(crate::hooks::MASTER_HOST.to_string()) };
+    match m.entries.as_slice() {
+        [e] => mercs2_formats::scripts_block::container_info(&e.bytes)
+            .map(|i| i.name)
+            .map_err(|e| LinkError::Block(format!("the level's master: INFO: {e}"))),
+        other => Err(LinkError::Block(format!("internal error: a level's master block holds {} entries, not 1", other.len()))),
+    }
+}
+
+/// The import findings ([`crate::imports::check`]) of a link of `blocks` (and a level's `master`)
+/// that the engine loads from `roots`, started from `before`, put `sources` into scripts, minted
+/// `import_only` with no `load:`, and produced `linked`.
+fn import_findings(
+    blocks: &[TargetBlock<'_>],
+    master: Option<&ScriptsBlock>,
+    roots: &[&str],
+    before: &crate::imports::DepsGraph,
+    sources: &[crate::imports::Source<'_>],
+    import_only: &[(&str, &str)],
+    linked: &[LinkedScript],
+) -> Result<Vec<crate::imports::ImportFinding>, LinkError> {
+    let after = deps_graph(blocks, master)?;
+    let mut contributors: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    for l in linked {
+        let names = contributors.entry(mercs2_formats::hash::pandemic_hash_m2(&l.target)).or_default();
+        for c in &l.contributors {
+            if !names.contains(c) {
+                names.push(c.clone());
+            }
+        }
+    }
+    crate::imports::check(&crate::imports::LinkChecks { before, after: &after, roots, sources, import_only, contributors: &contributors })
+        .map_err(|message| LinkError::Compile { target: "the import checks".into(), message })
 }
 
 /// Refuse minting a script named `name` when a script of ANY of `blocks` already carries it
@@ -1496,9 +1545,9 @@ fn refuse_taken(blocks: &[TargetBlock<'_>], name: &str, shipment: &str) -> Resul
 /// contributor missing from it is [`LinkError::NotInOrder`].
 ///
 /// Once everything is linked and minted, every Shipment-authored Lua source — `patch_lua` appends,
-/// `add_script` modules, `replace_lua` sources and support modules — is scanned for literal
-/// `import("x")` calls ([`literal_imports`]); the ones nothing provides come back as
-/// [`LinkOutput::unresolved_imports`] (M0209). They are warnings: they never fail the link.
+/// `add_script` modules, `replace_lua` sources and support modules — goes through the import checks
+/// ([`crate::imports::check`]: M0209, M0313, M0314), which come back as [`LinkOutput::findings`];
+/// the caller decides what each refuses.
 pub fn link_into_blocks(
     blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
@@ -1523,10 +1572,30 @@ pub fn link_into_blocks(
         replacements,
         order,
         &BTreeSet::new(),
+        QmHooks::Always,
+        None,
+        crate::outfits::DEFAULT_LEVEL,
+        &[],
     )
 }
 
-/// [`link_into_blocks`] over a level's blocks, in which the scripts of `spliced` are the level's own.
+/// Whether a link splices qm's hooks and library loader ([`crate::loader`]) onto their hosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QmHooks {
+    /// The deploy link of the installed set ([`link_into_blocks`]), and each custom level's link:
+    /// always, mods or no mods (W-a), so every hook's entry line prints in every installed game.
+    Always,
+    /// A standalone build of one Shipment: only when it needs qm's loader (a library, or a registration
+    /// `qm_modloader` carries), so its overlay claims no block it does not otherwise touch. The deploy
+    /// link generates the hooks for the installed set.
+    ForLibraries,
+}
+
+/// [`link_into_blocks`] over a level's blocks, in which the scripts of `spliced` are the level's own,
+/// splicing qm's hooks as `hooks` says. In a custom level, `master` is the level's own master script,
+/// a block of that one entry, which takes the master's hooks ([`crate::hooks::MASTER_HOST`]).
+/// `level` names the level, and `outfits` are the set's added outfits, linked after the hooks
+/// ([`link_outfits`]); the ones that do not join `level` are left out by the generator.
 pub fn link_into_level_blocks(
     blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
@@ -1539,33 +1608,23 @@ pub fn link_into_level_blocks(
     replacements: &[ScriptReplacement],
     order: &[String],
     spliced: &BTreeSet<u32>,
+    hooks: QmHooks,
+    mut master: Option<&mut ScriptsBlock>,
+    level: &str,
+    outfits: &[crate::outfits::AddedOutfit],
 ) -> Result<LinkOutput, LinkError> {
+    let session = crate::manifest::LoadSession::Gameplay;
+    let root = level_master(master.as_deref())?;
     // Anything that lives in the load space — a UI widget, a layer activation, a novel support
-    // behaviour or a sound bank to load in gameplay — needs the loader minted and the
-    // `wifpmcinterior` trampoline installed.
-    let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
+    // behaviour or a sound bank to load in gameplay — needs `qm_modloader`, minted after the base
+    // scripts link (below) and loaded by qm's world entry.
+    let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&session));
     let needs_loader = !ui_regs.is_empty() || !layer_regs.is_empty() || !support_regs.is_empty() || gameplay_sounds;
-    // Fold the mod-loader trampoline in as a synthetic `wifpmcinterior` mutation when any load-space
-    // mod registered — ONE trampoline regardless of how many, so the host never grows with mod
-    // count; and, when a bank loads in gameplay, the unload trampoline into `mrxsoundbootstrap`. The
-    // expandable part is `qm_modloader`, minted after the base scripts link (below).
-    let mut all_mutations: Vec<ScriptMutation> = mutations.to_vec();
-    if needs_loader {
-        all_mutations.push(ScriptMutation {
-            shipment: MODLOADER_CONTRIBUTOR.into(),
-            target: "wifpmcinterior".into(),
-            append: qm_trampoline_append(),
-        });
-    }
-    if gameplay_sounds {
-        all_mutations.push(ScriptMutation {
-            shipment: MODLOADER_CONTRIBUTOR.into(),
-            target: "mrxsoundbootstrap".into(),
-            append: qm_sound_exit_append(),
-        });
-    }
 
-    let mut linked = link_appends(blocks, corpus_root, VZ_SOURCE_DIRS, &all_mutations, order, spliced)?;
+    let before = deps_graph(blocks, master.as_deref())?;
+    let mut linked = link_appends(blocks, corpus_root, VZ_SOURCE_DIRS, mutations, order, spliced)?;
+    // The modules minted below that only an `import` loads, in mint order.
+    let mut imported: Vec<LinkedModule> = Vec::new();
 
     // Apply each `replace_lua` wholesale swap. Same asset hash, new bytecode -- every existing
     // `import(<target>)` call site now returns the new module without rebinding. Applied in load
@@ -1603,20 +1662,21 @@ pub fn link_into_level_blocks(
         });
     }
 
-    // Mint each first-class `add_script` addition. Each one becomes a fresh entry in the
-    // `scripts_vz` block with its own primary type-35 ASET row (via `script_patch_blocks`' new-entry
-    // branch), so the engine's `import` / `dynamic_import` locates it the same way any shipped
-    // script is located. Lives in the `wifpmcinterior`-carrying block beside `qm_modloader`, which
-    // keeps every minted script in one discoverable place.
-    if !additions.is_empty() {
+    // Mint each first-class `add_script` addition that gameplay loads or imports ([`mints_in`]). Each
+    // one becomes a fresh entry in the `scripts_vz` block with its own primary type-35 ASET row (via
+    // `script_patch_blocks`' new-entry branch), so the engine's `import` / `dynamic_import` locates it
+    // the same way any shipped script is located. Lives in the `wifpmcinterior`-carrying block beside
+    // `qm_modloader`, which keeps every minted script in one discoverable place.
+    let gameplay_additions: Vec<&ScriptAddition> = additions.iter().filter(|a| mints_in(a, session)).collect();
+    if !gameplay_additions.is_empty() {
         let bi = blocks
             .iter()
             .position(|tb| tb.block.find_script_by_name("wifpmcinterior").is_some())
             .ok_or_else(|| LinkError::UnknownScript {
                 target: "wifpmcinterior".to_string(),
-                shipment: additions[0].shipment.clone(),
+                shipment: gameplay_additions[0].shipment.clone(),
             })?;
-        let mut additions: Vec<&ScriptAddition> = additions.iter().collect();
+        let mut additions = gameplay_additions;
         sort_by_order(&mut additions, order, |a| a.shipment.as_str(), |_| ())?;
         for a in additions {
             refuse_taken(blocks, &a.name, &a.shipment)?;
@@ -1640,12 +1700,15 @@ pub fn link_into_level_blocks(
                 bytecode_bytes: bytecode.len(),
                 block: bi,
             });
+            if a.load.is_none() {
+                imported.push(imported_module(&a.name, &a.shipment, session));
+            }
         }
     }
 
     // Mint the mod loader. It is a NEW `scripts_vz` script — `add_script` appends its container and
     // (via `script_patch_blocks`' new-entry branch) its primary type-35 ASET row, the two halves the
-    // DLC's own recipe ships. It goes in the block carrying its trampoline host `wifpmcinterior`.
+    // DLC's own recipe ships. It goes in the block carrying `wifpmcinterior`, beside the additions.
     if needs_loader {
         let bi = blocks
             .iter()
@@ -1655,8 +1718,9 @@ pub fn link_into_level_blocks(
                 shipment: MODLOADER_CONTRIBUTOR.to_string(),
             })?;
 
-        // Mint each NOVEL support subclass as its own new `scripts_vz` script, so the loader can
-        // `import` it by name at `_OnEnter`. Same `add_script` mechanism as `qm_modloader` below.
+        // Mint each NOVEL support subclass as its own new `scripts_vz` script, which the loader
+        // imports, so it is a DEPS child the engine loads first. Same `add_script` mechanism as
+        // `qm_modloader` below.
         // Two items of one Shipment sharing one subclass and one source mint it once; one module
         // from two Shipments, or from two sources, is refused rather than one source dropped.
         let mut minted: std::collections::BTreeMap<u32, &SupportRegistration> = std::collections::BTreeMap::new();
@@ -1696,6 +1760,8 @@ pub fn link_into_level_blocks(
                 bytecode_bytes: bytecode.len(),
                 block: bi,
             });
+            // `qm_modloader` imports it.
+            imported.push(imported_module(&r.module, &r.shipment, session));
         }
 
         let source = qm_modloader_source(ui_regs, layer_regs, support_regs, sound_regs, order)?;
@@ -1739,6 +1805,24 @@ pub fn link_into_level_blocks(
         });
     }
 
+    // qm's own hooks and the library loader: spliced last, so they run at the end of each host, after
+    // every Shipment append already linked into it. qm's own library loads first.
+    let shipment_libraries = session_libraries(additions, session, order)?;
+    let qm = needs_loader.then(qm_modloader_library);
+    let libraries: Vec<crate::loader::Library> = qm.iter().chain(&shipment_libraries).cloned().collect();
+    let splice = match hooks {
+        QmHooks::Always => true,
+        QmHooks::ForLibraries => !libraries.is_empty(),
+    };
+    if splice {
+        linked.extend(link_session_hooks(blocks, &libraries, session, master.as_deref_mut())?);
+    }
+    // The outfits after the hooks: their wrappers go around whatever the hooks wrapped.
+    linked.extend(link_outfits(blocks, master.as_deref_mut(), level, outfits, order)?);
+    // With no splice, `libraries` is empty: nothing is loaded at a hook.
+    let mut modules = library_modules(session, qm.as_ref(), &shipment_libraries)?;
+    modules.extend(imported);
+
     // Every block we touched must still verify. `replace_lua` recomputes each container's CSUM, so
     // a failure here means the block itself was left inconsistent.
     for bi in linked.iter().map(|l| l.block).collect::<std::collections::BTreeSet<_>>() {
@@ -1748,41 +1832,30 @@ pub fn link_into_level_blocks(
             .map_err(|e| LinkError::Block(format!("CSUMs after linking {}: {e}", blocks[bi].path)))?;
     }
 
-    // M0209. Checked only now, when every addition, support module and `qm_modloader` has been
-    // minted into the blocks, so "a script by that name is in a loaded block" covers all of them.
-    let mut sources: Vec<(&str, String, &str)> = Vec::new();
+    // The import checks, only now, when every addition, support module and `qm_modloader` has been
+    // minted into the blocks.
+    use crate::imports::Source;
+    let mut sources: Vec<Source<'_>> = Vec::new();
     for m in mutations {
-        sources.push((&m.shipment, format!("patch_lua append to {}", m.target), &m.append));
+        sources.push(Source { shipment: &m.shipment, what: format!("patch_lua append to {}", m.target), script: &m.target, source: &m.append });
     }
-    for a in additions {
-        sources.push((&a.shipment, format!("add_script {}", a.name), &a.source));
+    for a in additions.iter().filter(|a| mints_in(a, session)) {
+        sources.push(Source { shipment: &a.shipment, what: format!("add_script {}", a.name), script: &a.name, source: &a.source });
     }
     for r in replacements {
-        sources.push((&r.shipment, format!("replace_lua {}", r.target), &r.source));
+        sources.push(Source { shipment: &r.shipment, what: format!("replace_lua {}", r.target), script: &r.target, source: &r.source });
     }
     for r in support_regs {
-        sources.push((&r.shipment, format!("support module {}", r.module), &r.source));
+        sources.push(Source { shipment: &r.shipment, what: format!("support module {}", r.module), script: &r.module, source: &r.source });
     }
-    let mut unresolved_imports: Vec<UnresolvedImport> = Vec::new();
-    for (shipment, what, source) in sources {
-        for module in literal_imports(source) {
-            let provided = module == QM_MODLOADER_NAME
-                || blocks
-                    .iter()
-                    .any(|tb| tb.block.find_script_by_name(&module).is_some());
-            let entry = UnresolvedImport {
-                shipment: shipment.to_string(),
-                module,
-                source: what.clone(),
-            };
-            if !provided && !unresolved_imports.contains(&entry) {
-                unresolved_imports.push(entry);
-            }
-        }
-    }
+    let import_only: Vec<(&str, &str)> =
+        additions.iter().filter(|a| a.load.is_none() && mints_in(a, session)).map(|a| (a.name.as_str(), a.shipment.as_str())).collect();
+    let findings =
+        import_findings(blocks, master.as_deref(), &[WORLD_BOOT_ROOT, root.as_str()], &before, &sources, &import_only, &linked)?;
     Ok(LinkOutput {
         scripts: linked,
-        unresolved_imports,
+        findings,
+        modules,
     })
 }
 
@@ -1790,55 +1863,12 @@ pub fn link_into_level_blocks(
 mod tests {
     use super::*;
 
-    /// The literal forms are found; comments, strings, fields, methods, definitions and the
-    /// documented-unchecked forms are not.
-    #[test]
-    fn literal_imports_finds_only_literal_calls_to_the_global_import() {
-        let src = r#"
-local a = import("ess")
-local b = import ( 'ess_names' )
--- import("in_a_line_comment")
---[[ import("in_a_long_comment") ]]
---[==[ import("in_a_level_2_comment") ]]==]
-local s = "import(\"in_a_string\")"
-local l = [[ import("in_a_long_string") ]]
-local c = t.import("a_field")
-local d = t:import("a_method")
-function import(name) return name end
-local e = dynamic_import("dynamic")
-local f = import(name)
-local g = import("a" .. suffix)
-local h = import "no_parens"
-local i = import("esc\097ped")
-"#;
-        assert_eq!(literal_imports(src), vec!["ess", "ess_names", "escaped"]);
-    }
-
-    #[test]
-    fn literal_imports_survives_numbers_and_operators() {
-        let src = "x = 1e-5 + 0x1F .. import('after_concat') ... y = .5; z = a..import(\"b\")\n";
-        assert_eq!(literal_imports(src), vec!["after_concat", "b"]);
-    }
-
     fn mutation(shipment: &str, target: &str, append: &str) -> ScriptMutation {
         ScriptMutation {
             shipment: shipment.into(),
             target: target.into(),
             append: append.into(),
         }
-    }
-
-    /// ★ The preferred spelling `jen` must reach the RUNTIME key `jennifer`, or the outfit appends
-    /// to a `_tOutfits.jen` the game never reads. This is the whole reason the split exists.
-    #[test]
-    fn jen_appends_to_the_jennifer_table() {
-        let row = outfit_row_append("jen", "MyFit", "pmc_hum_jen", "[X]");
-        assert!(row.contains("_tOutfits.jennifer"), "jen must normalize to jennifer: {row}");
-        assert!(!row.contains("_tOutfits.jen,"), "must not emit the empty jen table: {row}");
-        // The literal runtime key still works, and mattias/chris pass straight through.
-        assert!(outfit_row_append("jennifer", "F", "m", "d").contains("_tOutfits.jennifer"));
-        assert!(outfit_row_append("mattias", "F", "m", "d").contains("_tOutfits.mattias"));
-        assert!(outfit_row_append("chris", "F", "m", "d").contains("_tOutfits.chris"));
     }
 
     fn names(list: &[&str]) -> Vec<String> {
@@ -1949,7 +1979,7 @@ local i = import("esc\097ped")
         }
     }
 
-    /// The synthetic trampoline is not a Shipment: it is never in `order`, and it goes last.
+    /// qm's own contributor is not a Shipment: it is never in `order`, and it goes last.
     #[test]
     fn the_modloader_contributor_sorts_last() {
         let t = mutation(MODLOADER_CONTRIBUTOR, "s", "-- T\n");
@@ -1966,10 +1996,10 @@ local i = import("esc\097ped")
         }
     }
 
-    /// The loader defines the global the trampoline depends on, exposes `run`, and enrols each
-    /// movie's FlashWidget under the proven creation sequence.
+    /// The loader reaches qm's dispatcher through `_G._QM` and subscribes each movie's FlashWidget to
+    /// `world.begin` under its own Shipment, once per VM, with nothing swallowing an error.
     #[test]
-    fn the_mod_loader_defines_qm_and_registers_each_movie() {
+    fn the_mod_loader_subscribes_each_movie_under_its_shipment() {
         let src = qm_modloader_source(
             &[reg("mod-a", "my_hud"), reg("mod-b", "my_map")],
             &[],
@@ -1978,16 +2008,29 @@ local i = import("esc\097ped")
             &names(&["mod-a", "mod-b"]),
         )
         .unwrap();
-        assert!(src.contains("_G._QM = _G._QM or {}"), "must publish the _QM global: {src}");
-        assert!(src.contains("function _QM.run()"), "must expose run(): {src}");
-        // Each movie enrols via the loadingscreen_standalone sequence.
-        for movie in ["my_hud", "my_map"] {
+        assert!(src.contains("local QM = _G._QM\n"), "reaches the dispatcher through _G: {src}");
+        assert!(src.contains("import(\"MrxGuiBase\")\n"), "imports the module FlashWidget is in: {src}");
+        for (shipment, movie) in [("mod-a", "my_hud"), ("mod-b", "my_map")] {
             assert!(src.contains(&format!("w:SetSwfFile(\"{movie}\")")), "missing {movie}: {src}");
+            assert!(src.contains(&format!("if QM.ran[\"{shipment} ui {movie}\"] then")), "once per VM: {src}");
+            assert!(src.contains(&format!("QM.ui[\"{movie}\"] = w\nend, \"{shipment}\")")), "owned by {shipment}: {src}");
         }
-        assert_eq!(src.matches("FlashWidget:new()").count(), 2, "one widget per movie: {src}");
-        // Guarded so a re-import or a re-entered interior is a no-op, and one bad movie is contained.
-        assert!(src.contains("if _QM._ran then return end"), "run must be once-only: {src}");
-        assert!(src.contains("pcall(f)"), "each init must be fail-soft: {src}");
+        assert_eq!(src.matches("MrxGuiBase.FlashWidget:new()").count(), 2, "one widget per movie: {src}");
+        assert!(!src.contains("pcall") && !src.contains("if w."), "no error is swallowed: {src}");
+        mercs2_luac::compile(&src, QM_MODLOADER_NAME).expect("the loader compiles");
+    }
+
+    /// The loader is qm's own library, loaded at the world entry, named for the error policy as qm.
+    #[test]
+    fn the_loaders_are_qm_s_own_libraries_at_the_session_entries() {
+        let gameplay = qm_modloader_library();
+        assert_eq!((gameplay.module.as_str(), gameplay.owner.as_str(), gameplay.when.as_str()), (QM_MODLOADER_NAME, crate::loader::QM_OWNER, "world.scripts_loaded"));
+        let front = qm_shell_modloader_library();
+        assert_eq!((front.module.as_str(), front.owner.as_str(), front.when.as_str()), (QM_SHELL_MODLOADER_NAME, crate::loader::QM_OWNER, "shell.boot"));
+        let hooks = crate::loader::generated_hooks(LoadSession::Gameplay, std::slice::from_ref(&gameplay)).unwrap();
+        let tails = crate::loader::host_tails(&hooks, &[gameplay]).unwrap();
+        let vz = &tails[&(LoadSession::Gameplay, "vz".to_string())].source;
+        assert!(vz.find("QM.fire(\"world.scripts_loaded\")").unwrap() < vz.find("QM.load(\"qm_modloader\", \"Quartermaster\", true)").unwrap(), "{vz}");
     }
 
     /// Same registrations and order, same bytes, whatever order the registrations arrive in.
@@ -2039,8 +2082,8 @@ local i = import("esc\097ped")
         }
     }
 
-    /// A layer activation bakes MarkForRemoval(old) then MarkForAddition(new) into the same guarded,
-    /// pcall-wrapped `_QM._inits` list the UI widgets use — the vanilla contract order.
+    /// A layer activation subscribes MarkForRemoval(old) then MarkForAddition(new) to `world.begin`
+    /// under its Shipment, like the UI widgets — the vanilla contract order.
     #[test]
     fn the_mod_loader_marks_layers_for_addition_and_removal() {
         let src = qm_modloader_source(
@@ -2051,7 +2094,7 @@ local i = import("esc\097ped")
             &names(&["act-mod"]),
         )
         .unwrap();
-        assert!(src.contains("_G._QM = _G._QM or {}"), "must still publish the _QM global: {src}");
+        assert!(src.contains("import(\"MrxLayerManager\")\n"), "imports what it calls: {src}");
         assert!(
             src.contains("MrxLayerManager.MarkForAddition(\"vz_state_pmccon004_destroyed\")"),
             "must add the new layer: {src}"
@@ -2065,9 +2108,9 @@ local i = import("esc\097ped")
             src.find("MarkForRemoval").unwrap() < src.find("MarkForAddition").unwrap(),
             "removal must be baked before addition: {src}"
         );
-        // Guarded and fail-soft like the widgets.
-        assert!(src.contains("if MrxLayerManager then"), "existence-checked: {src}");
-        assert!(src.contains("pcall(f)"), "runs under the shared pcall: {src}");
+        assert!(src.contains("if QM.ran[\"act-mod layer vz_state_pmccon004_destroyed\"] then"), "once per VM: {src}");
+        assert!(src.contains("end, \"act-mod\")"), "owned by its Shipment: {src}");
+        assert!(!src.contains("pcall") && !src.contains("if MrxLayerManager"), "no error is swallowed: {src}");
     }
 
     /// UI and layer registrations coexist in one loader, and one order bakes byte-identically
@@ -2115,7 +2158,7 @@ local i = import("esc\097ped")
         SoundBankRegistration {
             shipment: shipment.into(),
             bank: bank.into(),
-            soundbank,
+            load: SoundLoad::Shipped { soundbank },
             sessions: sessions.iter().copied().collect(),
         }
     }
@@ -2126,10 +2169,42 @@ local i = import("esc\097ped")
 
     use crate::manifest::LoadSession;
 
-    /// The gameplay loader's `load_sounds` loads each bank as the retail load calls (the wavebank,
+    /// A `load_sound`: the stream opens before any bank loads, from its level's folder by the DLC's own
+    /// path, and closes after every bank unloads; the soundbank and the wavebank load alone, each by its
+    /// own name, and unload with their mirrors.
+    #[test]
+    fn a_load_sound_opens_its_stream_first_and_closes_it_last() {
+        let load = |bank: &str, load: SoundLoad| SoundBankRegistration {
+            shipment: "biua".into(),
+            bank: bank.into(),
+            load,
+            sessions: [LoadSession::Gameplay].into(),
+        };
+        let regs = [
+            load("vo_resident_DLCTest", SoundLoad::SoundBank),
+            load("vo_stream_DLCTest", SoundLoad::WaveBank),
+            load("vo_stream_DLCTest", SoundLoad::Stream { folder: "DLC\\dlc01".into() }),
+            sound("a-mod", "a_sounds", true),
+        ];
+        let src = qm_modloader_source(&[], &[], &[], &regs, &names(&["biua", "a-mod"])).unwrap();
+        let at = |needle: &str| src.find(needle).unwrap_or_else(|| panic!("{needle} missing: {src}"));
+        let open = at("Sound.OpenStreamFile(\"DLC\\\\dlc01\" .. \"\\\\\" .. string.upper(Sound.GetAudioDir()) .. \"\\\\\" .. \
+                       string.upper(MrxSoundBanks._GetLocalizedName(\"vo_stream_DLCTest\")) .. \".PWS\", \"vo_stream_DLCTest.pws\")");
+        let close = at("Sound.CloseStreamFile(");
+        assert!(open < at("MrxSoundBanks.LoadWaveBank(\"vo_stream_DLCTest\")") && open < at("LoadWaveBank(\"a_sounds\")"), "{src}");
+        assert!(close > at("UnloadSoundBank(\"vo_resident_DLCTest\")") && close > at("UnloadWaveBank(\"a_sounds\")"), "{src}");
+        assert!(!src.contains("LoadSoundBank(\"vo_stream_DLCTest\")") && !src.contains("LoadWaveBank(\"vo_resident_DLCTest\")"), "{src}");
+        assert!(src.contains("QM.sounds[\"soundbank vo_resident_DLCTest\"]") && src.contains("QM.sounds[\"vo_stream_DLCTest.pws\"]"), "{src}");
+        assert_eq!((src.matches("OpenStreamFile(").count(), src.matches("CloseStreamFile(").count()), (1, 1));
+        if let Err(e) = mercs2_luac::compile(&src, "qm_modloader") {
+            panic!("the loader does not compile: {e}\n{src}");
+        }
+    }
+
+    /// The gameplay loader loads each bank at `world.begin` as the retail load calls (the wavebank,
     /// then, for an added bank, its soundbank) in load order then bank name, whatever order the
-    /// registrations arrive in; `unload_sounds` mirrors it; a bank name is escaped like any other;
-    /// and a front-end registration is not in it.
+    /// registrations arrive in; it unloads each at `world.sound_exit` with the mirrors; a bank name is
+    /// escaped like any other; and a front-end registration is not in it.
     #[test]
     fn the_mod_loader_loads_gameplay_sound_banks_in_load_order() {
         let order = names(&["ess", "b-mod", "a-mod"]);
@@ -2157,8 +2232,12 @@ local i = import("esc\097ped")
         assert_eq!(src.matches(".LoadSoundBank(").count(), 3);
         assert_eq!(src.matches(".UnloadSoundBank(").count(), 3);
         assert!(!src.contains("menu_only"), "a front-end bank is the front end's: {src}");
-        assert!(at("function _QM.load_sounds()") < at("_QM._inits = {}"), "sounds are outside the once-run inits");
-        assert!(src.contains("_QM.loaded[\"b_bank\"] = true"), "per-bank load state: {src}");
+        assert!(
+            src.contains("QM.on(\"world.begin\", function()\n  if not QM.sounds[\"b_bank\"] then\n    MrxSoundBanks.LoadWaveBank(\"b_bank\")"),
+            "a bank loads at world.begin, outside the once-per-VM guard: {src}"
+        );
+        assert!(src.contains("QM.on(\"world.sound_exit\", function()\n  if QM.sounds[\"b_bank\"] then"), "{src}");
+        assert!(src.contains("QM.sounds[\"b_bank\"] = true\n  end\nend, \"b-mod\")"), "per-bank load state, owned by its Shipment: {src}");
         assert!(!src.contains("if MrxSoundBanks"), "no existence check on the sound path: {src}");
         assert!(src.starts_with("-- ") && src.contains("\nimport(\"MrxSoundBanks\")\n"), "imports what it calls: {src}");
 
@@ -2168,8 +2247,8 @@ local i = import("esc\097ped")
         assert!(!evil.contains("\nos.exit()"), "a Shipment name cannot break out of its comment: {evil}");
     }
 
-    /// Both loaders' sound functions come from ONE generator: the front end's are the gameplay
-    /// loader's with the state table renamed, for the same registrations.
+    /// Both loaders' sound subscriptions come from ONE generator: the front end's are the gameplay
+    /// loader's at the front end's hooks, for the same registrations.
     #[test]
     fn both_loaders_share_one_sound_generator() {
         let both = [LoadSession::Gameplay, LoadSession::FrontEnd];
@@ -2177,18 +2256,15 @@ local i = import("esc\097ped")
         let order = names(&["a"]);
         let gameplay = qm_modloader_source(&[], &[], &[], &regs, &order).unwrap();
         let front = qm_shell_modloader_source(&regs, &order).unwrap();
-        let body = |src: &str, table: &str| -> String {
-            let start = src.find(&format!("{table}.loaded = ")).expect("the generated functions");
-            let end = src[start..].find("\nend\nfunction").map(|i| start + i).expect("load_sounds ends");
-            let rest = &src[end + 1..];
-            let unload_end = rest.find("\nend\n").expect("unload_sounds ends");
-            format!("{}{}", &src[start..end + 1], &rest[..unload_end + 5]).replace(table, "T")
+        let body = |src: &str, load: &str, unload: &str| -> String {
+            let start = src.find("QM.on(").expect("the subscriptions");
+            src[start..].replace(&format!("\"{load}\""), "LOAD").replace(&format!("\"{unload}\""), "UNLOAD")
         };
-        assert_eq!(body(&gameplay, "_QM"), body(&front, "_QMS"));
+        assert_eq!(body(&gameplay, "world.begin", "world.sound_exit"), body(&front, "shell.open", "shell.sound_exit"));
     }
 
-    /// The front-end loader: `_G._QMS` with the front-end banks only, in load order then bank name;
-    /// it imports `MrxSoundBanks` and carries no `pcall` and no existence check.
+    /// The front-end loader: the front-end banks only, in load order then bank name, through
+    /// `_G._QM`; it imports `MrxSoundBanks` and carries no `pcall` and no existence check.
     #[test]
     fn the_front_end_loader_loads_front_end_banks_only() {
         let order = names(&["z-first", "a-second"]);
@@ -2203,17 +2279,21 @@ local i = import("esc\097ped")
         assert!(at("LoadWaveBank(\"aa\")") < at("LoadWaveBank(\"zz\")"));
         assert!(at("LoadWaveBank(\"zz\")") < at("LoadWaveBank(\"qm_a-second_ui_shell\")"));
         assert!(!src.contains("gameplay_only"), "{src}");
-        assert!(src.contains("_G._QMS = _G._QMS or {}"), "{src}");
+        assert!(src.contains("local QM = _G._QM\n"), "{src}");
         assert!(src.contains("import(\"MrxSoundBanks\")"), "{src}");
-        assert!(!src.contains("pcall") && !src.contains("if MrxSoundBanks") && !src.contains("if _QMS then"), "{src}");
+        assert!(!src.contains("pcall") && !src.contains("if MrxSoundBanks"), "{src}");
         mercs2_luac::compile(&src, QM_SHELL_MODLOADER_NAME).expect("the front-end loader compiles");
         assert!(matches!(qm_shell_modloader_source(&regs, &names(&["z-first"])), Err(LinkError::NotInOrder { .. })));
     }
 
     /// A Lua VM with the module system retail's `_SYS._IMPORT` implements: each module runs in its
-    /// own environment (`__index` → `_G`), and `import(m)` loads it once and binds it in the
-    /// caller's environment. `MrxSoundBanks` records every call in the global `calls`, as does each
-    /// host script's retail function. `sources` maps a module name to its source.
+    /// own environment (`__index` → `_G`), `import(m)` loads it once and binds it in the caller's
+    /// environment, and `_G._MODULES` holds every loaded module. `dynamic_import(m, cb)` runs `m` and
+    /// calls `cb(env)` when `__dyn` is `"run"`, calls `cb(nil)` when it is `"nil"`, never calls back
+    /// when it is `"never"`, and queues the request for `__answer()` when it is `"defer"`. `print`,
+    /// `MrxSoundBanks` and each host script's retail function
+    /// record every call in the global `calls`; `Pg.LoadIsRetry()` returns `__retry`;
+    /// `Sys.RequestGameState` records its state. `sources` maps a module name to its source.
     fn module_vm(sources: &[(&str, String)]) -> mercs2_luac::rt::Lua {
         let lua = mercs2_luac::rt::Lua::new().expect("a Lua VM");
         let t = lua.create_table().unwrap();
@@ -2224,26 +2304,107 @@ local i = import("esc\097ped")
         lua.load(
             r#"
 calls = {}
-local loaded = {}
-function import(name)
-  local m = loaded[name]
+_MODULES = {}
+__dyn = "run"
+__retry = false
+function print(s) table.insert(calls, s) end
+Pg = { LoadIsRetry = function() return __retry end }
+Event = { ScriptEvent = "ScriptEvent", GameStateChange = "GameStateChange", CreatePersistent = function() end }
+Sys = { RequestGameState = function(s) table.insert(calls, "RequestGameState " .. s) end }
+local function load(name)
+  local m = _MODULES[name]
   if not m then
     local src = __sources[name]
     if not src then error("import: no module " .. name) end
     m = setmetatable({}, { __index = _G })
-    loaded[name] = m
+    _MODULES[name] = m
     local f = assert(loadstring(src, name))
     setfenv(f, m)
     f()
   end
+  return m
+end
+function import(name)
+  local m = load(name)
   getfenv(2)[name] = m
   return m
+end
+__pending = {}
+function dynamic_import(name, cb)
+  if __dyn == "run" then
+    cb(load(name))
+  elseif __dyn == "nil" then
+    cb(nil)
+  elseif __dyn == "defer" then
+    table.insert(__pending, { name, cb })
+  end
+  return true
+end
+function __answer()
+  local p = __pending
+  __pending = {}
+  for i = 1, #p do
+    p[i][2](load(p[i][1]))
+  end
 end
 "#,
         )
         .exec()
         .expect("the module system");
         lua
+    }
+
+    /// Each host script of `session` as qm's link leaves it, by host, over the hooks a link generates
+    /// ([`crate::loader::generated_hooks`]) for `libraries`: `retail` (the functions a test gives the
+    /// host, by host), then an empty function for each other function the tail wraps, then the tail.
+    fn session_hosts(session: LoadSession, libraries: &[crate::loader::Library], retail: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let hooks = crate::loader::generated_hooks(session, libraries).unwrap();
+        crate::loader::host_tails(&hooks, libraries)
+            .unwrap()
+            .into_iter()
+            .filter(|((s, _), _)| *s == session)
+            .map(|((_, host), t)| {
+                let own = retail.iter().find(|(h, _)| *h == host).map(|(_, src)| *src).unwrap_or("");
+                let mut src = own.to_string();
+                for (target, _) in &t.wraps {
+                    if !own.contains(&format!("function {target}(")) {
+                        src.push_str(&format!("function {target}() end\n"));
+                    }
+                }
+                src.push_str(&t.source);
+                (host, src)
+            })
+            .collect()
+    }
+
+    const GUI_BASE: &str = r#"
+FlashWidget = {}
+function FlashWidget:new() return setmetatable({}, { __index = FlashWidget }) end
+function FlashWidget:SetSwfFile(n) table.insert(calls, "SetSwfFile " .. n) end
+function FlashWidget:Play() table.insert(calls, "Play") end
+function FlashWidget:SetVisible(v) table.insert(calls, "SetVisible " .. tostring(v)) end
+"#;
+
+    /// A gameplay session: the retail hosts with qm's tails spliced on, `qm_modloader` as `source`,
+    /// and the retail modules it imports.
+    fn gameplay_vm(source: String, extra: &[(&str, String)]) -> mercs2_luac::rt::Lua {
+        let hosts = session_hosts(
+            LoadSession::Gameplay,
+            &[qm_modloader_library()],
+            &[
+                ("vz", "function _StartPlayerVisibleGameplay() table.insert(calls, \"retail start\") end\n"),
+                ("mrxsoundbootstrap", "function ExitGame() table.insert(calls, \"retail ExitGame\") end\n"),
+            ],
+        );
+        let mut sources = vec![
+            ("vz", hosts["vz"].clone()),
+            ("mrxsoundbootstrap", hosts["mrxsoundbootstrap"].clone()),
+            ("MrxSoundBanks", BANKS.to_string()),
+            ("MrxGuiBase", GUI_BASE.to_string()),
+            (QM_MODLOADER_NAME, source),
+        ];
+        sources.extend(extra.iter().cloned());
+        module_vm(&sources)
     }
 
     const BANKS: &str = r#"
@@ -2258,101 +2419,301 @@ function UnloadSoundBank(n, cb) table.insert(calls, "UnloadSoundBank " .. n .. (
         t.sequence_values::<String>().map(|v| v.unwrap()).collect()
     }
 
-    /// ★ The front-end trampoline, run: `EnterShellState` and `ExitShellState` each call retail's
-    /// first, then load or unload the front-end banks in order, each bank once per load; a second
-    /// `EnterShellState` loads nothing again, a second `ExitShellState` unloads nothing, and the
-    /// next `EnterShellState` loads again. No callback is passed, so retail's batch callback stands.
+    /// ★ The front end, run: `shell.boot` loads `qm_shell_modloader`; each `shell.open` (after retail's
+    /// `EnterShellState`) loads the front-end banks in order, each bank once per load, and each
+    /// `shell.sound_exit` (after retail's `ExitShellState`) unloads what was loaded; a second open
+    /// loads nothing again, a second exit unloads nothing, and the next open loads again. Every hook
+    /// prints its entry line. No callback is passed, so retail's batch callback stands.
     #[test]
-    fn the_front_end_trampoline_wraps_and_chains_both_functions() {
+    fn the_front_end_loads_its_banks_at_each_shell_open_and_unloads_them_after_each_sound_exit() {
         let order = names(&["a", "b"]);
         let regs = [
             sound_in("b", "qm_b_ui_hud", false, &[LoadSession::FrontEnd]),
             sound_in("a", "added", true, &[LoadSession::FrontEnd]),
         ];
-        let host = format!(
-            "function EnterShellState() table.insert(calls, \"retail EnterShellState\") end\n\
-             function ExitShellState() table.insert(calls, \"retail ExitShellState\") end\n{}",
-            qm_shell_trampoline_append()
+        let hosts = session_hosts(
+            LoadSession::FrontEnd,
+            &[qm_shell_modloader_library()],
+            &[(
+                "mrxsound",
+                "function EnterShellState() table.insert(calls, \"retail EnterShellState\") end\n\
+                 function ExitShellState() table.insert(calls, \"retail ExitShellState\") end\n",
+            )],
         );
         let lua = module_vm(&[
-            ("MrxSound", host),
+            ("mrxsound", hosts["mrxsound"].clone()),
+            ("shellbootstrap", hosts["shellbootstrap"].clone()),
             ("MrxSoundBanks", BANKS.to_string()),
             (QM_SHELL_MODLOADER_NAME, qm_shell_modloader_source(&regs, &order).unwrap()),
         ]);
         lua.load(
-            "import(\"MrxSound\")\nMrxSound.EnterShellState()\nMrxSound.EnterShellState()\n\
-             MrxSound.ExitShellState()\nMrxSound.ExitShellState()\nMrxSound.EnterShellState()\n",
+            "import(\"mrxsound\")\nimport(\"shellbootstrap\")\nmrxsound.EnterShellState()\nmrxsound.EnterShellState()\n\
+             mrxsound.ExitShellState()\nmrxsound.ExitShellState()\nmrxsound.EnterShellState()\n",
         )
         .exec()
         .expect("the front end runs");
         assert_eq!(
             calls(&lua),
             [
+                "[qm] hook shell.boot: enter",
+                "[qm] library qm_shell_modloader: ready",
                 "retail EnterShellState",
+                "[qm] hook shell.open: enter",
                 "LoadWaveBank added",
                 "LoadSoundBank added",
                 "LoadWaveBank qm_b_ui_hud",
                 "retail EnterShellState",
+                "[qm] hook shell.open: enter",
                 "retail ExitShellState",
+                "[qm] hook shell.sound_exit: enter",
                 "UnloadWaveBank added",
                 "UnloadSoundBank added",
                 "UnloadWaveBank qm_b_ui_hud",
                 "retail ExitShellState",
+                "[qm] hook shell.sound_exit: enter",
                 "retail EnterShellState",
+                "[qm] hook shell.open: enter",
                 "LoadWaveBank added",
                 "LoadSoundBank added",
                 "LoadWaveBank qm_b_ui_hud",
             ]
         );
-        let t = qm_shell_trampoline_append();
-        assert!(!t.contains("pcall") && !t.contains("if "), "no guard in the trampoline: {t}");
     }
 
-    /// ★ The gameplay trampolines, run: `_OnEnter` calls retail's, then loads the gameplay banks on
-    /// every entry — each bank once — and runs the once-only registrations; `ExitGame` calls
-    /// retail's, then unloads what was loaded. `_QM` reaches the trampolines through `_G`, from
-    /// modules that each run in their own environment.
+    /// ★ A gameplay session, run: the world entry loads `qm_modloader`; `world.begin` (after retail's
+    /// `_StartPlayerVisibleGameplay`, not on a retry, when the same wrapper dispatches `world.retry`)
+    /// runs each registration once per VM and loads the banks; `world.sound_exit` (after retail's
+    /// `ExitGame`) unloads them. `_QM` reaches every host
+    /// through `_G`, from modules that each run in their own environment.
     #[test]
-    fn the_gameplay_trampolines_load_on_enter_and_unload_after_exit_game() {
+    fn a_gameplay_session_loads_at_world_begin_and_unloads_after_exit_game() {
         let regs = [sound("a", "qm_a_ui_hud", false), sound("a", "added", true)];
-        let interior = format!(
-            "function _OnEnter(n) table.insert(calls, \"retail _OnEnter \" .. n) end\n\
-             function Enter(n) _OnEnter(n) end\n{}",
-            qm_trampoline_append()
-        );
-        let bootstrap = format!(
-            "function ExitGame() table.insert(calls, \"retail ExitGame\") end\n{}",
-            qm_sound_exit_append()
-        );
-        let lua = module_vm(&[
-            ("WifPmcInterior", interior),
-            ("MrxSoundBootstrap", bootstrap),
-            ("MrxSoundBanks", BANKS.to_string()),
-            (QM_MODLOADER_NAME, qm_modloader_source(&[], &[], &[], &regs, &names(&["a"])).unwrap()),
-        ]);
+        let lua = gameplay_vm(qm_modloader_source(&[reg("a", "my_hud")], &[], &[], &regs, &names(&["a"])).unwrap(), &[]);
         lua.load(
-            "import(\"WifPmcInterior\")\nimport(\"MrxSoundBootstrap\")\nWifPmcInterior.Enter(1)\n\
-             WifPmcInterior.Enter(2)\nMrxSoundBootstrap.ExitGame()\n",
+            "import(\"mrxsoundbootstrap\")\nimport(\"vz\")\nvz._StartPlayerVisibleGameplay()\n\
+             __retry = true\nvz._StartPlayerVisibleGameplay()\n__retry = false\nvz._StartPlayerVisibleGameplay()\n\
+             mrxsoundbootstrap.ExitGame()\n",
         )
         .exec()
         .expect("the session runs");
         assert_eq!(
             calls(&lua),
             [
-                "retail _OnEnter 1",
+                "[qm] hook world.scripts_loaded: enter",
+                "[qm] library qm_modloader: ready",
+                "retail start",
+                "[qm] hook world.begin: enter",
+                "SetSwfFile my_hud",
+                "Play",
+                "SetVisible true",
                 "LoadWaveBank added",
                 "LoadSoundBank added",
                 "LoadWaveBank qm_a_ui_hud",
-                "retail _OnEnter 2",
+                "retail start",
+                "[qm] hook world.retry: enter",
+                "retail start",
+                "[qm] hook world.begin: enter",
                 "retail ExitGame",
+                "[qm] hook world.sound_exit: enter",
                 "UnloadWaveBank added",
                 "UnloadSoundBank added",
                 "UnloadWaveBank qm_a_ui_hud",
             ]
         );
-        for t in [qm_trampoline_append(), qm_sound_exit_append()] {
-            assert!(!t.contains("pcall") && !t.contains("if "), "no guard in a trampoline: {t}");
-        }
+    }
+
+    /// ★ Two Shipments activating one layer, each superseding a different one, both run: each
+    /// registration's once-guard is its own Shipment's, so the second's `MarkForRemoval` is not dropped.
+    #[test]
+    fn two_shipments_activating_one_layer_both_run() {
+        let manager = "function MarkForRemoval(n) table.insert(calls, \"remove \" .. n) end\n\
+                       function MarkForAddition(n) table.insert(calls, \"add \" .. n) end\n"
+            .to_string();
+        let src = qm_modloader_source(
+            &[],
+            &[layer("a-mod", "act_layer", &["pristine_a"]), layer("b-mod", "act_layer", &["pristine_b"])],
+            &[],
+            &[],
+            &names(&["a-mod", "b-mod"]),
+        )
+        .unwrap();
+        let lua = gameplay_vm(src, &[("MrxLayerManager", manager)]);
+        lua.load("import(\"mrxsoundbootstrap\")\nimport(\"vz\")\nvz._StartPlayerVisibleGameplay()\nvz._StartPlayerVisibleGameplay()\n")
+            .exec()
+            .expect("runs");
+        let marks: Vec<String> = calls(&lua).into_iter().filter(|c| c.starts_with("add ") || c.starts_with("remove ")).collect();
+        assert_eq!(marks, ["remove pristine_a", "add act_layer", "remove pristine_b", "add act_layer"], "each once, both Shipments");
+    }
+
+    /// ★ The order seen live on 2026-11-07, loading a save into an HQ: `hq.enter` requests its library
+    /// 9 ms before `world.begin`, and `dynamic_import` answers after `world.begin`. Only the entry's
+    /// libraries are checked at the settle hook, so this is not a failure, and the late library comes up
+    /// when the engine answers.
+    #[test]
+    fn a_library_requested_just_before_the_settle_hook_is_not_a_failure() {
+        let late = crate::loader::Library {
+            module: "qm_gate_hq".into(),
+            owner: "gate".into(),
+            when: "hq.enter".into(),
+            sessions: vec![LoadSession::Gameplay],
+        };
+        let hosts = session_hosts(
+            LoadSession::Gameplay,
+            &[late],
+            &[
+                ("vz", "function _StartPlayerVisibleGameplay() table.insert(calls, \"retail start\") end\n"),
+                ("mrxhq", "function GlobalEnter(bPmc) table.insert(calls, \"retail GlobalEnter\") end\n"),
+            ],
+        );
+        let lua = module_vm(&[
+            ("vz", hosts["vz"].clone()),
+            ("mrxhq", hosts["mrxhq"].clone()),
+            ("mrxsoundbootstrap", hosts["mrxsoundbootstrap"].clone()),
+            ("qm_gate_hq", "print(\"[gate] qm_gate_hq: body ran\")\n".to_string()),
+        ]);
+        lua.load(
+            "import(\"mrxsoundbootstrap\")\nimport(\"mrxhq\")\nimport(\"vz\")\n__dyn = \"defer\"\n\
+             mrxhq.GlobalEnter(true)\nvz._StartPlayerVisibleGameplay()\n__answer()\n",
+        )
+        .exec()
+        .expect("runs");
+        assert_eq!(
+            calls(&lua),
+            [
+                "[qm] hook world.scripts_loaded: enter",
+                "retail GlobalEnter",
+                "[qm] hook hq.enter: enter",
+                "retail start",
+                "[qm] hook world.begin: enter",
+                "[gate] qm_gate_hq: body ran",
+                "[qm] library qm_gate_hq: ready",
+            ]
+        );
+    }
+
+    /// ★ A novel shop item keeps its saved state: the world loads from a save holding the item's unlock
+    /// status and stock (`world.load` passes it), retail restores the other rows before the item's row
+    /// exists, and the loader applies the saved values when it inserts the row at `world.begin`. With
+    /// no save, the row keeps the manifest's values.
+    #[test]
+    fn a_novel_shop_item_keeps_its_saved_unlock_status_and_stock() {
+        let modules = [
+            ("MrxSupportData", "tSupportData = {}\n".to_string()),
+            ("MrxRewardData", "_tRewards = {}\n".to_string()),
+            ("DLC_MrxGreenGoblinBomb", "function Create(self) return { SetSupportName = function() end } end\n".to_string()),
+        ];
+        let src = qm_modloader_source(&[], &[], &[support("bomb-mod", "ggbomb", "DLC_MrxGreenGoblinBomb")], &[], &names(&["bomb-mod"])).unwrap();
+        let report = "import(\"MrxSupportData\")\nlocal row = MrxSupportData.tSupportData.ggbomb\n\
+                      table.insert(calls, \"stock \" .. tostring(row.nGlobalStock) .. \", Pmc \" .. tostring(row.tUnlockStatus.Pmc))\n";
+        let run = |load: &str| {
+            let lua = gameplay_vm(src.clone(), &modules);
+            lua.load(format!("import(\"mrxsoundbootstrap\")\nimport(\"vz\")\n{load}vz._StartPlayerVisibleGameplay()\n{report}")).exec().expect("runs");
+            calls(&lua).last().cloned().expect("a report")
+        };
+        let saved = "vz.LoadSingleton({ tSupportData = { ggbomb = { tUnlockStatus = { Pmc = 2 }, nGlobalStock = 5 } } })\n";
+        assert_eq!(run(saved), "stock 5, Pmc 2", "the saved state is applied");
+        assert_eq!(run("vz.LoadSingleton(nil)\n"), "stock nil, Pmc 1", "a new game keeps the manifest's values");
+    }
+
+    /// ★ `menu.open`, run against retail's own `HandleInput` (`mrxguishell.lua:309-329`): it fires once,
+    /// after the original, on the start press that sets `bHitStart`; never before the shell Flash has
+    /// loaded, while the legal-screen delay holds, for another button, or for a second start press.
+    #[test]
+    fn menu_open_fires_once_on_the_start_press_that_brings_up_the_main_menu() {
+        let retail = "import(\"MrxGuiBase\")\n_bWaitForDelay = 0\n\
+                      function HandleInput(oWidget, tEvent)\n\
+                        local oFlash = oWidget.CustomData.oFlash\n\
+                        if _bWaitForDelay ~= 0 or MrxGuiBase.Joystick.BUTTON_PAD2_D ~= tEvent.ButtonPress or not oFlash.CustomData.bLoaded then\n\
+                        elseif not oWidget.CustomData.bHitStart then\n\
+                          oWidget.CustomData.bHitStart = true\n\
+                          table.insert(calls, \"retail start press\")\n\
+                        end\n\
+                      end\n";
+        let hosts = session_hosts(LoadSession::FrontEnd, &[], &[("mrxguishell", retail)]);
+        let lua = module_vm(&[
+            ("mrxguishell", hosts["mrxguishell"].clone()),
+            ("MrxGuiBase", "Joystick = { BUTTON_PAD2_D = 7, BUTTON_ALT1_2 = 9 }\n".to_string()),
+        ]);
+        lua.load(
+            "import(\"mrxguishell\")\n\
+             local w = { CustomData = { oFlash = { CustomData = { bLoaded = false } } } }\n\
+             table.insert(calls, \"press before the Flash loaded\")\n\
+             mrxguishell.HandleInput(w, { ButtonPress = 7 })\n\
+             w.CustomData.oFlash.CustomData.bLoaded = true\n\
+             mrxguishell._bWaitForDelay = 1\n\
+             table.insert(calls, \"press during the delay\")\n\
+             mrxguishell.HandleInput(w, { ButtonPress = 7 })\n\
+             mrxguishell._bWaitForDelay = 0\n\
+             table.insert(calls, \"another button\")\n\
+             mrxguishell.HandleInput(w, { ButtonPress = 9 })\n\
+             table.insert(calls, \"the start press\")\n\
+             mrxguishell.HandleInput(w, { ButtonPress = 7 })\n\
+             table.insert(calls, \"a second start press\")\n\
+             mrxguishell.HandleInput(w, { ButtonPress = 7 })\n",
+        )
+        .exec()
+        .expect("the shell runs");
+        let seen: Vec<String> = calls(&lua).into_iter().filter(|c| !c.starts_with("[qm] hook shell.")).collect();
+        assert_eq!(
+            seen,
+            [
+                "press before the Flash loaded",
+                "press during the delay",
+                "another button",
+                "the start press",
+                "retail start press",
+                "[qm] hook menu.open: enter",
+                "a second start press",
+            ],
+            "{:?}",
+            calls(&lua)
+        );
+    }
+
+    /// ★ The error policy, run. A registration that errors stops the hook naming its Shipment: with no
+    /// retail dialog it prints `FATAL-NODIALOG` for pmc_bb and requests `Exiting`; with `MrxGuiDialogBox` loaded and a local
+    /// player it opens `MrxGuiDialogBox.DisplayDialogBox`, and dismissing it requests `Exiting`. A library the engine
+    /// cannot load (a `nil` callback), and one it never calls back for (caught at `world.begin`), fail
+    /// naming the library.
+    #[test]
+    fn a_failure_stops_the_game_naming_its_owner() {
+        let broken = "function MarkForRemoval() end\n".to_string();
+        let src = qm_modloader_source(&[], &[layer("act-mod", "new_layer", &[])], &[], &[], &names(&["act-mod"])).unwrap();
+        let run = |lua: &mercs2_luac::rt::Lua, pre: &str| {
+            lua.load(format!("{pre}import(\"mrxsoundbootstrap\")\nimport(\"vz\")\nvz._StartPlayerVisibleGameplay()\n")).exec().expect("runs");
+            calls(lua)
+        };
+        let fatal = |calls: &[String], prefix: &str| calls.iter().any(|c| c.starts_with(prefix));
+
+        let nodialog = run(&gameplay_vm(src.clone(), &[("MrxLayerManager", broken.clone())]), "");
+        assert!(fatal(&nodialog, "[qm] FATAL act-mod at world.begin: "), "{nodialog:?}");
+        assert!(fatal(&nodialog, "[qm] FATAL-NODIALOG act-mod at world.begin: "), "{nodialog:?}");
+        // With nothing watching the print (pmc_bb's quiet variants), the prologue exits itself, at once.
+        let at = nodialog.iter().position(|c| c.starts_with("[qm] FATAL-NODIALOG ")).expect("printed");
+        assert_eq!(nodialog.get(at + 1).map(String::as_str), Some("RequestGameState Exiting"), "{nodialog:?}");
+
+        // Retail's DisplayDialogBox (mrxguidialogbox.lua:15): on a choice it calls fCallback with the
+        // option's index appended to tCallbackArgs (_CloseAndCallCallback :369-382).
+        let dialog = "function DisplayDialogBox(p, msg, opts, def, cb, args, x, y, h, v, pause, cancel)\n\
+                      table.insert(calls, \"dialog \" .. msg .. \" / \" .. opts[1] .. \" / pause \" .. tostring(pause) .. \" / cancel \" .. tostring(cancel))\n\
+                      _G.__choose = function(i) table.insert(args, i) cb(unpack(args)) end\n\
+                      return {}\n\
+                      end\n"
+            .to_string();
+        let lua = gameplay_vm(src.clone(), &[("MrxLayerManager", broken), ("MrxGuiDialogBox", dialog)]);
+        let shown = run(&lua, "import(\"MrxGuiDialogBox\")\nPlayer = { GetLocalPlayer = function() return 1 end }\n");
+        let line = shown.iter().find(|c| c.starts_with("dialog ")).unwrap_or_else(|| panic!("no dialog: {shown:?}"));
+        assert!(line.starts_with("dialog Quartermaster: act-mod at world.begin: "), "{line}");
+        assert!(line.ends_with(" / Exit / pause true / cancel 1"), "{line}");
+        assert!(!fatal(&shown, "[qm] FATAL-NODIALOG"), "{shown:?}");
+        lua.load("__choose(1)").exec().expect("chooses Exit");
+        let after = calls(&lua);
+        assert_eq!(&after[after.len() - 2..], ["[qm] FATAL dismissed: requesting Exiting", "RequestGameState Exiting"]);
+
+        let refused = run(&gameplay_vm(src.clone(), &[]), "__dyn = \"nil\"\n");
+        assert!(refused.contains(&"[qm] FATAL Quartermaster at load qm_modloader: the engine could not load module qm_modloader".to_string()), "{refused:?}");
+        let never = run(&gameplay_vm(src, &[]), "__dyn = \"never\"\n");
+        assert!(never.contains(&"[qm] FATAL Quartermaster at world.begin: library qm_modloader was requested but never loaded".to_string()), "{never:?}");
     }
 
     fn support(shipment: &str, id: &str, module: &str) -> SupportRegistration {
@@ -2389,7 +2750,11 @@ function UnloadSoundBank(n, cb) table.insert(calls, "UnloadSoundBank " .. n .. (
             &names(&["bomb-mod"]),
         )
         .unwrap();
-        assert!(src.contains("import(\"DLC_MrxGreenGoblinBomb\")"), "imports the subclass: {src}");
+        let top = src.find("local QM = _G._QM").expect("the body");
+        for m in ["MrxSupportData", "MrxRewardData", "DLC_MrxGreenGoblinBomb"] {
+            let at = src.find(&format!("import(\"{m}\")\n")).unwrap_or_else(|| panic!("imports {m}: {src}"));
+            assert!(at < top, "{m} is imported at the top, a DEPS child: {src}");
+        }
         assert!(src.contains("DLC_MrxGreenGoblinBomb:Create()"), "constructs oSupport: {src}");
         assert!(
             src.contains("oSupport:SetSupportName(\"ggbomb\")"),
@@ -2407,18 +2772,8 @@ function UnloadSoundBank(n, cb) table.insert(calls, "UnloadSoundBank " .. n .. (
             src.contains("MrxRewardData.gtAllSupport = nil"),
             "nulls the never-invalidated cache: {src}"
         );
-        assert!(src.contains("pcall(f)"), "runs under the shared fail-soft guard: {src}");
-    }
-
-    /// The trampoline is exactly what the resident carries: it wraps `_OnEnter`, imports the loader
-    /// by name (so `import` hashes it to the ASET row `add_script` mints), and runs it once.
-    #[test]
-    fn the_trampoline_is_one_self_contained_hook() {
-        let t = qm_trampoline_append();
-        assert!(t.contains("_OnEnter = function"), "must wrap the entry hook: {t}");
-        assert!(t.contains("import(\"qm_modloader\")"), "must import by name: {t}");
-        assert!(t.contains("_QM.run()"), "must run the loader: {t}");
-        // It calls the previous _OnEnter, so wrapping it never drops the game's own behaviour.
-        assert!(t.contains("_qm_prev_OnEnter"), "must chain the prior hook: {t}");
+        assert!(src.contains("MrxRewardData.gtAllSupport = nil\nend, \"bomb-mod\")"), "owned by its Shipment: {src}");
+        assert!(!src.contains("pcall") && !src.contains("if oSupport.") && !src.contains("if MrxSupportData"), "no error is swallowed: {src}");
+        mercs2_luac::compile(&src, QM_MODLOADER_NAME).expect("the loader compiles");
     }
 }

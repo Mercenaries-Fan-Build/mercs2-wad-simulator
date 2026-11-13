@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_workshop"
-version = "4.0.0"
+version = "5.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native asset workshop (browse / inspect / remix) on the mercs2_engine renderer."
 readme = "README.md"
@@ -61,6 +61,11 @@ mercs2_destruction = { workspace = true }
 loadprobe = { workspace = true }
 # Saves page Delete: moves a .profile to the OS trash (recoverable) rather than removing it.
 trash = "5"
+
+[dev-dependencies]
+# A yardstick for the Missions canvas layout: the corpus's canvases laid out by ELK Layered (a pure Rust
+# port of the Eclipse Layout Kernel) and scored beside ours. Tests only; nothing ships it.
+elk-layout = "0.12.2"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root

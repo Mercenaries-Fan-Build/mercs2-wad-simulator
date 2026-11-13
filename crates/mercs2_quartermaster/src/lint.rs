@@ -110,6 +110,21 @@ pub const M0140_UNKNOWN_WEARER: Rule = Rule {
     title: "outfit targets a hero the wardrobe has no list for",
     doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
 };
+pub const M0141_WEARER_LIST: Rule = Rule {
+    code: "M0141",
+    title: "an outfit's wearer list is empty or names a hero twice",
+    doc: "docs/modding/manifest_format.md#m0141",
+};
+pub const M0142_UNKNOWN_CHATTER_SET: Rule = Rule {
+    code: "M0142",
+    title: "an outfit's chatter set is not one qm knows the game holds",
+    doc: "docs/modding/manifest_format.md#m0142",
+};
+pub const M0143_LEVEL_LIST: Rule = Rule {
+    code: "M0143",
+    title: "an outfit's levels list is empty or names a level twice",
+    doc: "docs/modding/manifest_format.md#m0143",
+};
 pub const M0150_RAW_NO_TOUCHES: Rule = Rule {
     code: "M0150",
     title: "a raw contribution declares no blast radius",
@@ -228,13 +243,32 @@ pub const M0198_ENTITY_KEY_TAKEN: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0198",
 };
 
-/// An `add_shop_item` whose `behaviour.script` mints a novel module: its rows are inserted by
-/// `qm_modloader` from `wifpmcinterior`'s `_OnEnter`, so the item is at no vendor until the host's
-/// first entry into the PMC interior in a session. A warning: that may be what the author wants.
-pub const M0310_SHOP_BEHAVIOUR_AFTER_PMC: Rule = Rule {
+/// An `add_shop_item` whose `behaviour.script` mints a novel module: `qm_modloader` inserts its catalog
+/// and reward rows at qm's `world.begin` hook, with the item's saved unlock status and stock, so Lua that
+/// reads `MrxSupportData.tSupportData` or `MrxRewardData` earlier in the world load does not see it. A
+/// warning: that may be what the author wants.
+pub const M0310_SHOP_BEHAVIOUR_AT_WORLD_BEGIN: Rule = Rule {
     code: "M0310",
-    title: "a novel shop behaviour is offered only after the host first enters the PMC interior",
+    title: "a novel shop behaviour's rows exist only from world.begin, not during the world load",
     doc: "docs/modding/manifest_format.md#m0310",
+};
+
+/// An `add_script` `load:` that qm's loader cannot honour: `when` names no hook of `data/hooks.tsv`,
+/// `in` is empty or repeats a session, or lists a session the hook does not fire in. The library would
+/// never load there, and a consumer's `import` of it would bind nothing.
+pub const M0312_LIBRARY_LOAD_UNUSABLE: Rule = Rule {
+    code: "M0312",
+    title: "an add_script load: names no hook, or a session the hook does not fire in",
+    doc: "docs/modding/manifest_format.md#m0312",
+};
+
+/// An `import` inside a `pcall`/`xpcall` in a Shipment's Lua ([`crate::imports::pcall_imports`]): an
+/// import of a name no loaded WAD holds crashes the game natively (`0x5AE362` on v1.1), not with a Lua
+/// error, so the `pcall` protects nothing. A warning.
+pub const M0315_PCALL_IMPORT: Rule = Rule {
+    code: "M0315",
+    title: "an import inside pcall: a missing module crashes the game natively, so the pcall protects nothing",
+    doc: "docs/modding/manifest_format.md#m0315",
 };
 
 /// An `add_language` name that cannot be a novel language WAD — not a lowercase `[a-z0-9_]` token, or
@@ -249,10 +283,13 @@ pub const M0200_LANGUAGE_NAME_UNUSABLE: Rule = Rule {
 
 /// An `add_level` that could only overwrite: a name that is not a lowercase token or is a WAD the game
 /// ships ([`crate::build::wad_name_refusal`]), a `wad` that is no `.wad`, or a stream the game ships
-/// ([`crate::level::stream_name_refusal`]). The lowering refuses the same names.
+/// ([`crate::level::stream_name_refusal`]). The lowering refuses the same names. Also a `level_asset`
+/// that cannot compile, and a `level: vz` row that would replace what `vz.wad` holds: a worldentity
+/// without `templates`, `templates` elsewhere, and, with the game ([`crate::level::compile_vz`],
+/// [`crate::fx::merge`]), an asset or block path `vz.wad` has or a template that cannot be appended.
 pub const M0311_LEVEL_UNUSABLE: Rule = Rule {
     code: "M0311",
-    title: "an add_level name or stream is unusable, or collides with one the game ships",
+    title: "an add_level could only overwrite, or a level_asset cannot compile",
     doc: "docs/modding/manifest_format.md#m0311",
 };
 
@@ -425,6 +462,17 @@ pub const M0221_SOUND_LOAD_IN: Rule = Rule {
 /// version token other than its stage's, no end token), no `CTAB` (the engine reads constants by
 /// name through `D3DXGetShaderConstantTable`), a stage that disagrees with the family or the
 /// replaced record, or `add_shader` classes sharing a stem with different bytes.
+pub const M0222_LOAD_SOUND_SHAPE: Rule = Rule {
+    code: "M0222",
+    title: "a load_sound names nothing, a name it cannot load, no session, or a stream no add_level of the Shipment installs",
+    doc: "docs/modding/manifest_format.md#m0222",
+};
+/// Needs the game stack.
+pub const M0223_LOAD_SOUND_TARGET: Rule = Rule {
+    code: "M0223",
+    title: "a load_sound soundbank or wavebank is in neither the game nor the Shipment's level: vz rows",
+    doc: "docs/modding/manifest_format.md#m0223",
+};
 pub const M0230_SHADER_SOURCE: Rule = Rule {
     code: "M0230",
     title: "a shader source does not load, or its stage is not the one it replaces or registers",
@@ -777,6 +825,7 @@ fn fx_rule(code: &str) -> Rule {
         "M0306" => M0306_SPRITE_KEY_TAKEN,
         "M0307" => M0307_SPRITES_DO_NOT_FIT,
         "M0309" => M0309_EMITTER_SHAPE,
+        "M0311" => M0311_LEVEL_UNUSABLE,
         other => panic!("crate::fx reported {other}, which is not an fx rule"),
     }
 }
@@ -823,6 +872,9 @@ pub const RULES: &[Rule] = &[
     M0120_SELF_CONFLICT,
     M0130_BARE_HASH,
     M0140_UNKNOWN_WEARER,
+    M0141_WEARER_LIST,
+    M0142_UNKNOWN_CHATTER_SET,
+    M0143_LEVEL_LIST,
     M0150_RAW_NO_TOUCHES,
     M0160_ASI_ON_REIMPL,
     M0161_HOOK_DOES_NOTHING,
@@ -848,6 +900,7 @@ pub const RULES: &[Rule] = &[
     M0216_SOUND_CATEGORY_UNKNOWN,
     M0217_SOUND_LANGUAGE,
     M0221_SOUND_LOAD_IN,
+    M0222_LOAD_SOUND_SHAPE,
     M0230_SHADER_SOURCE,
     M0231_SHADER_CAPABILITY,
     M0234_SHADER_CLASSES,
@@ -867,8 +920,10 @@ pub const RULES: &[Rule] = &[
     M0305_SPRITE_NAME,
     M0308_RAW_SPRITES,
     M0309_EMITTER_SHAPE,
-    M0310_SHOP_BEHAVIOUR_AFTER_PMC,
+    M0310_SHOP_BEHAVIOUR_AT_WORLD_BEGIN,
     M0311_LEVEL_UNUSABLE,
+    M0312_LIBRARY_LOAD_UNUSABLE,
+    M0315_PCALL_IMPORT,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -880,6 +935,7 @@ pub const GAME_RULES: &[Rule] = &[
     M0194_LAYER_UNKNOWN,
     M0198_ENTITY_KEY_TAKEN,
     M0218_SOUND_TARGET_MISSING,
+    M0223_LOAD_SOUND_TARGET,
     M0219_LANGUAGE_BASE_INCOMPLETE,
     M0220_SOUND_CUE_SHADOWED,
     M0232_SHADER_TARGET,
@@ -1017,6 +1073,10 @@ pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic>
             at: Some(index),
             fix: None,
         });
+    }
+    // M0223: a load_sound bank nothing holds.
+    for (index, message) in crate::sound::load_sound_target_problems(manifest, game) {
+        out.push(Diagnostic { rule: M0223_LOAD_SOUND_TARGET, severity: Severity::Error, message, at: Some(index), fix: None });
     }
     // M0219: an add_language base with no fonts or atlases to fork.
     for (index, c) in manifest.contributions.iter().enumerate() {
@@ -1812,6 +1872,40 @@ fn sound_checks(
     out
 }
 
+/// Why the `load:` of `add_script` `name` cannot be honoured (M0312), one message per reason; empty
+/// when it can. The link refuses the same loads.
+pub fn library_load_refusals(name: &str, load: &crate::manifest::LibraryLoad) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(hook) = crate::hooks::hook(&load.when) else {
+        out.push(format!(
+            "add_script {name:?} loads at `when: {}`, which is no hook of Quartermaster's catalogue (data/hooks.tsv); \
+             the library would never load. Name a hook id such as `world.scripts_loaded` or `shell.boot`.",
+            load.when
+        ));
+        return out;
+    };
+    if load.sessions.is_empty() {
+        out.push(format!("add_script {name:?} has an empty `in:`; list the sessions it loads in (gameplay, front_end)."));
+    }
+    let mut seen = Vec::new();
+    for s in &load.sessions {
+        if seen.contains(s) {
+            out.push(format!("add_script {name:?} lists `in: {}` twice.", s.token()));
+            continue;
+        }
+        seen.push(*s);
+        if !hook.sessions.contains(s) {
+            out.push(format!(
+                "add_script {name:?} loads at `{}` in {}, but that hook fires only in {}; the library would never load there.",
+                hook.id,
+                s.token(),
+                hook.sessions.iter().map(|x| x.token()).collect::<Vec<_>>().join(" and ")
+            ));
+        }
+    }
+    out
+}
+
 /// Every `add_shop_item` whose `behaviour.script` mints a novel module: `(index, module)`.
 fn novel_shop_modules(manifest: &Manifest) -> Vec<(usize, &str)> {
     manifest
@@ -2013,7 +2107,7 @@ impl Diagnostic {
     pub fn to_finding(&self) -> crate::plan::Finding {
         use crate::plan::{Finding, FindingRef, FindingSeverity, Section};
         Finding {
-            code: self.rule.code,
+            code: self.rule.code.to_string(),
             severity: match self.severity {
                 Severity::Info => FindingSeverity::Info,
                 Severity::Warning => FindingSeverity::Warning,
@@ -2325,12 +2419,14 @@ pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) ->
     let base = crate::fx::GameFx::read(game)?;
     let set = [crate::fx::FxShipment { manifest, root }];
     let (atlas, repainted) = crate::fx::base_atlas(&base.atlas, &set)?;
+    let schemas = crate::fx::level_schemas(game, std::iter::once(manifest))?;
     let fx_base = crate::fx::FxBase {
         effects: &base.effects.entries,
         worldentity: &base.worldentity,
         fxdict: &base.fxdict,
         atlas: &atlas,
         repainted,
+        level_templates: crate::fx::LevelTemplates::main(schemas.as_ref()),
     };
     if let Err(f) = crate::fx::merge(&fx_base, &set, crate::fx::Scope::Build) {
         for p in f
@@ -2530,23 +2626,88 @@ pub fn lint(
 
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
-            Contribution::AddOutfit { wearer, .. } => {
+            Contribution::AddOutfit { wearer, chatter, levels, .. } => {
                 // Valid = resolves to a real `_tOutfits` key (either `jen` or `jennifer` does);
                 // the suggestion, when it does not, is the preferred spelling.
-                if crate::manifest::wearer_table_key(wearer).is_none() {
-                    let suggestion = closest(wearer, &WARDROBE_HEROES);
+                let heroes = wearer.heroes();
+                let mut keys: Vec<&str> = Vec::new();
+                for hero in &heroes {
+                    match crate::manifest::wearer_table_key(hero) {
+                        Some(k) if keys.contains(&k) => out.push(Diagnostic {
+                            rule: M0141_WEARER_LIST,
+                            severity: Severity::Error,
+                            message: format!("wearer {wearer} names {k} twice (`jen` and `jennifer` are one hero)"),
+                            at: Some(index),
+                            fix: None,
+                        }),
+                        Some(k) => keys.push(k),
+                        None => out.push(Diagnostic {
+                            rule: M0140_UNKNOWN_WEARER,
+                            severity: Severity::Error,
+                            message: format!(
+                                "wearer {hero:?} is not a wardrobe hero; `_tOutfits` has lists only \
+                                 for {}. The outfit would be offered to no hero, so it would never \
+                                 appear in the wardrobe and the game would report nothing.",
+                                WARDROBE_HEROES.join(", ")
+                            ),
+                            at: Some(index),
+                            fix: closest(hero, &WARDROBE_HEROES).map(|s| s.to_string()),
+                        }),
+                    }
+                }
+                if heroes.is_empty() {
                     out.push(Diagnostic {
-                        rule: M0140_UNKNOWN_WEARER,
+                        rule: M0141_WEARER_LIST,
                         severity: Severity::Error,
-                        message: format!(
-                            "wearer {wearer:?} is not a wardrobe hero; `_tOutfits` has lists only \
-                             for {}. The outfit would be appended to a table nothing reads, so it \
-                             would never appear in the wardrobe and the game would report nothing.",
-                            WARDROBE_HEROES.join(", ")
-                        ),
+                        message: "wearer is an empty list, so no hero is offered the outfit".into(),
                         at: Some(index),
-                        fix: suggestion.map(|s| s.to_string()),
+                        fix: None,
                     });
+                }
+                if let Some(set) = chatter {
+                    let known = crate::outfits::chatter_sets().unwrap_or_else(|e| panic!("qm's data/chatter_sets.tsv: {e}"));
+                    let h = mercs2_formats::hash::pandemic_hash_m2(set);
+                    if !known.iter().any(|k| mercs2_formats::hash::pandemic_hash_m2(k) == h) {
+                        out.push(Diagnostic {
+                            rule: M0142_UNKNOWN_CHATTER_SET,
+                            severity: Severity::Error,
+                            message: format!(
+                                "chatter {set:?} is not a chatter set qm knows the game holds ({}). \
+                                 Human.SetChatterSet takes any name and an unknown one does nothing, \
+                                 with no message. A set the game holds goes into qm's \
+                                 data/chatter_sets.tsv with its evidence.",
+                                known.join(", ")
+                            ),
+                            at: Some(index),
+                            fix: closest(set, &known.iter().map(String::as_str).collect::<Vec<_>>()).map(|s| s.to_string()),
+                        });
+                    }
+                }
+                if let Some(levels) = levels {
+                    let mut seen: Vec<&String> = Vec::new();
+                    for l in levels {
+                        if seen.contains(&l) {
+                            out.push(Diagnostic {
+                                rule: M0143_LEVEL_LIST,
+                                severity: Severity::Error,
+                                message: format!("levels names {l:?} twice"),
+                                at: Some(index),
+                                fix: None,
+                            });
+                        }
+                        seen.push(l);
+                    }
+                    if levels.is_empty() {
+                        out.push(Diagnostic {
+                            rule: M0143_LEVEL_LIST,
+                            severity: Severity::Error,
+                            message: "levels is an empty list, so no wardrobe offers the outfit; omit it \
+                                      for the main campaign"
+                                .into(),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
                 }
             }
             // `add_ui` ships the same movie an `add_movie` does. A movie path that is already an
@@ -2739,6 +2900,11 @@ pub fn lint(
                     });
                 }
             }
+            Contribution::LoadSound { .. } => {
+                for (at, message) in crate::sound::load_sound_shape_problems(manifest).into_iter().filter(|(i, _)| *i == index) {
+                    out.push(Diagnostic { rule: M0222_LOAD_SOUND_SHAPE, severity: Severity::Error, message, at: Some(at), fix: None });
+                }
+            }
             Contribution::ReplaceSoundBank { bank, language, category, cues } => {
                 let fields = SoundFields {
                     kind: c.kind(),
@@ -2776,12 +2942,38 @@ pub fn lint(
                     });
                 }
             }
-            Contribution::LevelAsset { level, asset_type, name, rungs } => {
+            Contribution::LevelAsset { level, asset_type, name, rungs, templates, edits } => {
                 let mut refuse = |message: String| {
                     out.push(Diagnostic { rule: M0311_LEVEL_UNUSABLE, severity: Severity::Error, message, at: Some(index), fix: None })
                 };
-                if !manifest.contributions.iter().any(|c| matches!(c, Contribution::AddLevel { name: n, .. } if n == level)) {
+                let vz = level == crate::level::VZ;
+                if !vz && !manifest.contributions.iter().any(|c| matches!(c, Contribution::AddLevel { name: n, .. } if n == level)) {
                     refuse(format!("level_asset {name:?}: this Shipment has no add_level {level:?}"));
+                }
+                let worldentity = asset_type == crate::level::WORLDENTITY_TYPE;
+                if vz && worldentity && templates.is_empty() {
+                    refuse(format!(
+                        "level_asset {name:?}: a level: vz worldentity would replace the game's; list the templates to append with `templates`"
+                    ));
+                }
+                if !templates.is_empty() && !(vz && worldentity) {
+                    refuse(format!("level_asset {name:?}: `templates` belongs to a level: vz row of type {}", crate::level::WORLDENTITY_TYPE));
+                }
+                if !templates.is_empty() && rungs.len() != 1 {
+                    refuse(format!("level_asset {name:?}: a worldentity has one rung, not {}", rungs.len()));
+                }
+                let mut seen = std::collections::BTreeMap::new();
+                for t in templates {
+                    if t.is_empty() {
+                        refuse(format!("level_asset {name:?}: a template name is empty"));
+                    } else if let Some(prev) = seen.insert(mercs2_formats::hash::pandemic_hash_m2(t), t) {
+                        refuse(format!("level_asset {name:?}: templates {prev:?} and {t:?} name one template"));
+                    }
+                }
+                for t in edits.keys() {
+                    if !seen.contains_key(&mercs2_formats::hash::pandemic_hash_m2(t)) {
+                        refuse(format!("level_asset {name:?}: `edits` names template {t:?}, which `templates` does not list"));
+                    }
                 }
                 if mercs2_formats::types::type_by_name(asset_type).is_none() {
                     refuse(format!("level_asset {name:?}: no asset type is named {asset_type:?}"));
@@ -2858,7 +3050,12 @@ pub fn lint(
             }
             // M0197 (hermetic half): a name `qm link` mints a loader under, or a novel shop module of
             // this Shipment. The game's own script names are the game-gated half in `game_checks`.
-            Contribution::AddScript { name, .. } => {
+            Contribution::AddScript { name, load, .. } => {
+                if let Some(load) = load {
+                    for message in library_load_refusals(name, load) {
+                        out.push(Diagnostic { rule: M0312_LIBRARY_LOAD_UNUSABLE, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                }
                 let hash = crate::manifest::asset_hash(name);
                 for loader in [crate::link::QM_MODLOADER_NAME, crate::link::QM_SHELL_MODLOADER_NAME] {
                     if crate::manifest::asset_hash(loader) == hash {
@@ -2894,14 +3091,13 @@ pub fn lint(
             }
             Contribution::AddShopItem { id, behaviour: Some(b), .. } if b.script.is_some() => {
                 out.push(Diagnostic {
-                    rule: M0310_SHOP_BEHAVIOUR_AFTER_PMC,
+                    rule: M0310_SHOP_BEHAVIOUR_AT_WORLD_BEGIN,
                     severity: Severity::Warning,
                     message: format!(
-                        "shop item {id:?}: its novel behaviour {:?} is inserted by qm_modloader from \
-                         wifpmcinterior's _OnEnter, so the item is at no vendor until the host first \
-                         enters the PMC interior in a session, and at every listed vendor from then. \
-                         A session that starts in the world (an alternate spawn, a save carrying \
-                         retry locations) reaches outpost vendors first.",
+                        "shop item {id:?}: its novel behaviour {:?} is added by qm_modloader at \
+                         world.begin, when player-visible gameplay first starts in a world, with its \
+                         saved unlock status and stock; Lua that reads MrxSupportData.tSupportData or \
+                         MrxRewardData during the world load, before then, does not see the item.",
                         b.module
                     ),
                     at: Some(index),
@@ -3630,6 +3826,24 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
                      `_MODULES`) — a `__newindex` set later on either can crash at \
                      `0x0059C82A`. Keep module state module-scoped (a plain local or a table \
                      under this module's own name).",
+                    rel = rel.display(),
+                ),
+                at: Some(index),
+                fix: None,
+            });
+        }
+
+        for (at, form) in crate::imports::pcall_imports(&src) {
+            let (line, col) = line_col(&src, at);
+            out.push(Diagnostic {
+                rule: M0315_PCALL_IMPORT,
+                severity: Severity::Warning,
+                message: format!(
+                    "an import in `{form}` at {rel}:{line}:{col} in this {kind_label} contribution. An \
+                     import of a module no loaded WAD holds crashes the game natively (0x5AE362 on \
+                     v1.1), not with a Lua error, so the pcall never sees it. Import the module plainly, \
+                     and make sure something provides it (qm link refuses an import nothing provides, \
+                     M0209).",
                     rel = rel.display(),
                 ),
                 at: Some(index),

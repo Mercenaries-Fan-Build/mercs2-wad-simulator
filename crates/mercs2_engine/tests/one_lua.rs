@@ -71,15 +71,10 @@ target = "retail"
     manifest.validate().expect("valid manifest");
     assert_eq!(manifest.shipment.name, "one-lua-probe");
 
-    // The Lua the Quartermaster would append for a wardrobe outfit, compiled with the same
-    // compiler — then the runtime is used again to prove nothing was disturbed.
-    let row = mercs2_quartermaster::link::outfit_row_append(
-        "mattias",
-        "mechanic",
-        "pmc_hum_mechanic",
-        "Mechanic",
-    );
-    let compiled = mercs2_luac::compile(&row, "wifpmcinterior").expect("compile the outfit row");
+    // The Lua the Quartermaster splices onto every gameplay host (its hook dispatcher), compiled with
+    // the same compiler — then the runtime is used again to prove nothing was disturbed.
+    let prologue = mercs2_quartermaster::loader::prologue(mercs2_quartermaster::manifest::LoadSession::Gameplay);
+    let compiled = mercs2_luac::compile(&prologue, "wifpmcinterior").expect("compile qm's prologue");
     assert!(compiled.len() > 12);
 
     let still_alive: bool = sh.eval("return type(unpack) == 'function'").expect("runtime alive");

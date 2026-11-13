@@ -229,7 +229,7 @@ fn main() {
             orbit,
             pmc::RecruitUnlocks::default(),
             pmc::Stockpile::default(),
-            hero::player_model_candidates(1, 0, 0), // retail new game: Mattias, tier 0, default skin
+            hero::player_model_candidates(1, 0), // retail new game: Mattias, default skin
             menu,
         );
         if !dev_menu {
@@ -380,14 +380,13 @@ fn main() {
     } else {
         println!("[mercs2_game] full world: TPS + PMC interior + c3 cells + placements + props");
         let orbit = args.iter().any(|a| a == "--interior-orbit");
-        // Direct boot: the player model comes from THIS profile's hero + upgrade tier, like a
-        // menu boot (costume file byte not yet located; 0 = wardrobe unused in all known saves).
+        // Direct boot: the player model comes from THIS profile's hero + costume, like a menu boot.
         let hero_idx = profile.character_index; // header @0x4D, 1-based
-        let models = hero::player_model_candidates(hero_idx, profile.upgrade_index, 0);
+        let models = hero::player_model_candidates(hero_idx, profile.costume_index);
         println!(
             "[mercs2_game] character: {} [{}]",
             hero::hero(hero_idx).display,
-            hero::look_label(hero_idx, profile.upgrade_index, 0)
+            hero::look_label(hero_idx, profile.upgrade_index, profile.costume_index)
         );
         let mut game = world::Mercs2Game::new(
             wadpath, true, true, true, true, true, orbit, recruits, stockpile, models, None,

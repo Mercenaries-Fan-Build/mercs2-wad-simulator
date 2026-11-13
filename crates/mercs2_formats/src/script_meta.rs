@@ -146,6 +146,15 @@ pub fn derive(name: &str, luaq: &[u8]) -> Result<ScriptMeta, String> {
     derive_from_chunk(name, &chunk)
 }
 
+/// The DEPS entries of the compiled chunk `luaq`, in call order with duplicates kept: what
+/// [`derive`] lists, for a chunk of any name. A chunk that does not decode is an error.
+pub fn deps_of(luaq: &[u8]) -> Result<Vec<Dep>, String> {
+    let chunk = decode(luaq).map_err(|e| e.to_string())?;
+    let mut deps = Vec::new();
+    collect_deps(&chunk.main, &mut deps);
+    Ok(deps)
+}
+
 /// [`derive`] for an already decoded chunk.
 pub fn derive_from_chunk(name: &str, chunk: &Chunk) -> Result<ScriptMeta, String> {
     if chunk.endian != Endian::Little {
@@ -275,6 +284,122 @@ const MAX_STEPS: usize = 1_000_000;
 /// numeric `for` with unknown bounds whose body could change the result, calling or indexing nil —
 /// the count is not computable and this returns an error naming the instruction, rather than a guess.
 pub fn count_globals(p: &Proto) -> Result<u16, String> {
+    let env = run_main(p)?;
+    let n = env.iter().filter(|(_, v)| *v != Val::Nil).count();
+    u16::try_from(n).map_err(|_| format!("{n} globals; INFO holds at most {}", u16::MAX))
+}
+
+/// What a module's main function does when it runs, by the same abstract run as [`count_globals`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MainRun {
+    /// The globals it leaves holding a function it built: the functions the module defines at its
+    /// top level, which another module reaches as `Module.name`.
+    pub functions: std::collections::BTreeSet<String>,
+    /// The first `RETURN` or `TAILCALL` of its code other than the final `RETURN`, read from the code
+    /// itself, not from the run: code spliced onto the end of the chunk runs at the final `RETURN`
+    /// (`mercs2_luac::splice`), so any path through an earlier one skips it. `None` when there is none.
+    pub early_return: Option<usize>,
+}
+
+/// [`MainRun`] of the main function of `luaq`, with [`count_globals`]' errors.
+pub fn main_run(luaq: &[u8]) -> Result<MainRun, String> {
+    let chunk = decode(luaq).map_err(|e| e.to_string())?;
+    let env = run_main(&chunk.main)?;
+    let code = &chunk.main.code;
+    let mut early_return = None;
+    let mut pc = 0usize;
+    while pc + 1 < code.len() {
+        let i = code[pc];
+        match op(i) {
+            OP_RETURN | OP_TAILCALL => {
+                early_return = Some(pc);
+                break;
+            }
+            // C = 0 stores the real count in the next code word, which is not an instruction.
+            OP_SETLIST if c(i) == 0 => pc += 1,
+            _ => {}
+        }
+        pc += 1;
+    }
+    Ok(MainRun {
+        functions: env.into_iter().filter(|(_, v)| *v == Val::Closure).map(|(n, _)| String::from_utf8_lossy(&n).into_owned()).collect(),
+        early_return,
+    })
+}
+
+/// Where the main function of `luaq` uses the global `name` as a table or a function while it runs:
+/// indexes it, calls a method on it, stores into it, takes its length or calls it, directly or
+/// through a register it was copied into. Each is the instruction's source line, in code order (the
+/// main-function instruction index when the chunk has no line info).
+///
+/// Only the main function's own code counts: a use inside a function it defines runs when that
+/// function is called. Passing the value to a call is not a use here, and neither is a use through
+/// a function the main function calls. Registers are followed in code order across branches, so a
+/// register a branch copies the value into counts as holding it until something else is written to
+/// it. A chunk that does not decode is an error.
+pub fn top_level_uses(luaq: &[u8], name: &str) -> Result<Vec<u32>, String> {
+    let chunk = decode(luaq).map_err(|e| e.to_string())?;
+    let p = &chunk.main;
+    let is_name = |i: usize| matches!(p.constants.get(i), Some(Constant::String(s)) if s.as_slice() == name.as_bytes());
+    let mut held = vec![false; 512];
+    let mut out = Vec::new();
+    let mut pc = 0usize;
+    while pc < p.code.len() {
+        let at = pc;
+        let i = p.code[pc];
+        pc += 1;
+        let ra = a(i);
+        let rb = b(i) as usize;
+        let used = match op(i) {
+            OP_GETTABLE | OP_SELF | OP_LEN => held[rb],
+            OP_SETTABLE | OP_CALL | OP_TAILCALL => held[ra],
+            _ => false,
+        };
+        if used {
+            out.push(p.line_info.get(at).copied().unwrap_or(at as u32));
+        }
+        match op(i) {
+            OP_GETGLOBAL => held[ra] = is_name(bx(i)),
+            OP_MOVE => held[ra] = held[rb],
+            OP_SELF => {
+                held[ra + 1] = held[rb];
+                held[ra] = false;
+            }
+            OP_TESTSET => held[ra] = held[ra] || held[rb],
+            OP_LOADNIL => held[ra..=rb.max(ra)].iter_mut().for_each(|h| *h = false),
+            OP_CALL | OP_TAILCALL => held[ra..].iter_mut().for_each(|h| *h = false),
+            OP_VARARG => {
+                let end = if rb == 0 { held.len() } else { (ra + rb - 1).min(held.len()) };
+                held[ra..end.max(ra + 1)].iter_mut().for_each(|h| *h = false);
+            }
+            OP_FORLOOP => {
+                held[ra] = false;
+                held[ra + 3] = false;
+            }
+            OP_TFORLOOP => held[ra + 3..=ra + 2 + c(i) as usize].iter_mut().for_each(|h| *h = false),
+            OP_CLOSURE => {
+                held[ra] = false;
+                // The closure's upvalue pseudo-instructions are not executed.
+                pc += p.protos.get(bx(i)).map(|q| q.nups as usize).unwrap_or(0);
+            }
+            OP_SETLIST => {
+                // C = 0 stores the real count in the next code word, which is not an instruction.
+                if c(i) == 0 {
+                    pc += 1;
+                }
+            }
+            // These write no register.
+            OP_SETGLOBAL | OP_SETUPVAL | OP_SETTABLE | OP_JMP | OP_EQ | OP_LT | OP_LE | OP_TEST
+            | OP_RETURN | OP_CLOSE => {}
+            _ => held[ra] = false,
+        }
+    }
+    Ok(out)
+}
+
+/// Every global the main function `p` sets, with the value it holds when the function finishes
+/// ([`count_globals`] describes the model).
+fn run_main(p: &Proto) -> Result<Vec<(Vec<u8>, Val)>, String> {
     let mut reg: Vec<Val> = vec![Val::Nil; 512];
     let mut env: Vec<(Vec<u8>, Val)> = Vec::new();
     let k = |i: usize| -> Result<Val, String> {
@@ -456,8 +581,7 @@ pub fn count_globals(p: &Proto) -> Result<u16, String> {
             other => return Err(undecidable(&format!("opcode {other}"), at)),
         }
     }
-    let n = env.iter().filter(|(_, v)| *v != Val::Nil).count();
-    u16::try_from(n).map_err(|_| format!("{n} globals; INFO holds at most {}", u16::MAX))
+    Ok(env)
 }
 
 /// Whether the numeric `for` loop whose body is `p.code[body..close]` (closed by the `FORLOOP` at
@@ -600,6 +724,21 @@ mod tests {
     fn globals_count_only_non_nil_top_level_globals() {
         // f (closure), x (1) and z ({}) are non-nil; y is nil.
         assert_eq!(derive("sample", &sample()).unwrap().globals, 3);
+    }
+
+    #[test]
+    fn main_functions_are_the_globals_left_holding_a_closure() {
+        // f holds a closure; x a number, y nil and z a table.
+        let run = main_run(&sample()).unwrap();
+        assert_eq!(run.functions.into_iter().collect::<Vec<_>>(), ["f"]);
+        assert_eq!(run.early_return, None, "the sample returns only at its final RETURN");
+    }
+
+    /// `return 1` before the final `RETURN` is an early return, so spliced code would not run.
+    #[test]
+    fn an_early_return_is_found_in_the_code() {
+        let main = proto(vec![abx(OP_LOADK, 0, 0), abc(OP_RETURN, 0, 2, 0), abc(OP_RETURN, 0, 1, 0)], vec![Constant::Number(1.0f32.to_bits())], vec![]);
+        assert_eq!(main_run(&chunk("early", main)).unwrap().early_return, Some(1));
     }
 
     #[test]

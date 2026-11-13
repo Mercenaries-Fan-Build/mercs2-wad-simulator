@@ -1,0 +1,45 @@
+# The live gate for qm's hooks and library loader (plan ws5 §9 step 2). Every line it adds to the game's
+# log starts "[gate]"; qm's own lines start "[qm]". Each library below loads at the hook it names, which
+# is what makes the link generate that hook, and prints when its body runs.
+format: 2
+shipment:
+  name: qm-live-gate
+  version: 0.1.0
+  target: retail
+contributions:
+  # A no-op library at the world entry: its body runs, its callback fires, and it is ready at the
+  # settle hook world.begin. It logs every handler call of the hooks below.
+  - kind: add_script
+    name: qm_gate_world
+    source: src/qm_gate_world.lua
+    load: { when: world.scripts_loaded, in: [gameplay] }
+  # The engine calls LoadSingleton by name, on the master the engine computes.
+  - kind: add_script
+    name: qm_gate_load
+    source: src/qm_gate_load.lua
+    load: { when: world.load, in: [gameplay] }
+  # The engine calls SaveComplete by name after every save.
+  - kind: add_script
+    name: qm_gate_save
+    source: src/qm_gate_save.lua
+    load: { when: save.complete, in: [gameplay] }
+  # A wrap inside mrxhq: MrxHq.GlobalEnter, on each HQ or PMC interior entry.
+  - kind: add_script
+    name: qm_gate_hq
+    source: src/qm_gate_hq.lua
+    load: { when: hq.enter, in: [gameplay] }
+  # A filtered wrap sharing _StartPlayerVisibleGameplay with world.begin: a mission retry.
+  - kind: add_script
+    name: qm_gate_retry
+    source: src/qm_gate_retry.lua
+    load: { when: world.retry, in: [gameplay] }
+  # A retail event subscription: CashAdded, posted by every MrxPmc.AddCashQty.
+  - kind: add_script
+    name: qm_gate_cash
+    source: src/qm_gate_cash.lua
+    load: { when: cash.changed, in: [gameplay] }
+  # The front end's entry: a library in the shell VM, ready at shell.open.
+  - kind: add_script
+    name: qm_gate_shell
+    source: src/qm_gate_shell.lua
+    load: { when: shell.boot, in: [front_end] }

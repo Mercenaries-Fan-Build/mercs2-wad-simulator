@@ -24,7 +24,12 @@
 //! 2. each `add_fx`, in contribution order: its effect ([`crate::effect::EffectForm`]) is appended
 //!    to the effects block under `pandemic_hash_m2(name)`, and its template
 //!    ([`crate::template::TemplateForm`]) is appended to the worldentity under
-//!    [`derived_template_key`].
+//!    [`derived_template_key`];
+//! 3. each `level_asset` row of `level: vz` that names `templates` ([`crate::level::vz_templates`]):
+//!    every template it names is read from the row's container (a console level's compact one, by
+//!    the class layouts of `vz.wad`, [`FxBase::level_templates`]) and appended to the worldentity under the
+//!    key it has in that container ([`level_template_decls`]), so the links between the templates stay
+//!    as the level wrote them.
 //!
 //! Two `replace_fx` that resolve to one effect are a [`Conflict`], whether either names the effect
 //! directly or through a template.
@@ -74,8 +79,10 @@ use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::schema::FieldValue;
 use mercs2_formats::scripts_block::{Entry, ScriptsBlock};
 use mercs2_formats::types::TYPE_HASH_EFFECT;
+use mercs2_formats::be_to_le::ecs::ComponentSchemas;
 use mercs2_formats::worldentity::{
-    derived_template_key, Value, WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, TEMPLATE_KEY_BIT, WORLDENTITY_TYPE_HASH,
+    derived_template_key, Payload, TemplateDecl, Value, WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, TEMPLATE_KEY_BIT,
+    WORLDENTITY_TYPE_HASH,
 };
 use serde::{Deserialize, Serialize};
 
@@ -443,10 +450,144 @@ pub fn has_sprites(manifest: &Manifest) -> bool {
     manifest.contributions.iter().any(|c| matches!(c, Contribution::AddFxSprite { .. }))
 }
 
-/// Whether a manifest has a contribution [`merge`] applies: an `add_fx`, a `replace_fx`, an
-/// `add_fx_sprite` or a `replace_texture` of the `vfx` atlas.
+/// Whether a manifest has a contribution [`merge`] applies in the main campaign: one
+/// [`merges_level_fx`] names, or a `level: vz` row naming templates.
 pub fn merges_fx(manifest: &Manifest) -> bool {
+    merges_level_fx(manifest) || !crate::level::vz_templates(manifest).is_empty()
+}
+
+/// Whether a manifest has a contribution [`merge`] applies in a custom level too: an `add_fx`, a
+/// `replace_fx`, an `add_fx_sprite` or a `replace_texture` of the `vfx` atlas.
+pub fn merges_level_fx(manifest: &Manifest) -> bool {
     has_fx(manifest) || has_sprites(manifest) || manifest.contributions.iter().any(repaints_atlas)
+}
+
+/// The class layouts of `vz.wad` (`game`'s base), which a console level's compact worldentity leaves to
+/// the exe, when a manifest of `manifests` has a `level: vz` row naming templates; else `None`.
+pub fn level_schemas<'a>(
+    game: &crate::game::GameStack,
+    mut manifests: impl Iterator<Item = &'a Manifest>,
+) -> Result<Option<ComponentSchemas>, String> {
+    if !manifests.any(|m| !crate::level::vz_templates(m).is_empty()) {
+        return Ok(None);
+    }
+    let vz = *game.paths().first().ok_or("the game stack is empty")?;
+    ComponentSchemas::from_vz_wad(vz).map(Some)
+}
+
+/// The template key → name hash of every keyed `Name` record of `we`.
+fn name_of_keys(we: &WorldEntity) -> Result<BTreeMap<u32, u32>, String> {
+    let mut out = BTreeMap::new();
+    for (h, keys) in we.name_hashes()? {
+        for &k in keys {
+            if out.insert(k, h).is_some() {
+                return Err(format!("key 0x{k:08X} has more than one Name record"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The templates `names` of the level container `level`, typed against `base` for appending under the
+/// keys they have in `level`. `added_by` names who added a key of `base` that the game does not have.
+/// Every problem is collected, one line each:
+/// - a name `level` has no template of, or more than one;
+/// - a key `base` already uses;
+/// - a template key of `level` that a record of a named template holds, that is not named, and that
+///   `base` does not hold under the same name — the template would link to what the level means by
+///   it and the game does not have. The check reads every 4-byte word of the records' fixed-size
+///   (`Payload::Fixed`) payloads, so a value that happens to equal such a key is refused too: naming
+///   that template, or a different container, is the fix either way. `Name`, `NameHash`,
+///   `PointLocation` and `PackedU16` payloads are not read.
+///
+/// The named templates' `Name` records of `level` take their names (flag 0, as the compact form's
+/// inflation writes them). `edits` sets fields of named templates before they are typed
+/// ([`crate::template::TemplateForm::edit`]); an edit of a template not named is refused.
+pub fn level_template_decls(
+    level: &mut WorldEntity,
+    names: &[String],
+    edits: &BTreeMap<String, crate::template::FieldEdits>,
+    base: &WorldEntity,
+    added_by: impl Fn(u32) -> Option<String>,
+) -> Result<Vec<TemplateDecl>, Vec<String>> {
+    let mut bad = Vec::new();
+    for t in edits.keys() {
+        if !names.iter().any(|n| pandemic_hash_m2(n) == pandemic_hash_m2(t)) {
+            bad.push(format!("edits of template {t:?}: it is not one of the templates listed"));
+        }
+    }
+    let level_names = name_of_keys(level).map_err(|e| vec![e])?;
+    let base_names = name_of_keys(base).map_err(|e| vec![e])?;
+    let base_keys = base.all_keys();
+    let mut keys: BTreeMap<u32, &String> = BTreeMap::new();
+    for name in names {
+        let h = pandemic_hash_m2(name);
+        let found: Vec<u32> =
+            level_names.iter().filter(|(k, n)| **n == h && **k & TEMPLATE_KEY_BIT != 0).map(|(k, _)| *k).collect();
+        match found.as_slice() {
+            [k] if base_keys.contains(k) => bad.push(match added_by(*k) {
+                Some(who) => format!("template {name:?}: its key 0x{k:08X} is already used by a template {who} added"),
+                None => format!("template {name:?}: its key 0x{k:08X} is already used in the game's worldentity"),
+            }),
+            [k] => {
+                keys.insert(*k, name);
+            }
+            other => bad.push(format!("template {name:?} (0x{h:08X}): the container has {} templates of that name", other.len())),
+        }
+    }
+    let level_keys: BTreeSet<u32> = level.instances.iter().copied().filter(|k| k & TEMPLATE_KEY_BIT != 0).collect();
+    let mut unlisted: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+    for comp in &level.components {
+        for r in &comp.records {
+            let Some(holder) = r.keys.iter().find_map(|k| keys.get(k)) else { continue };
+            let Payload::Fixed(bytes) = &r.payload else { continue };
+            for w in bytes.chunks_exact(4) {
+                let v = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                if !level_keys.contains(&v) || keys.contains_key(&v) {
+                    continue;
+                }
+                if base_names.get(&v).is_some_and(|b| level_names.get(&v) == Some(b)) {
+                    continue;
+                }
+                unlisted.entry(v).or_default().insert(format!("{} of {holder:?}", comp.class));
+            }
+        }
+    }
+    for (v, by) in &unlisted {
+        let name = level_names.get(v).map_or("no name".to_string(), |h| format!("name hash 0x{h:08X}"));
+        bad.push(format!(
+            "template key 0x{v:08X} ({name}), held by {}, is not listed and is not that template in the game",
+            by.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if !bad.is_empty() {
+        return Err(bad);
+    }
+    let name_group = level.components.iter().position(|c| c.class == "Name").ok_or_else(|| vec!["the container has no Name component".to_string()])?;
+    for r in &mut level.components[name_group].records {
+        if let Some(name) = r.keys.first().and_then(|k| keys.get(k)) {
+            r.payload = Payload::Name { name: (*name).clone(), flag: 0 };
+        }
+    }
+    let mut out = Vec::with_capacity(keys.len());
+    for (&key, name) in &keys {
+        let edit = edits.iter().find(|(t, _)| pandemic_hash_m2(t) == pandemic_hash_m2(name)).map(|(_, e)| e);
+        let decl = crate::template::TemplateForm::express(level, key).and_then(|mut f| {
+            if let Some(e) = edit {
+                f.edit(e)?;
+            }
+            f.lower(base, key)
+        });
+        match decl {
+            Ok(d) => out.push(d),
+            Err(e) => bad.push(format!("template {name:?}: {e}")),
+        }
+    }
+    if bad.is_empty() {
+        Ok(out)
+    } else {
+        Err(bad)
+    }
 }
 
 /// Whether a manifest has an `add_fx`.
@@ -726,6 +867,29 @@ pub struct FxBase<'a> {
     /// Whether a Shipment of the set repaints the atlas. A repainted atlas is written whether or not
     /// the set adds a sprite.
     pub repainted: bool,
+    /// What the merge does with `level: vz` rows naming templates.
+    pub level_templates: LevelTemplates<'a>,
+}
+
+/// What a merge does with the set's `level: vz` rows naming templates ([`merge`] step 3).
+#[derive(Clone, Copy)]
+pub enum LevelTemplates<'a> {
+    /// The main campaign's merge: append them, reading each row's container by the class layouts of
+    /// `vz.wad` ([`level_schemas`]).
+    Append(&'a ComponentSchemas),
+    /// A custom level's link: the level runs its own worldentity, and a `level: vz` row reaches only the
+    /// main campaign.
+    Skip,
+    /// No Shipment of the set has such a row; a row met here is an internal error.
+    None,
+}
+
+impl<'a> LevelTemplates<'a> {
+    /// The main campaign's: [`Self::Append`] by `schemas` when [`level_schemas`] read them, else
+    /// [`Self::None`].
+    pub fn main(schemas: Option<&'a ComponentSchemas>) -> Self {
+        schemas.map_or(LevelTemplates::None, LevelTemplates::Append)
+    }
 }
 
 /// One Shipment of the set.
@@ -1311,6 +1475,59 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
                 Err(e) => st.problem(si, index, "M0257", format!("template {:?}: {e}", template.name)),
             }
         }
+
+        // 3. `level: vz` rows naming templates, in contribution order.
+        for row in crate::level::vz_templates(s.manifest) {
+            let index = row.index;
+            let schemas = match base.level_templates {
+                LevelTemplates::Append(schemas) => schemas,
+                LevelTemplates::Skip => continue,
+                LevelTemplates::None => {
+                    st.problem(si, index, "M0311", "internal error: the merge has no class layouts to read a level: vz worldentity by".into());
+                    continue;
+                }
+            };
+            let [rung] = row.rungs else {
+                st.problem(si, index, "M0311", format!("a worldentity has one rung, not {}", row.rungs.len()));
+                continue;
+            };
+            let path = s.root.join(&rung.file);
+            let read = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| WorldEntity::parse_compact(&b, schemas));
+            let mut level = match read {
+                Ok(we) => we,
+                Err(e) => {
+                    st.problem(si, index, "M0311", format!("{}: {e}", path.display()));
+                    continue;
+                }
+            };
+            let added_by = |k: u32| {
+                st.added_templates.get(&k).map(|(o, _)| format!("{} (contributions[{}])", st.name(o.shipment), o.index))
+            };
+            let decls = match level_template_decls(&mut level, row.templates, row.edits, &st.we, added_by) {
+                Ok(d) => d,
+                Err(lines) => {
+                    st.problem(si, index, "M0311", format!("level: vz worldentity {}:\n  {}", rung.file.display(), lines.join("\n  ")));
+                    continue;
+                }
+            };
+            for decl in decls {
+                match st.we.append_template(&decl) {
+                    Ok(()) => {
+                        templates = true;
+                        log.push(format!(
+                            "{name} contributions[{index}] level: vz template {:?} -> key 0x{:08X}, {} record(s)",
+                            decl.name,
+                            decl.key,
+                            decl.components.len()
+                        ));
+                        st.added_templates.insert(decl.key, (Origin { shipment: si, index }, decl.name.clone()));
+                    }
+                    Err(e) => st.problem(si, index, "M0311", format!("template {:?}: {e}", decl.name)),
+                }
+            }
+        }
     }
 
     let conflicts: Vec<Conflict> = st
@@ -1775,7 +1992,7 @@ mod tests {
     fn run(ships: &[&Ship], scope: Scope) -> Result<Merged, Failure> {
         let (effects, we) = game();
         let (records, atlas) = (records(), atlas());
-        let base = FxBase { effects: &effects, worldentity: &we, fxdict: &records, atlas: &atlas, repainted: false };
+        let base = FxBase { effects: &effects, worldentity: &we, fxdict: &records, atlas: &atlas, repainted: false, level_templates: LevelTemplates::None };
         let set: Vec<FxShipment<'_>> = ships.iter().map(|s| FxShipment { manifest: &s.manifest, root: &s.root }).collect();
         merge(&base, &set, scope)
     }
@@ -1925,7 +2142,7 @@ mod tests {
         assert_eq!(f.conflicts[0].effect, pandemic_hash_m2("fx_one"));
         let (effects, we) = game();
         let atlas = atlas();
-        let base = FxBase { effects: &effects, worldentity: &we, fxdict: &[], atlas: &atlas, repainted: false };
+        let base = FxBase { effects: &effects, worldentity: &we, fxdict: &[], atlas: &atlas, repainted: false, level_templates: LevelTemplates::None };
         let set = [FxShipment { manifest: &a.manifest, root: &a.root }, FxShipment { manifest: &b.manifest, root: &b.root }];
         let c = conflicts(&base, &set);
         assert_eq!(c, f.conflicts);

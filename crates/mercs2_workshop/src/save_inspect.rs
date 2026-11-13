@@ -157,7 +157,7 @@ fn file(ui: &mut egui::Ui, ins: &Inspected) {
                         ("0x24", "Timestamp", p.timestamp.to_string()),
                         ("0x2C", "Contract", p.active_contract.clone()),
                         ("0x4D", "Hero", p.character_index.to_string()),
-                        ("0x4F", "Upgrade tier", p.upgrade_index.to_string()),
+                        ("0x4F", "Costume", p.costume_index.to_string()),
                         ("0x20A", "Slot name", p.save_name().to_string()),
                         ("0x24A", "Outfits unlocked", p.unlocked_costumes.to_string()),
                         ("0x24B", "Unknown", p.unknown_0x24b.to_string()),

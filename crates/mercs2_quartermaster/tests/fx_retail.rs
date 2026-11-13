@@ -46,10 +46,12 @@ use mercs2_quartermaster::effect::{self, EffectForm};
 use mercs2_quartermaster::fx::{self, GameFx};
 use mercs2_quartermaster::lint;
 use mercs2_quartermaster::sprite::{self, Square};
-use mercs2_quartermaster::template::TemplateForm;
+use mercs2_quartermaster::template::{self, TemplateForm};
 use mercs2_quartermaster::{build, discover, Contribution, Format, GameStack, LoadedShipment};
 
 const RESIDENT: &str = r"blocks\VZ\resident_P000_Q3.block";
+/// The block of the `vz` master, which every deploy link splices qm's hooks onto (W-a).
+const SCRIPTS_VZ: &str = r"blocks\VZ\scripts_vz_P000_Q3.block";
 
 fn game() -> GameStack {
     let vz = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
@@ -309,7 +311,7 @@ fn linking_qm_fx_a_and_qm_fx_b_merges_both_in_either_order() {
     for (label, set) in [("link-ab", [&a, &b]), ("link-ba", [&b, &a])] {
         let (blocks, promised) = link(label, &set);
         let paths: Vec<&String> = blocks.keys().collect();
-        assert_eq!(paths, vec![fx::EFFECTS_BLOCK.1, RESIDENT], "{label}");
+        assert_eq!(paths, vec![fx::EFFECTS_BLOCK.1, RESIDENT, SCRIPTS_VZ], "{label}");
         assert!(paths.iter().all(|p| promised.contains(p)), "{label}: {promised:?}");
         let effects = ScriptsBlock::parse(&blocks[fx::EFFECTS_BLOCK.1].0).unwrap();
         recoloured(&effect_of(&effects, c4), &effect_of(&base.effects, c4), [255, 0, 255]);
@@ -577,7 +579,8 @@ fn a_sprites_only_shipment_emits_no_effects_block() {
     let blocks = blocks_of(rep.wad.as_ref().expect("an overlay"));
     assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT]);
     let (blocks, promised) = link("sprites-only-link", &[&s]);
-    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT]);
+    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT, SCRIPTS_VZ]);
+    assert!(blocks.keys().all(|p| promised.contains(p)), "{promised:?}");
     assert!(!promised.iter().any(|p| p == fx::EFFECTS_BLOCK.1), "{promised:?}");
 }
 
@@ -797,4 +800,203 @@ fn the_fixture_effects_spawn_on_shapes_of_their_own() {
         assert_eq!((g.word_00 as usize, shape.records.len()), (records, records), "{f}");
         assert!(shape.records.iter().all(retail_shaped), "{f}");
     }
+}
+
+/// The hex text a template form writes a key field as.
+fn key_text(k: u32) -> template::FieldInput {
+    template::FieldInput::Text(format!("0x{k:08X}"))
+}
+
+/// A level container made from the game's worldentity: a copy of the retail `M1A2` as `qm_level_tank`
+/// whose seat link names a copy of its seat, `qm_level_seat`, under keys the game does not use. Returns
+/// it with the two keys and the retail seat's key.
+fn level_with_a_tank_and_its_seat(base: &WorldEntity) -> (WorldEntity, u32, u32, u32) {
+    let mut level = base.clone();
+    let m1a2 = fx::template_keys(&level, "M1A2").unwrap()[0];
+    let mut tank = TemplateForm::express(&level, m1a2).unwrap();
+    let is_key = |t: &template::FieldInput| match t {
+        template::FieldInput::Text(s) => u32::from_str_radix(s.trim_start_matches("0x"), 16)
+            .ok()
+            .filter(|k| k & 0x8000_0000 != 0 && level.instances.contains(k)),
+        _ => None,
+    };
+    let seat_key = match &tank.components["SeatLink"] {
+        template::Records::One(m) => m.values().find_map(is_key),
+        template::Records::Many(v) => v[0].values().find_map(is_key),
+    }
+    .expect("the M1A2's seat link names a template");
+    let mut seat = TemplateForm::express(&level, seat_key).unwrap();
+    seat.name = "qm_level_seat".into();
+    let (tank_key, new_seat) = (derived_template_key("qm_level_tank"), derived_template_key("qm_level_seat"));
+    level.append_template(&seat.lower(&level, new_seat).unwrap()).unwrap();
+    tank.name = "qm_level_tank".into();
+    for records in tank.components.values_mut() {
+        let maps: Vec<&mut BTreeMap<String, template::FieldInput>> = match records {
+            template::Records::One(m) => vec![m],
+            template::Records::Many(v) => v.iter_mut().collect(),
+        };
+        for m in maps {
+            for v in m.values_mut() {
+                if *v == key_text(seat_key) {
+                    *v = key_text(new_seat);
+                }
+            }
+        }
+    }
+    level.append_template(&tank.lower(&level, tank_key).unwrap()).unwrap();
+    (level, tank_key, new_seat, seat_key)
+}
+
+/// A `level: vz` row's templates go into the worldentity under the keys the container gives them, so
+/// the tank's seat link still names the seat; a template whose record names an unlisted template of
+/// the container, a key the game uses and a name the container lacks are each refused.
+#[test]
+fn level_templates_keep_their_keys_and_their_links() {
+    let mut g = game();
+    let base = GameFx::read(&mut g).unwrap();
+    let (level, tank, seat, retail_seat) = level_with_a_tank_and_its_seat(&base.worldentity);
+    let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let none = BTreeMap::new();
+
+    let decls = fx::level_template_decls(&mut level.clone(), &names(&["qm_level_tank", "qm_level_seat"]), &none, &base.worldentity, |_| None)
+        .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(decls.iter().map(|d| d.key).collect::<Vec<_>>(), [tank, seat]);
+    let mut we = base.worldentity.clone();
+    for d in &decls {
+        we.append_template(d).unwrap();
+    }
+    assert_eq!(fx::template_keys(&we, "qm_level_tank").unwrap(), [tank]);
+    assert_eq!(fx::template_keys(&we, "qm_level_seat").unwrap(), [seat]);
+    let appended = TemplateForm::express(&we, tank).unwrap();
+    let links = |f: &TemplateForm, k: u32| match &f.components["SeatLink"] {
+        template::Records::One(m) => m.values().any(|v| *v == key_text(k)),
+        template::Records::Many(v) => v.iter().any(|m| m.values().any(|x| *x == key_text(k))),
+    };
+    assert!(links(&appended, seat) && !links(&appended, retail_seat), "the tank's seat link names the appended seat");
+
+    let e = fx::level_template_decls(&mut level.clone(), &names(&["qm_level_tank"]), &none, &base.worldentity, |_| None).unwrap_err();
+    assert!(e.iter().any(|l| l.contains(&format!("0x{seat:08X}")) && l.contains("is not listed")), "{e:?}");
+    let e = fx::level_template_decls(&mut level.clone(), &names(&["M1A2"]), &none, &base.worldentity, |_| None).unwrap_err();
+    assert!(e.iter().any(|l| l.contains("already used in the game's worldentity")), "{e:?}");
+    let e = fx::level_template_decls(&mut level.clone(), &names(&["qm_no_such_template"]), &none, &base.worldentity, |_| None).unwrap_err();
+    assert!(e.iter().any(|l| l.contains("has 0 templates of that name")), "{e:?}");
+}
+
+/// `edits` set a field of a listed template before it is appended (`bIsStowable` = `0x86560156`); an
+/// edit of a template not listed, of a field the record lacks, and of a class the template holds more
+/// than one record of are refused.
+#[test]
+fn level_template_edits_set_a_field_before_the_append() {
+    let mut g = game();
+    let base = GameFx::read(&mut g).unwrap();
+    let (level, _, seat, _) = level_with_a_tank_and_its_seat(&base.worldentity);
+    let names = vec!["qm_level_tank".to_string(), "qm_level_seat".to_string()];
+    let stowable = |f: &TemplateForm| match &f.components["SeatParameters"] {
+        template::Records::One(m) => m.iter().find(|(k, _)| k.as_str() == "0x86560156").map(|(_, v)| v.clone()).expect("bIsStowable"),
+        template::Records::Many(_) => panic!("one SeatParameters record"),
+    };
+    let flipped = match stowable(&TemplateForm::express(&level, seat).unwrap()) {
+        template::FieldInput::Bool(b) => !b,
+        other => panic!("bIsStowable is a bool, not {other:?}"),
+    };
+    let edit = |template: &str, class: &str, field: &str| {
+        BTreeMap::from([(
+            template.to_string(),
+            BTreeMap::from([(class.to_string(), BTreeMap::from([(field.to_string(), template::FieldInput::Bool(flipped))]))]),
+        )])
+    };
+    let decls =
+        fx::level_template_decls(&mut level.clone(), &names, &edit("qm_level_seat", "SeatParameters", "bIsStowable"), &base.worldentity, |_| None)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+    let mut we = base.worldentity.clone();
+    for d in &decls {
+        we.append_template(d).unwrap();
+    }
+    assert_eq!(stowable(&TemplateForm::express(&we, seat).unwrap()), template::FieldInput::Bool(flipped));
+
+    let refused = |e: BTreeMap<String, template::FieldEdits>, needle: &str| {
+        let lines = fx::level_template_decls(&mut level.clone(), &names, &e, &base.worldentity, |_| None).unwrap_err();
+        assert!(lines.iter().any(|l| l.contains(needle)), "{needle}: {lines:?}");
+    };
+    refused(edit("M1A2", "SeatParameters", "bIsStowable"), "not one of the templates listed");
+    refused(edit("qm_level_seat", "SeatParameters", "NoSuchField"), "no field NoSuchField");
+    refused(edit("qm_level_seat", "EntranceToSeat", "CanExit"), "records of this class, and an edit names one");
+}
+
+/// A Shipment with `level: vz` rows: `qm build` ships its texture in `blocks\VZ\<block>.block` with a
+/// row of its own, and the resident block's worldentity with its templates under their keys. A row
+/// naming an asset `vz.wad` holds is refused.
+#[test]
+fn a_level_vz_shipment_builds_its_assets_and_templates_into_the_overlay() {
+    use mercs2_formats::types::{TYPE_HASH_TEXTURE, TYPE_ID_TEXTURE};
+    let mut g = game();
+    let base = GameFx::read(&mut g).unwrap();
+    let (level, tank, seat, _) = level_with_a_tank_and_its_seat(&base.worldentity);
+    let shadow = pandemic_hash_m2("global_blobshadow_tank01");
+    let texture = g.container_for_asset(shadow, TYPE_HASH_TEXTURE, TYPE_ID_TEXTURE).expect("the retail blob shadow");
+    let make = |label: &str, texture_name: &str| {
+        let dir = scratch(label);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/we.ucfx"), level.write().unwrap()).unwrap();
+        std::fs::write(dir.join("src/tex.ucfx"), &texture).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            format!(
+                "format: 2
+shipment:
+  name: qm-level-vz
+  version: 0.1.0
+  target: retail
+contributions:
+  - kind: level_asset
+    level: vz
+    type: texture
+    name: {texture_name}
+    rungs: [{{ block: qm_level_vz_tex_P000_Q3, file: src/tex.ucfx }}]
+  - kind: level_asset
+    level: vz
+    type: world_entity_data
+    name: \"0x50075B3B\"
+    rungs: [{{ block: resident_P000_Q3, file: src/we.ucfx }}]
+    templates: [qm_level_tank, qm_level_seat]
+"
+            ),
+        )
+        .unwrap();
+        open(&dir)
+    };
+
+    let s = make("level_vz", "qm_level_vz_shadow");
+    let out = scratch("level_vz_out");
+    let rep = build::build(&s, Some(&mut g), None, Some(&out), None, None).unwrap_or_else(|e| panic!("{e}"));
+    let blocks = blocks_of(rep.wad.as_ref().expect("an overlay"));
+    let (raw, tex_block) = &blocks[r"blocks\VZ\qm_level_vz_tex_P000_Q3.block"];
+    assert_eq!(tex_block.aset_entries.len(), 1);
+    assert_eq!((tex_block.aset_entries[0].asset_hash, tex_block.aset_entries[0].u32_3), (pandemic_hash_m2("qm_level_vz_shadow"), TYPE_ID_TEXTURE));
+    let chunks = mercs2_formats::ucfx::block_chunk_spans(raw).unwrap();
+    assert_eq!(&raw[chunks[0].1.clone()], &texture[..], "the texture ships byte for byte");
+    let we = worldentity_of(&ScriptsBlock::parse(&blocks[RESIDENT].0).unwrap());
+    assert_eq!(fx::template_keys(&we, "qm_level_tank").unwrap(), [tank]);
+    assert_eq!(fx::template_keys(&we, "qm_level_seat").unwrap(), [seat]);
+    // A custom level's merge leaves them out: the level runs its own worldentity.
+    let set = [fx::FxShipment { manifest: &s.manifest, root: &s.root }];
+    let custom = fx::FxBase {
+        effects: &base.effects.entries,
+        worldentity: &base.worldentity,
+        fxdict: &base.fxdict,
+        atlas: &base.atlas,
+        repainted: false,
+        level_templates: fx::LevelTemplates::Skip,
+    };
+    let merged = fx::merge(&custom, &set, fx::Scope::Link).unwrap_or_else(|f| panic!("{f}"));
+    assert!(merged.worldentity.is_none(), "a custom level's merge appends no level: vz template");
+    // The deploy link's resident block, the one the game mounts last, carries them too.
+    let (linked, promised) = link("level_vz_link", &[&s]);
+    assert!(promised.iter().any(|p| p == RESIDENT));
+    let we = worldentity_of(&ScriptsBlock::parse(&linked[RESIDENT].0).unwrap());
+    assert_eq!(fx::template_keys(&we, "qm_level_tank").unwrap(), [tank]);
+
+    let s = make("level_vz_shadowed", "global_blobshadow_tank01");
+    let e = build::build(&s, Some(&mut g), None, Some(&scratch("level_vz_shadowed_out")), None, None).unwrap_err().to_string();
+    assert!(e.contains("vz.wad holds it"), "{e}");
 }

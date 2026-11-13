@@ -1,5 +1,5 @@
 {
-  "format": 2,
+  "format": 3,
   "producer": "preflight",
   "quartermaster": "3.0.0",
   "ok": true,
@@ -129,5 +129,6 @@
     "blocks\\Shell\\resident_P000_Q3.block"
   ],
   "link_file_paths": [],
+  "libraries": null,
   "findings": []
 }

@@ -20,6 +20,10 @@ use full_moon::tokenizer::{TokenReference, TokenType};
 use full_moon::visitors::Visitor;
 use full_moon::LuaVersion;
 
+/// The module system's calls a script makes at its top level to name the modules it uses and the one it
+/// extends: the bootstrap's `_G.import` and `inherit` (`_SYS._IMPORT`, `_SYS._INHERIT`).
+pub const MODULE_CALLS: [&str; 2] = ["import", "inherit"];
+
 /// A parsed script.
 pub struct Script {
     ast: Ast,
@@ -103,6 +107,34 @@ impl Script {
                 _ => None,
             }
         })
+    }
+
+    /// Every `Name.field` the script reads, calls or assigns (a global or local `Name` indexed by a dotted
+    /// field first), as `(Name, field)`, without repeats, in source order.
+    pub fn dotted(&self) -> Vec<(String, String)> {
+        #[derive(Default)]
+        struct Find(Vec<(String, String)>);
+        impl Find {
+            fn add(&mut self, prefix: &Prefix, first: Option<&Suffix>) {
+                if let (Prefix::Name(n), Some(Suffix::Index(full_moon::ast::Index::Dot { name, .. }))) = (prefix, first) {
+                    let pair = (n.token().to_string(), name.token().to_string());
+                    if !self.0.contains(&pair) {
+                        self.0.push(pair);
+                    }
+                }
+            }
+        }
+        impl Visitor for Find {
+            fn visit_var_expression(&mut self, v: &full_moon::ast::VarExpression) {
+                self.add(v.prefix(), v.suffixes().next());
+            }
+            fn visit_function_call(&mut self, c: &full_moon::ast::FunctionCall) {
+                self.add(c.prefix(), c.suffixes().next());
+            }
+        }
+        let mut find = Find::default();
+        find.visit_ast(&self.ast);
+        find.0
     }
 
     /// The functions defined by the script's top-level statements, in source order:
@@ -288,6 +320,18 @@ mod tests {
         let activated = &fns[0];
         assert!(src[activated.span.clone()].starts_with("function Activated(self)"));
         assert!(src[activated.span.clone()].ends_with("end\nend"));
+    }
+
+    #[test]
+    fn dotted_lists_each_name_and_its_first_field_once() {
+        let script = Script::parse(
+            "MrxBriefing.Start()\nlocal m = MrxBriefing.GetViewedIntros\nx = Event.Create(Event.TimerRelative, {0}, f)\n\
+             MrxBriefing.Start()\nobj:Load()\nt.a.b = 1\n",
+        )
+        .expect("parses");
+        let dotted = script.dotted();
+        let d: Vec<(&str, &str)> = dotted.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert_eq!(d, vec![("MrxBriefing", "Start"), ("MrxBriefing", "GetViewedIntros"), ("Event", "Create"), ("Event", "TimerRelative"), ("t", "a")]);
     }
 
     #[test]

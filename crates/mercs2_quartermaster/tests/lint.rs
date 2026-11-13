@@ -107,6 +107,100 @@ fn an_unrelated_wearer_is_flagged_without_a_bogus_fix() {
     assert_eq!(diags[0].fix, None);
 }
 
+/// An outfit with extra fields after `wearer`.
+fn outfit_with(wearer: &str, extra: &str) -> Manifest {
+    shipment_with(&format!(
+        "  - kind: add_outfit
+    name: pmc_hum_obama
+    slug: Obama
+    display: Obama
+    wearer: {wearer}
+{extra}"
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// M0141 — a wearer list
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_wearer_list_offers_each_hero_and_parses_as_a_list() {
+    let m = outfit("[chris, jen, mattias]");
+    assert!(lint::lint(&m, None, None).is_empty());
+    match &m.contributions[0] {
+        mercs2_quartermaster::Contribution::AddOutfit { wearer, .. } => {
+            assert_eq!(wearer.heroes(), ["chris", "jen", "mattias"]);
+            assert_eq!(wearer.to_string(), "[chris, jen, mattias]");
+        }
+        other => panic!("{other:?}"),
+    }
+    match &outfit("chris").contributions[0] {
+        mercs2_quartermaster::Contribution::AddOutfit { wearer, .. } => {
+            assert_eq!(*wearer, mercs2_quartermaster::manifest::Wearer::One("chris".into()))
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_wearer_list_or_a_hero_twice_is_m0141() {
+    assert_eq!(codes(&lint::lint(&outfit("[]"), None, None)), vec!["M0141"]);
+    let diags = lint::lint(&outfit("[jen, mattias, jennifer]"), None, None);
+    assert_eq!(codes(&diags), vec!["M0141"]);
+    assert!(diags[0].message.contains("names jennifer twice"), "{}", diags[0].message);
+    assert_eq!(codes(&lint::lint(&outfit("[chris, mattius]"), None, None)), vec!["M0140"], "each listed hero is checked");
+}
+
+/// A `level: vz` bank row of one table.
+fn bank_row(table: &str, block: &str) -> String {
+    format!(
+        "  - kind: level_asset\n    level: vz\n    type: {table}\n    name: vo_resident_DLCTest.english\n    rungs:\n\
+         \x20     - {{ block: {block}_P000_Q3, file: src/{table}.ucfx }}\n"
+    )
+}
+
+/// A bank's soundbank and sounddb share its name hash, as every retail bank's do: one asset, not two
+/// contributions claiming one. The same table twice is still M0120.
+#[test]
+fn a_bank_s_tables_of_one_name_are_one_claim_and_one_table_twice_is_m0120() {
+    let pair = shipment_with(&format!("{}{}", bank_row("soundbank", "vo_a"), bank_row("sounddb", "vo_a")));
+    assert!(!codes(&lint::lint(&pair, None, None)).contains(&"M0120"), "{:?}", lint::lint(&pair, None, None));
+    let twice = shipment_with(&format!("{}{}", bank_row("soundbank", "vo_a"), bank_row("soundbank", "vo_b")));
+    assert!(codes(&lint::lint(&twice, None, None)).contains(&"M0120"));
+}
+
+// ---------------------------------------------------------------------------
+// M0142 — the chatter set
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_chatter_set_qm_knows_is_accepted_in_any_case() {
+    for set in ["Obama_Obama01", "palin_palin01"] {
+        assert!(lint::lint(&outfit_with("mattias", &format!("    chatter: {set}\n")), None, None).is_empty(), "{set}");
+    }
+}
+
+#[test]
+fn an_unknown_chatter_set_is_m0142_with_a_suggestion() {
+    let diags = lint::lint(&outfit_with("mattias", "    chatter: Obama_Obama02\n"), None, None);
+    assert_eq!(codes(&diags), vec!["M0142"]);
+    assert_eq!(diags[0].severity, Severity::Error);
+    assert_eq!(diags[0].fix.as_deref(), Some("Obama_Obama01"));
+}
+
+// ---------------------------------------------------------------------------
+// M0143 — the levels list
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_levels_list_is_accepted_and_an_empty_or_repeating_one_is_m0143() {
+    assert!(lint::lint(&outfit_with("mattias", "    levels: [vz, dlc01]\n"), None, None).is_empty());
+    assert_eq!(codes(&lint::lint(&outfit_with("mattias", "    levels: []\n"), None, None)), vec!["M0143"]);
+    let diags = lint::lint(&outfit_with("mattias", "    levels: [vz, dlc01, vz]\n"), None, None);
+    assert_eq!(codes(&diags), vec!["M0143"]);
+    assert!(diags[0].message.contains("\"vz\" twice"), "{}", diags[0].message);
+}
+
 // ---------------------------------------------------------------------------
 // M0150 — raw must declare its radius
 // ---------------------------------------------------------------------------
@@ -684,7 +778,7 @@ fn m0310_warns_on_a_novel_shop_behaviour() {
     let d = lint::lint(&shipment_with(&novel_shop_item("my_strike", "mystrike", "src/strike.lua")), None, None);
     assert_eq!(codes(&d), vec!["M0310"], "{d:?}");
     assert_eq!(d[0].severity, Severity::Warning);
-    assert!(d[0].message.contains("PMC interior"), "{}", d[0].message);
+    assert!(d[0].message.contains("world.begin") && d[0].message.contains("during the world load"), "{}", d[0].message);
     assert!(!lint::blocks_build(&d));
 
     let shipped = shipment_with(
@@ -712,10 +806,33 @@ fn one_novel_module_from_two_scripts_is_a_self_conflict() {
     assert!(codes(&lint::lint(&two, None, None)).contains(&"M0120"));
 }
 
-/// M0197 and M0310 are hermetic rules, M0198 a game rule, each with its doc anchor.
+/// A library `load:` at a catalogue hook in a session the hook fires in is quiet; an unknown hook, an
+/// empty or repeated `in:`, or a session the hook does not fire in is M0312, an error.
+#[test]
+fn m0312_refuses_a_load_the_loader_cannot_honour() {
+    let lib = |load: &str| shipment_with(&format!("  - kind: add_script\n    name: my_lib\n    source: src/a.lua\n    load: {load}\n"));
+    assert!(lint::lint(&lib("{ when: world.scripts_loaded, in: [gameplay] }"), None, None).is_empty());
+    assert!(lint::lint(&lib("{ when: shell.boot, in: [front_end] }"), None, None).is_empty());
+    for (load, says) in [
+        ("{ when: world.started, in: [gameplay] }", "no hook"),
+        ("{ when: world.scripts_loaded, in: [] }", "empty `in:`"),
+        ("{ when: world.scripts_loaded, in: [gameplay, gameplay] }", "twice"),
+        ("{ when: world.scripts_loaded, in: [front_end] }", "fires only in gameplay"),
+    ] {
+        let d = lint::lint(&lib(load), None, None);
+        assert_eq!(codes(&d), vec!["M0312"], "{load}: {d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains(says), "{load}: {}", d[0].message);
+    }
+    let unknown_field = "format: 2\nshipment: { name: s, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_script\n    \
+                         name: my_lib\n    source: src/a.lua\n    load: { when: shell.boot, in: [front_end], at: 1 }\n";
+    assert!(from_str(unknown_field, Format::Yaml).is_err(), "load: takes only when and in");
+}
+
+/// M0197, M0310 and M0312 are hermetic rules, M0198 a game rule, each with its doc anchor.
 #[test]
 fn the_minted_script_and_placement_rules_are_registered() {
-    for (code, table) in [("M0197", lint::RULES), ("M0310", lint::RULES), ("M0198", lint::GAME_RULES)] {
+    for (code, table) in [("M0197", lint::RULES), ("M0310", lint::RULES), ("M0312", lint::RULES), ("M0198", lint::GAME_RULES)] {
         let r = table.iter().find(|r| r.code == code).unwrap_or_else(|| panic!("{code}"));
         assert_eq!(r.doc, format!("docs/modding/manifest_format.md#{}", code.to_lowercase()));
     }
@@ -811,6 +928,43 @@ fn a_level_asset_that_cannot_compile_is_an_error() {
         assert!(lint::blocks_build(&bad));
     }
     assert!(!codes(&asset("dlc01", "model", good)).contains(&"M0311"));
+}
+
+/// A `level: vz` row needs no `add_level`. Its worldentity row names the templates to append and has
+/// one rung; `templates` belongs to no other row, and two names of one template are refused.
+#[test]
+fn a_level_vz_row_adds_assets_and_names_templates() {
+    let row = |ty: &str, rungs: &str, templates: &str| {
+        lint::lint(
+            &shipment_with(&format!(
+                "  - kind: level_asset
+    level: {ty}
+    rungs: {rungs}
+{templates}"
+            )),
+            None,
+            None,
+        )
+    };
+    let one = "[{ block: a_P000_Q3, file: src/a.ucfx }]";
+    let two = "[{ block: a_P000_Q3, file: src/a.ucfx }, { block: a_P001_Q2, file: src/b.ucfx }]";
+    let vz = |ty: &str, rungs: &str, templates: &str| row(&format!("vz\n    type: {ty}\n    name: a"), rungs, templates);
+    assert!(!codes(&vz("model", two, "")).contains(&"M0311"), "a level: vz asset needs no add_level");
+    assert!(!codes(&vz("world_entity_data", one, "    templates: [DLC_M1A3, \"Explosion (Super TOW) \"]\n")).contains(&"M0311"));
+    assert!(!codes(&vz("world_entity_data", one, "    templates: [DLC_M1A3]\n    edits: { DLC_M1A3: { Health: { \"0x1417F4DD\": 2.0 } } }\n"))
+        .contains(&"M0311"));
+    for bad in [
+        vz("world_entity_data", one, ""),
+        vz("world_entity_data", two, "    templates: [DLC_M1A3]\n"),
+        vz("model", one, "    templates: [DLC_M1A3]\n"),
+        vz("world_entity_data", one, "    templates: [DLC_M1A3, dlc_m1a3]\n"),
+        vz("world_entity_data", one, "    templates: [\"\"]\n"),
+        vz("world_entity_data", one, "    templates: [DLC_M1A3]\n    edits: { Other: { EntranceToSeat: { CanExit: true } } }\n"),
+        row("dlc02\n    type: world_entity_data\n    name: a", one, "    templates: [DLC_M1A3]\n"),
+    ] {
+        assert!(codes(&bad).contains(&"M0311"), "{bad:?}");
+        assert!(lint::blocks_build(&bad));
+    }
 }
 
 /// A name that is not a lowercase `[a-z0-9_]` token cannot be a filename / stringdb key — M0200.
@@ -1345,10 +1499,38 @@ local row = WifMissionData.tMissionData.BadNameX
     );
 }
 
+/// M0315: an import inside a `pcall` is a warning at its line and column, in every Lua kind, in
+/// both of Ess's forms; a plain import is not. It never blocks the build.
+#[test]
+fn m0315_warns_on_an_import_inside_pcall() {
+    let module = "\
+import(\"MrxMusic\")
+pcall(function() import(\"MrxVoSequence\") end)
+";
+    let append = "local ok = pcall(import, \"MrxGuiBase\")\n";
+    let root = scratch("m0315_pcall_import", &[("src/m.lua", module), ("src/append.lua", append)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: qm_t_pcall
+    source: src/m.lua
+  - kind: patch_lua
+    target: wifpmcinterior
+    append: src/append.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0315").collect();
+    assert_eq!(found.len(), 2, "one per protected import: {diags:?}");
+    assert!(found.iter().all(|d| d.severity == Severity::Warning));
+    assert!(found[0].message.contains("src/m.lua:2:18") && found[0].at == Some(0), "{}", found[0].message);
+    assert!(found[1].message.contains("src/append.lua:1:18") && found[1].at == Some(1), "{}", found[1].message);
+    assert!(!lint::blocks_build(&found.into_iter().cloned().collect::<Vec<_>>()));
+}
+
 /// Every new rule is registered, so `qm rules` can list them.
 #[test]
 fn the_lua_source_rules_are_registered() {
-    for code in ["M0300", "M0301", "M0302"] {
+    for code in ["M0300", "M0301", "M0302", "M0315"] {
         assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
     }
 }

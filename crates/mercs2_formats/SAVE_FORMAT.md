@@ -46,10 +46,10 @@ Diff result: `const=4363  vary=9041` bytes. Varying regions (start–end inclusi
 | `0x2C` | 16B | `active_contract` | FACT | NUL-padded ASCII mission/contract id: `PmcCon001`, `OilCon001`, `OilCon003`, `PmcJob001`. Matches `PmcCon031_x3` placement-binding naming. |
 | `0x4C` | u32 | `flags_0x4c` | superseded | NOT one bitfield — per-byte fields (raw dword kept for reference). Byte `0x4C` = 0 in all saves (meaning unknown). |
 | `0x4D` | u8 | `character_index` | **FACT (values) + verified offset** | **HERO** (`Get/SetProfileCharacter` = runtime profile object `+0x61`, decompiled `FUN_005df790/7d0`). Values engine-coded in `FUN_00634810`: 1 → `SHELL.SelectCharacter.MattiasNilsson`, 2 → `.ChrisJacobs`, 3 → `.JenniferMui`, else "Player". Offset verified by save diff (Jen save = 3; the only header byte separating parallel fresh saves). |
-| `0x4E` | u8 | — | unknown | 0 in all saves. Candidate for the wardrobe COSTUME byte (object `+0x63`, `Get/SetProfileCostume` `FUN_005df8e0/920`) — every observed save has costume 0 (wardrobe never used), so it cannot be located from this corpus. |
-| `0x4F` | u8 | `upgrade_index` | **verified semantics** | Hero UPGRADE tier 0..3 (`Get/SetProfileUpgrade` = object `+0x62`, `FUN_005df830/870`). Drives the spawn TEMPLATE (`mrxplayer.lua:167-168`: `_tCharacterMap.templates[iUpgrade] or base`) — **the hero's look progresses with tier**. User-verified: tier 0 saves show the default skin, the tier-3 endgame save shows Mattias's "MetalHead" (v3) look. |
+| `0x4E` | u8 | `upgrade_index` | FACT (live capture) | Hero UPGRADE tier (`Get/SetProfileUpgrade` = object `+0x62`, `FUN_005df830/870`): the join's `iUpgrade`, picking `_tCharacterMap.templates[iUpgrade]` or the base template (`mrxplayer.lua:167-169`). 0 in every save, the end-game ones included; the memory capture of `Mattias Nilsson_6A0E523C` holds `+0x62` = 0. |
+| `0x4F` | u8 | `costume_index` | FACT (live capture) | COSTUME (`Get/SetProfileCostume` = object `+0x63`, `FUN_005df8e0/920`): the wardrobe stores row `i` as `i - 1` (`wifpmcinterior.lua:1472`) and the join puts on `_tCharacterMap.models[costume]` (`mrxplayer.lua:155-173`, `:179`); 0 = the base model. The end-game saves store 3 = `pmc_hum_mattias_v4`, the Jacket: a memory capture of `Mattias Nilsson_6A0E523C` loaded holds `+0x63` = 3 (`mercs2_probe` test `dump::tests::costume_is_singleton_0x63_and_header_0x4f`). An earlier revision called this byte the upgrade tier and the end-game look "MetalHead"; that check was our own engine's output, which read the byte that way. |
 | `0x20A` | UTF-16LE | `save_name` | FACT | NUL-terminated slot label, e.g. `auto_634304EA`. This is the **autosave/slot name**, *not* the player display name (even `Mattias Nilsson_*.profile` stores `auto_*` here). |
-| `0x24A` | u8 | `unlocked_costumes` | INFERRED | UNLOCKED-outfit count (feeds `Player.GetAvailableCostumes`, the wardrobe menu gate): 1 on fresh/mid saves, 5 (= all five base outfits) on the completed saves. NOT the selected outfit — user ground truth disproved that twice (looks differ between saves sharing these bytes; the look is `0x4F` upgrade-tier driven). |
+| `0x24A` | u8 | `unlocked_costumes` | INFERRED | UNLOCKED-outfit count (feeds `Player.GetAvailableCostumes`, the wardrobe menu gate): 1 on fresh/mid saves, 5 (= all five base outfits) on the completed saves. NOT the selected outfit, which is `0x4F`. |
 | `0x24B` | u8 | `unknown_0x24b` | unknown | `1` in every observed save. NOT character/costume/upgrade. |
 | `0x2F8` | u16 | `fuel_capacity` | INFERRED | Max fuel; ≥ `fuel` (700/5500/300). |
 | `0x45C` | u32 **BE** | blob version | FACT | `1` in all 8 vendored saves. The engine's big-endian SaveData blob header (`FUN_005a4520`, `ntohl`) starts here. |
@@ -59,11 +59,11 @@ Diff result: `const=4363  vary=9041` bytes. Varying regions (start–end inclusi
 
 ## Per-file summary (all six)
 
-| File | contract | hero @0x4D | upgrade @0x4F | unlocked @0x24A | retail look (user-verified) | timestamp | cash | fuel | save_name |
-|------|----------|-----------|---------------|-----------------|------------------------------|-----------|------|------|-----------|
+| File | contract | hero @0x4D | costume @0x4F | unlocked @0x24A | look | timestamp | cash | fuel | save_name |
+|------|----------|-----------|---------------|-----------------|------|-----------|------|------|-----------|
 | Mattias Nilsson_63430745 | OilCon001 | 1 mattias | 0 | 1 | default skin ✓ | 0x634F59AA | 2,545,064 | 700 | auto_634304EA |
-| Mattias Nilsson_6A0E523C | PmcJob001 | 1 mattias | **3** | 5 | "MetalHead" v3 ✓ | 0x6A0E523C | 342,479,104 | 5485 | auto_48E12F36 |
-| _______ ________48EFABFB | PmcJob001 | 1 mattias | **3** | 5 | "MetalHead" v3 | 0x48F2C77C | 342,479,104 | 5485 | auto_48E12F36 |
+| Mattias Nilsson_6A0E523C | PmcJob001 | 1 mattias | **3** | 5 | Jacket `pmc_hum_mattias_v4` (live capture) | 0x6A0E523C | 342,479,104 | 5485 | auto_48E12F36 |
+| _______ ________48EFABFB | PmcJob001 | 1 mattias | **3** | 5 | Jacket (costume 3, same save) | 0x48F2C77C | 342,479,104 | 5485 | auto_48E12F36 |
 | auto_634304EA | OilCon003 | 1 mattias | 0 | 1 | default skin | 0x634F586D | 2,765,064 | 700 | auto_634304EA |
 | auto_6A0BE454 | PmcCon001 | 1 mattias | 0 | 1 | default skin | 0x6A0CFE39 | 50,000 | 0 | auto_6A0BE454 |
 | auto_6A447BF8 | PmcCon001 | **3 jen** | 0 | 1 | Jen ✓ | 0x6A45586A | 200,000 | 25 | auto_6A447BF8 |
@@ -150,7 +150,7 @@ so `write_profile` is a faithful reimplementation, not a stand-in.
 
 ## Not yet reversed
 
-- Byte `0xAC`, and the `0x4C`/`0x4F–0x51` flag bit meanings.
+- Byte `0xAC`, and the `0x4C` and `0x50–0x51` flag bit meanings.
 - The Lua payload is exposed raw (`Profile::decompress_lua()`) and decoded into
   a `SaveState` (see "SaveSingleton Lua boot-state" above). Tables beyond the
   boot-state set (economy/faction/support catalogs, `_tRequirementsObtained`,

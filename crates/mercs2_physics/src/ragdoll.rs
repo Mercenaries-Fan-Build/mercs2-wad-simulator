@@ -3,7 +3,7 @@
 //!
 //! # What is recovered vs. what is a faithful default (honesty boundary)
 //!
-//! A full census of retail PC `vz.wad` (11 370 blocks, via `mercs2_formats` bin `ragdoll_probe`)
+//! A full census of retail PC `vz.wad` (11 370 blocks, via `mercs2_probe ragdoll-probe`)
 //! found the ragdoll physics is **not serialized**: **zero** `hkpRigidBody`, `hkpRagdollConstraintData`,
 //! `hkpRagdollLimitsData`, `hkpRagdollMotorConstraintAtom`, `hkaRagdollInstance` or `hkaSkeletonMapper`
 //! instances anywhere in the archive (the class *names* sit in the packfile classname tables but no

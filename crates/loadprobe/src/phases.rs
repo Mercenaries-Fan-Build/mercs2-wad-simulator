@@ -95,6 +95,8 @@ pub static KNOWN_SOURCES: &[&str] = &[
     "crash", "mtrl", "cc", "stall", "seg", "prmg", "prmg-bw", "prmg-key", "prmg-key2", "heap",
     "raw", "vmem",
     "mod-crash", "trace-base", "trace-fault",
+    // pmc_bb's stop for a Quartermaster failure with no retail dialog (`FATAL-NODIALOG`).
+    "qm",
 ];
 
 pub fn is_known_source(s: &str) -> bool {

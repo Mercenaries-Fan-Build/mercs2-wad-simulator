@@ -39,6 +39,7 @@ use std::rc::Rc;
 use mercs2_engine::script::bindings::NAMESPACES;
 use mercs2_engine::script::mercs2_luac::rt::{Error as LuaError, Function, Result as LuaResult, Value, Variadic};
 use mercs2_engine::script::ScriptHost;
+use mercs2_formats::lua_debug::{mask_addresses, number, src_line};
 use serde_json::{json, Map, Value as Json};
 
 /// Chunk name of the recorder's own Lua; frames from it (the binding wrappers) are never recorded.
@@ -343,15 +344,6 @@ fn record_stub(sink: &Rc<RefCell<Sink>>, note: &str, src: &str, line: i64) -> Lu
     write_record(sink, "stub", rec)
 }
 
-/// `@Module` + line → `@module:line`; an empty source (no Lua frame) stays empty.
-fn src_line(src: &str, line: i64) -> String {
-    if src.is_empty() {
-        String::new()
-    } else {
-        format!("{}:{line}", src.to_ascii_lowercase())
-    }
-}
-
 fn lua_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.to_string_lossy(),
@@ -371,21 +363,6 @@ fn lua_int(v: &Value) -> i64 {
     match v {
         Value::Number(n) => *n as i64,
         _ => -1,
-    }
-}
-
-/// A Lua number as JSON: integral values as integers, the rest via the float's shortest decimal form
-/// (`lua_Number` is `f32` in this build, so widening the bits would print `0.10000000149011612`).
-fn number(n: f32) -> Json {
-    if n.is_finite() && n.fract() == 0.0 && n.abs() < 1.0e15 {
-        json!(n as i64)
-    } else {
-        format!("{n}")
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(Json::Number)
-            .unwrap_or_else(|| json!(format!("{n}")))
     }
 }
 
@@ -427,52 +404,10 @@ fn encode(v: &Value, depth: u8, fnsrc: &Function) -> Json {
     }
 }
 
-/// Replace the heap address in Lua's `tostring` of a reference value (`"function: 0xbc6d69620"`) with
-/// `<addr>`. Scripts do build strings this way (`mrxfactionmanager.lua:370` prints
-/// `"Disguise.Init " .. tostring(fn)`); the address changes on every run, retail included, so left in
-/// place it would make two identical runs' traces differ.
-fn mask_addresses(s: &str) -> String {
-    const PREFIXES: [&str; 4] = ["table: 0x", "function: 0x", "userdata: 0x", "thread: 0x"];
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    'scan: while !rest.is_empty() {
-        for p in PREFIXES {
-            if let Some(after) = rest.strip_prefix(p) {
-                let hex = after.bytes().take_while(u8::is_ascii_hexdigit).count();
-                if hex > 0 {
-                    out.push_str(&p[..p.len() - 2]);
-                    out.push_str("<addr>");
-                    rest = &after[hex..];
-                    continue 'scan;
-                }
-            }
-        }
-        let ch = rest.chars().next().expect("rest is non-empty");
-        out.push(ch);
-        rest = &rest[ch.len_utf8()..];
-    }
-    out
-}
-
 fn key_string(k: &Value, fnsrc: &Function) -> String {
     match k {
         Value::String(s) => s.to_string_lossy(),
-        Value::Number(n) => number(*n).to_string(),
+        Value::Number(n) => serde_json::to_string(&number(*n)).expect("a number always serializes"),
         other => encode(other, TABLE_DEPTH, fnsrc).to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::mask_addresses;
-
-    #[test]
-    fn masks_reference_addresses_and_nothing_else() {
-        assert_eq!(mask_addresses("Disguise.Init function: 0xbc6d69620"), "Disguise.Init function: <addr>");
-        assert_eq!(mask_addresses("table: 0x1a3f2c80 / thread: 0xff"), "table: <addr> / thread: <addr>");
-        // A guid printed as hex and a prefix with no hex after it are left alone.
-        assert_eq!(mask_addresses("target 0x100007d2"), "target 0x100007d2");
-        assert_eq!(mask_addresses("function: 0x"), "function: 0x");
-        assert_eq!(mask_addresses("[VzaCon001.Objectives.001] ü"), "[VzaCon001.Objectives.001] ü");
     }
 }

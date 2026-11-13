@@ -30,7 +30,7 @@ use mercs2_quartermaster::build::{self, BuildError, BuildReport};
 use mercs2_quartermaster::discover::{self, LoadedShipment};
 use mercs2_quartermaster::lint::{Diagnostic, Severity};
 use mercs2_quartermaster::manifest::{
-    CapabilityReq, ConflictDecl, Contribution, Requirement, ShipmentReq, SoundCue, Touch,
+    wearer_table_key, CapabilityReq, ConflictDecl, Contribution, Requirement, ShipmentReq, SoundCue, Touch, Wearer,
 };
 use mercs2_quartermaster::names::NameTable;
 
@@ -116,8 +116,8 @@ pub enum Act {
     /// commit could only ever append a new contribution, and there was no way back to the one you
     /// came from.
     Craft(Craft, usize),
-    /// Set the hero whose wardrobe an outfit joins.
-    SetWearer(usize, &'static str),
+    /// Pick or unpick a hero whose wardrobe an outfit joins.
+    ToggleWearer(usize, &'static str),
     /// Replace contribution `.0` with an edited copy.
     ///
     /// The form edits a CLONE and emits this when a field commits, rather than mutating the
@@ -1078,6 +1078,9 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             slug: format!("MyOutfit{n}"),
             display: "My outfit".into(),
             wearer: "mattias".into(),
+            chatter: None,
+            levels: None,
+            briefing_safe: true,
             model: Some(PathBuf::from("src/model.glb")),
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),
@@ -1194,6 +1197,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             name,
             source: PathBuf::from("src/module.lua"),
             exports: Vec::new(),
+            load: None,
         },
         "replace_lua" => Contribution::ReplaceLua {
             target: "wifpmcinterior".into(),
@@ -1291,6 +1295,8 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             asset_type: "model".into(),
             name,
             rungs: Vec::new(),
+            templates: Vec::new(),
+            edits: Default::default(),
         },
         "add_shop_item" => Contribution::AddShopItem {
             id: format!("my_item_{n}"),
@@ -1491,15 +1497,16 @@ pub fn center(root: &mut egui::Ui, p: &Panel, names: Option<&NameTable>) -> Vec<
                     theme::section(ui, "Wardrobe", Some(slug), true, |ui| {
                         ui.label(
                             egui::RichText::new(
-                                "`_tOutfits` has one list per hero, so the wearer is a closed set \u{2014} and the merge key is (wearer, slug), which is why retail can reuse `Original` across all three.",
+                                "`_tOutfits` has one list per hero, so the wearers are a closed set; the outfit joins the list of each hero picked.",
                             ).small()
                             .color(theme::FAINT),
                         );
                         ui.add_space(7.0);
                         ui.horizontal(|ui| {
                             for w in WEARERS {
-                                if theme::pill(ui, w, w == wearer.as_str()).clicked() {
-                                    acts.push(Act::SetWearer(i, w));
+                                let on = wearer.heroes().iter().any(|h| wearer_table_key(h) == wearer_table_key(w));
+                                if theme::pill(ui, w, on).clicked() {
+                                    acts.push(Act::ToggleWearer(i, w));
                                 }
                             }
                         });
@@ -2222,7 +2229,7 @@ fn contribution_form(
 
     match c {
         Contribution::AddOutfit {
-            name, slug, display, wearer, model, donor, textures, retarget, single_group,
+            name, slug, display, wearer, chatter, levels, briefing_safe, model, donor, textures, retarget, single_group,
         } => {
             commit |= text_row(ui, "Asset name", name, "pmc_hum_my_outfit", true);
             theme::field_note(
@@ -2235,6 +2242,36 @@ fn contribution_form(
             );
             commit |= text_row(ui, "Wardrobe slug", slug, "MyOutfit", true);
             commit |= text_row(ui, "Display", display, "My outfit", true);
+            // The chatter set is one of the sets qm knows the game holds (M0142), so it is a choice.
+            ui.horizontal_wrapped(|ui| {
+                theme::field_label(ui, "Chatter");
+                if theme::pill(ui, "none", chatter.is_none()).clicked() && chatter.is_some() {
+                    *chatter = None;
+                    commit = true;
+                }
+                for set in mercs2_quartermaster::outfits::chatter_sets().expect("qm's data/chatter_sets.tsv parses (tested in qm)") {
+                    let on = chatter.as_deref() == Some(set.as_str());
+                    if theme::pill(ui, &set, on).clicked() && !on {
+                        *chatter = Some(set);
+                        commit = true;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                theme::field_label(ui, "Briefing");
+                let label = if *briefing_safe { "shown" } else { "hero's own model" };
+                if theme::pill(ui, label, !*briefing_safe).clicked() {
+                    *briefing_safe = !*briefing_safe;
+                    commit = true;
+                }
+            });
+            // Levels as written, comma-separated; empty is the main campaign alone.
+            let mut levels_text = levels.as_ref().map(|l| l.join(", ")).unwrap_or_default();
+            if text_row(ui, "Levels", &mut levels_text, "vz", false) {
+                let list: Vec<String> = levels_text.split(',').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                *levels = (!list.is_empty()).then_some(list);
+                commit = true;
+            }
             // Wearer is chosen once, in the WARDROBE section above — it owns the (wearer, slug) merge
             // key and the single `_tOutfits` writer. Duplicating the pills here made two writers of the
             // same field, the exact split that section's comment exists to prevent. `wearer` is still
@@ -2286,13 +2323,14 @@ fn contribution_form(
                 *donor = (!d.trim().is_empty()).then_some(d);
                 commit = true;
             }
-            // An outfit's donor is OPTIONAL: omit it and the build hosts on the wearer's own hero
-            // model. Say so, so the empty field does not read as unfinished.
+            // An outfit's donor is OPTIONAL: omit it and the build hosts on the (first) wearer's own
+            // hero model. Say so, so the empty field does not read as unfinished.
             if donor.is_none() {
+                let first = wearer.heroes().first().copied().unwrap_or("?");
                 theme::field_note(
                     ui,
                     theme::FieldState::Neutral,
-                    &format!("optional — auto-picks pmc_hum_{wearer}. Set one for a variant host."),
+                    &format!("optional — auto-picks pmc_hum_{first}. Set one for a variant host."),
                 );
             }
             ui.add_space(6.0);
@@ -2599,7 +2637,7 @@ fn contribution_form(
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
-        Contribution::LevelAsset { level, asset_type, name, rungs } => {
+        Contribution::LevelAsset { level, asset_type, name, rungs, .. } => {
             commit |= theme::text_field(ui, "Level", level, "dlc01", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Type", asset_type, "model", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Name", name, "0x00000000", theme::FieldState::Neutral).lost_focus();
@@ -3236,9 +3274,9 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
             ("Writes".to_string(), format!("model {name}  (new hash)")),
             (
                 "Writes".to_string(),
-                format!("_tOutfits[{wearer}]  ordered-list, key ({wearer},{slug})"),
+                format!("wardrobe row {slug} for {wearer}  generated by qm link, with the character map"),
             ),
-            ("Reads".to_string(), "_nAvailableCostumes".to_string()),
+            ("Writes".to_string(), "scripts wifpmcinterior, mrxplayer, vz  ordered-list".to_string()),
         ],
         Contribution::AddModel { name, .. } => {
             vec![("Writes".to_string(), format!("model {name}  (new hash)"))]
@@ -3639,9 +3677,21 @@ pub fn apply(
         }
         // Handled by the caller, which owns the workbench: the panel cannot switch pages itself.
         Act::Craft(..) => {}
-        Act::SetWearer(i, w) => match p.mutate(names, |m| {
+        // A hero pill toggles that hero: picked heroes keep their order, a new one goes last, and one
+        // hero is written as a plain name. Unpicking the last leaves an empty list, which M0141 reports.
+        Act::ToggleWearer(i, w) => match p.mutate(names, |m| {
             if let Some(Contribution::AddOutfit { wearer, .. }) = m.contributions.get_mut(i) {
-                *wearer = w.to_string();
+                let mut heroes: Vec<String> = wearer.heroes().into_iter().map(str::to_string).collect();
+                match heroes.iter().position(|h| wearer_table_key(h) == wearer_table_key(w)) {
+                    Some(at) => {
+                        heroes.remove(at);
+                    }
+                    None => heroes.push(w.to_string()),
+                }
+                *wearer = match heroes.as_slice() {
+                    [one] => Wearer::One(one.clone()),
+                    _ => Wearer::Many(heroes),
+                };
             }
         }) {
             Ok(()) => *status = p.status.clone(),
@@ -4035,6 +4085,9 @@ mod tests {
             slug: "MyAsset".into(),
             display: "My asset".into(),
             wearer: "mattias".into(),
+            chatter: None,
+            levels: None,
+            briefing_safe: true,
             model: Some(PathBuf::from(model)),
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),

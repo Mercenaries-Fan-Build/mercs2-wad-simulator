@@ -34,8 +34,8 @@ pub enum MergeClass {
     /// Many claimants, union by key. The key IS the claim identity, so two claimants on one claim
     /// means a genuine duplicate-key collision.
     KeyedSet,
-    /// Many claimants, append-only, with Quartermaster-computed companions (e.g. the wardrobe's
-    /// availability count derived from final list length).
+    /// Many claimants, append-only, with Quartermaster-computed companions (e.g. the wardrobe lists
+    /// and character map the link generates from every installed outfit).
     OrderedList,
     /// Many claimants; the later one wins and load order is the user's answer.
     LastWins,
@@ -67,9 +67,6 @@ pub enum Claim {
     /// claiming a script is claiming a share of that block. The front end's `mrxsound` (in
     /// `shell.wad`) and gameplay's (in `vz.wad`) are two scripts: each level runs its own copy.
     Script { name: String, level: crate::link::Level },
-    /// A row in the wardrobe. Key is `(wearer, slug)` — NOT slug alone: retail reuses `Original`
-    /// and `ChickenSuit` across all three heroes.
-    OutfitSlot { wearer: String, slug: String },
     /// A hooked native address or symbol.
     NativeHook { at: String },
     /// A file placed in the game folder, keyed on its PATH relative to that folder, LOWERCASED.
@@ -166,7 +163,6 @@ impl Claim {
                 crate::link::Level::Vz => format!("script {name}"),
                 crate::link::Level::Shell => format!("front-end script {name} (shell.wad)"),
             },
-            Claim::OutfitSlot { wearer, slug } => format!("outfit {wearer}/{slug}"),
             Claim::NativeHook { at } => format!("native hook at {at}"),
             Claim::FileArtifact { path } => format!("file artifact {path}"),
             Claim::SoundCue { guid, language } => match (name, language) {
@@ -270,7 +266,6 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // the stricter class wins and an append beside a replacement is a conflict.
         Claim::Script { .. } if intent == Intent::Additive => MergeClass::OrderedList,
         Claim::Script { .. } => MergeClass::Exclusive,
-        Claim::OutfitSlot { .. } => MergeClass::KeyedSet,
         // No arbitration exists: ASI discovery is filesystem order across four directories, so
         // there is no load order that resolves two plugins hooking one address.
         Claim::NativeHook { .. } => MergeClass::Exclusive,
@@ -339,23 +334,27 @@ pub struct ClaimRecord {
     pub name: Option<String>,
 }
 
-/// The scripts a sound loader lives in, for the `sessions` a bank loads in: gameplay's trampoline
-/// hosts `wifpmcinterior` (the loads) and `mrxsoundbootstrap` (the unloads after `ExitGame`) in
-/// `vz.wad`; the front end's loader `qm_shell_modloader` and its trampoline host `mrxsound` in
-/// `shell.wad`. A sound kind claims them `Additive`: N loaders fold into one, and a `replace_lua` of
-/// a host is a conflict.
+/// The scripts qm's loader lives in, for the `sessions` it runs in: the loader qm mints
+/// (`qm_modloader` in `vz.wad`, `qm_shell_modloader` in `shell.wad`) and the host of each hook it
+/// loads at or runs on ([`crate::loader::core_hooks`]: the `vz` master and `mrxsoundbootstrap` in
+/// gameplay, `shellbootstrap` and `mrxsound` in the front end). A kind whose registration the loader
+/// carries claims them `Additive`: N registrations fold into one loader, and a `replace_lua` of a
+/// host is a conflict.
 pub fn loader_scripts(sessions: &std::collections::BTreeSet<crate::manifest::LoadSession>) -> Vec<Claim> {
     use crate::link::Level;
     use crate::manifest::LoadSession;
     let mut out = Vec::new();
-    if sessions.contains(&LoadSession::Gameplay) {
-        for name in ["wifpmcinterior", "mrxsoundbootstrap"] {
-            out.push(Claim::Script { name: name.into(), level: Level::Vz });
+    for (session, loader) in [(LoadSession::Gameplay, crate::link::QM_MODLOADER_NAME), (LoadSession::FrontEnd, crate::link::QM_SHELL_MODLOADER_NAME)] {
+        if !sessions.contains(&session) {
+            continue;
         }
-    }
-    if sessions.contains(&LoadSession::FrontEnd) {
-        for name in [crate::link::QM_SHELL_MODLOADER_NAME, "mrxsound"] {
-            out.push(Claim::Script { name: name.into(), level: Level::Shell });
+        let level = Level::of(session);
+        out.push(Claim::Script { name: loader.into(), level });
+        for id in crate::loader::core_hooks(session) {
+            let host = &crate::hooks::hook(id).unwrap_or_else(|| panic!("data/hooks.tsv has no {id}")).host;
+            if !out.contains(&Claim::Script { name: host.clone(), level }) {
+                out.push(Claim::Script { name: host.clone(), level });
+            }
         }
     }
     out
@@ -381,8 +380,6 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
         match c {
             Contribution::AddOutfit {
                 name,
-                slug,
-                wearer,
                 model,
                 donor,
                 ..
@@ -392,23 +389,17 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 if model.is_some() {
                     push(Access::Write, Claim::asset(name), Intent::Additive);
                 }
-                push(
-                    Access::Write,
-                    bare(Claim::OutfitSlot {
-                        wearer: wearer.clone(),
-                        slug: slug.clone(),
-                    }),
-                    Intent::Additive,
-                );
-                // The wardrobe table lives here, so the script is claimed too — both kinds append a row.
-                push(
-                    Access::Write,
-                    bare(Claim::Script {
-                        name: "wifpmcinterior".into(),
-                        level: crate::link::Level::Vz,
-                    }),
-                    Intent::Additive,
-                );
+                // No claim on the outfit's slug: two Shipments may each add one of a slug, and a save
+                // tells them apart by Shipment (`crate::outfits` refuses what cannot be told apart).
+                // The link splices the generated outfit code onto the wardrobe, the player script and
+                // the master, so those are claimed — both kinds of outfit get the code.
+                for script in [crate::outfits::WARDROBE_SCRIPT, crate::outfits::PLAYER_SCRIPT, crate::hooks::MASTER_HOST] {
+                    push(
+                        Access::Write,
+                        bare(Claim::Script { name: script.into(), level: crate::link::Level::Vz }),
+                        Intent::Additive,
+                    );
+                }
                 if let Some(d) = donor {
                     push(Access::Read, Claim::asset(d), Intent::Replace);
                 }
@@ -428,6 +419,13 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     push(Access::Write, Claim::sound_cue(&c.name, None), Intent::Additive);
                 }
                 let sessions: std::collections::BTreeSet<_> = load_in.iter().copied().collect();
+                for script in loader_scripts(&sessions) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
+            }
+            // Loads sound something else ships, so it claims only the scripts of its sessions' loaders.
+            Contribution::LoadSound { sessions, .. } => {
+                let sessions: std::collections::BTreeSet<_> = sessions.iter().copied().collect();
                 for script in loader_scripts(&sessions) {
                     push(Access::Write, bare(script), Intent::Additive);
                 }
@@ -474,20 +472,14 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
             // add_ui is a movie (Additive write on its new hash, same first-writer-wins rule as
-            // AddMovie) PLUS a Script-layer touch: it appends the one-line mod-loader trampoline to
-            // `wifpmcinterior`. That claim is Additive, so two UI mods merge (both trampolines fold
-            // to one; both registrations bake into `qm_modloader`) rather than conflicting — the same
-            // shape as an outfit's wardrobe-row append.
+            // AddMovie) PLUS a Script-layer touch: its registration bakes into `qm_modloader`, which
+            // qm's hooks load and run ([`loader_scripts`]). Those claims are Additive, so two UI mods
+            // merge (both registrations bake into one loader) rather than conflicting.
             Contribution::AddUi { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
-                push(
-                    Access::Write,
-                    bare(Claim::Script {
-                        name: "wifpmcinterior".into(),
-                        level: crate::link::Level::Vz,
-                    }),
-                    Intent::Additive,
-                );
+                for script in loader_scripts(&[crate::manifest::LoadSession::Gameplay].into()) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
             Contribution::AddModel { name, donor, .. } => {
                 // The model's own hash. With `collision: follow_geometry` the regenerated PHY2 ships
@@ -724,18 +716,13 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     push(Access::Write, Claim::asset(layer), Intent::Additive);
                 }
             }
-            // No Data half — its whole effect is a registration baked into `qm_modloader`, reached by
-            // the same one-line trampoline `add_ui` appends to `wifpmcinterior`. Additive, so N layer
-            // mods (and UI mods) fold to one trampoline and one loader rather than conflicting.
+            // No Data half — its whole effect is a registration baked into `qm_modloader`, which qm's
+            // hooks load and run, as `add_ui`'s is. Additive, so N layer mods (and UI mods) fold to
+            // one loader rather than conflicting.
             Contribution::ActivateLayer { .. } => {
-                push(
-                    Access::Write,
-                    bare(Claim::Script {
-                        name: "wifpmcinterior".into(),
-                        level: crate::link::Level::Vz,
-                    }),
-                    Intent::Additive,
-                );
+                for script in loader_scripts(&[crate::manifest::LoadSession::Gameplay].into()) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
             // Key edits, key additions and text replacements on a shipped string table. `qm link`
             // merges every installed Shipment's writes to one table into ONE link-owned copy, in
@@ -757,6 +744,31 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // one level collide, the same shape as a language.
             Contribution::AddLevel { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            // Of the main campaign: an asset added to the overlay, or each template appended to the
+            // worldentity, by name (its key is in the container, which a hermetic lint does not read;
+            // the merge refuses a key taken twice).
+            Contribution::LevelAsset { level, asset_type, name, templates, .. } if level == crate::level::VZ => {
+                // A bank's tables share its name hash (a soundbank and its sounddb, retail's shape,
+                // `docs/type_hash_registry.md`): one bank, so the first of its tables claims it. The same
+                // table twice is still two claims of one asset.
+                let bank_table = |t: &str| matches!(t, "soundbank" | "sounddb" | "wavebank");
+                let claimed_before = bank_table(asset_type)
+                    && manifest.contributions[..index].iter().any(|p| {
+                        matches!(p, Contribution::LevelAsset { level: l, asset_type: t, name: n, templates: ts, .. }
+                            if l == level && ts.is_empty() && bank_table(t) && t != asset_type
+                                && crate::manifest::asset_hash(n) == crate::manifest::asset_hash(name))
+                    });
+                if templates.is_empty() && !claimed_before {
+                    push(Access::Write, Claim::asset(name), Intent::Additive);
+                }
+                for t in templates {
+                    push(
+                        Access::Write,
+                        (Claim::Template { name_hash: mercs2_formats::hash::pandemic_hash_m2(t) }, Some(t.clone())),
+                        Intent::Additive,
+                    );
+                }
             }
             // Inside its own level's patch: it can only meet another Shipment that adds that level,
             // which the `add_level` claim above already refuses.
@@ -943,7 +955,7 @@ impl std::fmt::Display for Conflict {
 /// Conflicts across a set of installed Shipments.
 ///
 /// Note what is NOT a conflict, because it is the whole point: two Shipments each adding a wardrobe
-/// outfit claim different `OutfitSlot`s and share an `OrderedList` script, so they compose. Two
+/// outfit share the `OrderedList` scripts the link generates the wardrobe into, so they compose. Two
 /// Shipments replacing the same texture are `LastWins` — the user picks with load order.
 pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
     let mut by_claim: BTreeMap<Claim, Vec<(ClaimRecord, String)>> = BTreeMap::new();

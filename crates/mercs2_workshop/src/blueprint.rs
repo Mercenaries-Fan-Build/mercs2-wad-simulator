@@ -18,10 +18,21 @@
 //!   calls, tables, operators and parentheses. A table passed straight to a call is spread over
 //!   the call's own pins, the way `self:CreateChild({...})` reads as an objective's fields;
 //! * anonymous functions — an exec output on the node holding them, wired to their body, the
-//!   way an objective's `fOnComplete` reads as where execution goes when it completes.
+//!   way an objective's `fOnComplete` reads as where execution goes when it completes;
+//! * runs — consecutive calls to one function whose arguments are all literals or names (a script's
+//!   `import` lines) fold into one node with each call's arguments as its own group of pins; a
+//!   comment between two calls, a kept value, a callback or a wired argument ends the run. Each call
+//!   keeps its own tokens and line and is emitted back as its own statement, and a run edits as a run
+//!   (add a call, remove one, unfold it into one node per call).
 //!
 //! Anything else is kept as the exact Lua it is: a statement as a Lua node, an expression that
 //! indexes with `[...]` as a Lua pin.
+//!
+//! The main chunk's top-level declarations are members ([`Member`]) — functions, variables, data,
+//! imports — which the Missions page lists rather than draws ([`Graph::hidden`], [`Graph::shown`]);
+//! each top-level function carries how it is reached ([`Reach`]): by the game's executables by name
+//! ([`crate::engine_calls`]), as an override, passed to or stored for a callback, called, or named by
+//! other scripts.
 
 use std::collections::HashMap;
 
@@ -37,7 +48,7 @@ use full_moon::node::Node as AstNode;
 use full_moon::tokenizer::{Symbol, Token, TokenReference, TokenType};
 use full_moon::visitors::{VisitMut, VisitorMut};
 
-use crate::lua_source::Script;
+use crate::lua_source::{Script, MODULE_CALLS};
 
 pub type NodeId = usize;
 
@@ -156,6 +167,10 @@ pub struct Node {
     /// Outputs in scope only inside the block on an exec output: a loop's variables, an
     /// anonymous function's parameters.
     block_vars: Vec<(usize, Vec<usize>)>,
+    /// What the statement declares, when it is a top-level member of the main chunk.
+    member: Option<Member>,
+    /// How a top-level function is reached.
+    reach: Vec<Reach>,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +229,78 @@ pub enum Lua {
 pub struct Problem {
     pub node: Option<NodeId>,
     pub message: String,
+}
+
+/// What a top-level statement of the main chunk declares: the Missions page lists these beside the canvas
+/// rather than drawing them on the chunk's exec chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Member {
+    /// A `function` statement, in any of its four forms.
+    Function,
+    /// Names given literals, global paths or `nil`: values with a default.
+    Variable,
+    /// Names given tables of literals, global paths and further such tables.
+    Data,
+    /// A call of the module system ([`crate::lua_source::MODULE_CALLS`]), or a run of them.
+    Import,
+}
+
+/// One way a script's top-level function is reached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The game's executables call it by name ([`crate::engine_calls`]): `images` are the images that do.
+    Engine { module: EngineModule, images: Vec<String> },
+    /// It replaces the function of the same name its base class `base` (lower-case) defines.
+    Override(String),
+    /// Passed as a value to `callee` on `line`.
+    Passed { callee: String, line: u32, to: Callee },
+    /// Stored as a value into `target` on `line` (`fCallback = _JobRequest`).
+    Stored { target: String, line: u32 },
+    /// Called on `line` of this script.
+    Called(u32),
+    /// Named as `Module.name` by these other corpus scripts.
+    Named(Vec<String>),
+}
+
+/// Where the engine runs a function it calls by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EngineModule {
+    /// In this script's module, named by its hash.
+    This,
+    /// In the script of the world object the call passes.
+    Object,
+    /// In a module the call chooses at run time (a net event's module).
+    Runtime,
+}
+
+/// What a function passed as a value is passed to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Callee {
+    /// An engine binding: a `Namespace.name` the pc-v10 image registers.
+    Engine,
+    /// Lua of the corpus: this script's own function, or a field of a corpus module.
+    Lua,
+    /// Neither: a method of a local, a bootstrap global, the standard library.
+    Unresolved,
+}
+
+impl Node {
+    /// A top-level call of the module system is an import member.
+    fn tag_import(&mut self) {
+        if matches!(self.form, Form::Call { binding: Binding::None, .. }) && self.callee().is_some_and(|c| MODULE_CALLS.contains(&c.as_str())) {
+            self.member = Some(Member::Import);
+        }
+    }
+
+    /// The section of the script's members this node is listed under, when it is one.
+    pub fn member(&self) -> Option<Member> {
+        self.member
+    }
+
+    /// How the function this node defines is reached (empty for any other node).
+    pub fn reach(&self) -> &[Reach] {
+        &self.reach
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────── templates
@@ -296,6 +383,21 @@ enum Form {
         span: ContainedSpan,
         inner: SlotRef,
     },
+    /// A run of consecutive calls to one function, all of whose arguments are literals or names
+    /// (`import("MrxCoop")`, `import("MrxGui")`, …): one node with a row per call. `title` is what one
+    /// of the calls is titled. Each call keeps its own tokens, line and semicolon, and is emitted back
+    /// as its own statement.
+    Run { title: String, calls: Vec<RunCall> },
+}
+
+/// One call of a [`Form::Run`]: its slots index the run node's inputs `inputs`.
+#[derive(Clone, Debug)]
+struct RunCall {
+    call: CallForm,
+    inputs: std::ops::Range<usize>,
+    line: u32,
+    semi: Option<TokenReference>,
+    indent: String,
 }
 
 #[derive(Clone, Debug)]
@@ -403,6 +505,43 @@ impl Context<'_> {
     fn base_fn(&self, name: &str) -> Option<&Vec<String>> {
         self.bases.iter().find_map(|b| self.module_fn(b, name))
     }
+
+    /// The base class (lower-case) whose function `name` an override replaces.
+    fn base_of(&self, name: &str) -> Option<&str> {
+        self.bases.iter().find(|b| self.module_fn(b, name).is_some()).map(String::as_str)
+    }
+
+    /// The other corpus scripts that write `<this module>.field`.
+    fn named_by(&self, field: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .index
+            .named
+            .get(&(self.stem.clone(), field.to_string()))
+            .into_iter()
+            .flatten()
+            .filter(|p| bank_and_stem(p).1 != self.stem)
+            .cloned()
+            .collect();
+        out.dedup();
+        out
+    }
+
+    /// What a value passed to `callee` (as a call node writes it) is passed to.
+    fn callee_kind(&self, callee: &str) -> Callee {
+        if let Some((head, method)) = callee.split_once(':') {
+            let own = head == "self" && (self.own_fn(method).is_some() || self.base_fn(method).is_some());
+            return if own { Callee::Lua } else { Callee::Unresolved };
+        }
+        match callee.split_once('.') {
+            Some((head, field)) if !field.contains('.') && crate::engine_calls::engine().is_binding(head, field) => Callee::Engine,
+            // a field of a corpus module, whether the module defines it as a function or assigns it one
+            // (`DisplayDialogBox = MrxGuiDialogBox.DisplayDialogBox`): a module's table is a Lua script's
+            Some((head, _)) if self.index.resolve(head, &self.bank).is_some() => Callee::Lua,
+            Some(_) => Callee::Unresolved,
+            None if self.own_fn(callee).is_some() => Callee::Lua,
+            None => Callee::Unresolved,
+        }
+    }
 }
 
 /// The function signatures and inherit lines of a whole corpus, from which a [`Context`] for
@@ -411,6 +550,8 @@ impl Context<'_> {
 pub struct CorpusIndex {
     /// Module (lower-case file stem) → one entry per bank the module ships in.
     modules: HashMap<String, Vec<ModuleInfo>>,
+    /// (lower-case name, field) → the corpus paths of the scripts that write `Name.field`.
+    named: HashMap<(String, String), Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -425,9 +566,13 @@ impl CorpusIndex {
     /// (`lua/vz/pmccon016.lua`). A script that does not parse is an error naming it.
     pub fn build<'a>(corpus: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Self, String> {
         let mut modules: HashMap<String, Vec<ModuleInfo>> = HashMap::new();
+        let mut named: HashMap<(String, String), Vec<String>> = HashMap::new();
         for (path, src) in corpus {
             let script = Script::parse(src).map_err(|e| format!("{path}: {e}"))?;
             let (bank, stem) = bank_and_stem(path);
+            for (name, field) in script.dotted() {
+                named.entry((name.to_ascii_lowercase(), field)).or_default().push(path.to_string());
+            }
             let functions = script
                 .functions()
                 .into_iter()
@@ -446,7 +591,7 @@ impl CorpusIndex {
                 functions,
             });
         }
-        Ok(CorpusIndex { modules })
+        Ok(CorpusIndex { modules, named })
     }
 
     /// The module a script in `bank` sees under `name`: its own bank's copy, else the resident
@@ -505,7 +650,94 @@ pub fn lift(script: &Script, ctx: &Context<'_>) -> Graph {
     let mut l = Lifter::new(ctx, Vec::new(), entry, true);
     l.g.nodes[ENTRY].exec_outs.push("body".into());
     l.block(script.ast().nodes(), (ENTRY, 0));
-    l.g
+    let mut g = l.g;
+    reach(&mut g, ctx);
+    g
+}
+
+/// Tag each top-level function of the chunk with how it is reached ([`Reach`]): the engine's calls by
+/// name, the base class it overrides, every place a canvas of the script calls it or passes or stores it
+/// as a value, and the other scripts that name it through this module. Calls through `self:` and through a
+/// module held in a variable (`mModule.Start()`) name no function here and are not counted.
+fn reach(chunk: &mut Graph, ctx: &Context<'_>) {
+    let fns: Vec<(NodeId, String)> =
+        chunk.nodes.iter().enumerate().filter(|(_, n)| n.member == Some(Member::Function)).map(|(i, n)| (i, n.title.clone())).collect();
+    if fns.is_empty() {
+        return;
+    }
+    let mut uses: Vec<(String, Reach)> = Vec::new();
+    collect_uses(chunk, ctx, &mut uses);
+    let engine = crate::engine_calls::engine();
+    for (id, title) in fns {
+        let short = title.rsplit(['.', ':']).next().unwrap_or(&title).to_string();
+        let mut by: std::collections::BTreeMap<EngineModule, std::collections::BTreeSet<String>> = Default::default();
+        for c in engine.calls_of(&ctx.stem, &short) {
+            let m = match c.module {
+                crate::engine_calls::CallModule::Hash(_) => EngineModule::This,
+                crate::engine_calls::CallModule::Object => EngineModule::Object,
+                crate::engine_calls::CallModule::Computed => EngineModule::Runtime,
+                crate::engine_calls::CallModule::Unread => unreachable!("calls_of leaves out calls whose module was not read"),
+            };
+            by.entry(m).or_default().insert(c.image.clone());
+        }
+        let mut r: Vec<Reach> = by.into_iter().map(|(module, images)| Reach::Engine { module, images: images.into_iter().collect() }).collect();
+        if let Some(b) = ctx.base_of(&short) {
+            r.push(Reach::Override(b.to_string()));
+        }
+        r.extend(uses.iter().filter(|(n, _)| *n == title).map(|(_, u)| u.clone()));
+        let named = ctx.named_by(&short);
+        if !named.is_empty() {
+            r.push(Reach::Named(named));
+        }
+        chunk.nodes[id].reach = r;
+    }
+}
+
+/// Every call of a bare name, and every name used as a value, on `g` and the canvases under it.
+fn collect_uses(g: &Graph, ctx: &Context<'_>, out: &mut Vec<(String, Reach)>) {
+    for (id, n) in g.nodes.iter().enumerate() {
+        if let Some(sub) = &n.sub {
+            collect_uses(sub, ctx, out);
+        }
+        let callee = n.callee();
+        if let Some(c) = callee.as_ref().filter(|c| !c.contains(['.', ':'])) {
+            out.extend(n.lines().into_iter().map(|l| (c.clone(), Reach::Called(l))));
+        }
+        for (k, input) in n.inputs.iter().enumerate() {
+            if n.is_target(k) {
+                continue;
+            }
+            let name = match &input.value {
+                Value::Path(v) => bare(v),
+                Value::Wired { .. } => match g.feeder(id, k) {
+                    Some((f, o)) if g.nodes[f].outputs[o].kind == OutKind::Captured => g.nodes[f].outputs[o].label.clone(),
+                    Some((f, _)) if g.nodes[f].is_function() => g.nodes[f].title.clone(),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            out.push((name, value_use(g, id, ctx)));
+        }
+    }
+}
+
+/// What a value on node `id` is handed to: the call it is an argument of, or the target it is stored in,
+/// following a data node on to the statement it feeds.
+fn value_use(g: &Graph, id: NodeId, ctx: &Context<'_>) -> Reach {
+    let mut at = id;
+    let mut seen = 0;
+    while !g.nodes[at].exec_in && g.nodes[at].callee().is_none() && seen < g.nodes.len() {
+        match g.data.iter().find(|w| w.from.0 == at) {
+            Some(w) => at = w.to.0,
+            None => break,
+        }
+        seen += 1;
+    }
+    let n = &g.nodes[at];
+    match n.callee() {
+        Some(callee) => Reach::Passed { to: ctx.callee_kind(&callee), callee, line: n.line },
+        None => Reach::Stored { target: n.title.trim_end_matches(" =").to_string(), line: n.line },
+    }
 }
 
 impl Node {
@@ -527,6 +759,8 @@ impl Node {
             fresh: false,
             declares: Vec::new(),
             block_vars: Vec::new(),
+            member: None,
+            reach: Vec::new(),
         }
     }
 
@@ -535,10 +769,27 @@ impl Node {
         self.fresh
     }
 
+    /// The source lines the node was lifted from: one per call of a run, else its own.
+    pub fn lines(&self) -> Vec<u32> {
+        match &self.form {
+            Form::Run { calls, .. } => calls.iter().map(|c| c.line).collect(),
+            _ => vec![self.line],
+        }
+    }
+
+    /// How many calls a run node folds (1 for any other node).
+    pub fn run_len(&self) -> usize {
+        match &self.form {
+            Form::Run { calls, .. } => calls.len(),
+            _ => 1,
+        }
+    }
+
     /// What a call node calls, as written: `MrxMusic.PlaySpecialMusic`, `self:CreateChild`.
     pub fn callee(&self) -> Option<String> {
         let call = match &self.form {
             Form::Call { call, .. } | Form::CallExpr(call) => call,
+            Form::Run { calls, .. } => &calls[0].call,
             _ => return None,
         };
         let mut s = match &call.head {
@@ -558,7 +809,11 @@ impl Node {
 
     /// Whether the call is made on a global (a module or engine table) rather than a local.
     pub fn calls_global(&self) -> bool {
-        matches!(&self.form, Form::Call { call, .. } | Form::CallExpr(call) if matches!(call.head, HeadForm::Global(_)))
+        match &self.form {
+            Form::Call { call, .. } | Form::CallExpr(call) => matches!(call.head, HeadForm::Global(_)),
+            Form::Run { .. } => true,
+            _ => false,
+        }
     }
 
     /// The pin indices that are part of an assignment's targets (`self.oRace = …`), not the call.
@@ -653,6 +908,11 @@ impl<'c> Lifter<'c> {
         Some((ENTRY, self.output(ENTRY, name.into(), PinTy::Any, OutKind::Captured)))
     }
 
+    /// Whether `name` is a local here (of this canvas or an enclosing one).
+    fn is_local(&self, name: &str) -> bool {
+        self.frames.iter().any(|f| f.iter().any(|(n, _)| n == name)) || self.outer.iter().any(|o| o == name)
+    }
+
     fn visible(&self) -> Vec<String> {
         let mut v = self.outer.clone();
         for frame in &self.frames {
@@ -667,18 +927,36 @@ impl<'c> Lifter<'c> {
 
     // ── statements ──────────────────────────────────────────────────────────────────────
 
-    /// Lift `b`'s statements as a chain from exec output `from`. The caller owns the frame.
+    /// Lift `b`'s statements as a chain from exec output `from`. The caller owns the frame. Consecutive
+    /// calls to one function whose arguments are all literals or names fold into one run node
+    /// ([`Form::Run`]); a comment between two of them ends the run.
     fn block(&mut self, b: &Block, from: (NodeId, usize)) {
         let mut cur = from;
         let chunk = std::mem::replace(&mut self.chunk, false);
+        // The run node the next statement may join, and whether the statement before ends in a comment.
+        let mut run: Option<NodeId> = None;
+        let mut comment_before = false;
         for (stmt, semi) in b.stmts_with_semicolon() {
             self.chunk = chunk;
             let id = self.stmt(stmt);
             self.chunk = false;
+            if chunk {
+                self.g.nodes[id].tag_import();
+            }
             self.g.nodes[id].semi = semi.clone();
             self.g.nodes[id].indent = indent_of(stmt);
+            let (lead, trail) = outer_trivia(stmt);
+            let comment_after =
+                has_comment(trail.into_iter()) || semi.as_ref().is_some_and(|s| has_comment(s.trailing_trivia().cloned()));
+            let joins = run.is_some_and(|r| !comment_before && !has_comment(lead.into_iter()) && self.joins_run(r, id));
+            comment_before = comment_after;
+            if joins {
+                self.fold_into(run.expect("checked"), id);
+                continue;
+            }
             self.g.exec.push(ExecWire { from: cur, to: id });
             cur = (id, self.g.nodes[id].next.expect("a statement continues"));
+            run = self.foldable(id).then_some(id);
         }
         if let Some((last, semi)) = b.last_stmt_with_semicolon() {
             let id = self.last(last);
@@ -686,6 +964,57 @@ impl<'c> Lifter<'c> {
             self.g.nodes[id].indent = indent_of(last);
             self.g.exec.push(ExecWire { from: cur, to: id });
         }
+    }
+
+    /// Whether statement `id` can start or join a run: a call of a global's function whose value is
+    /// not kept, with no callback, and every argument a literal or a name.
+    fn foldable(&self, id: NodeId) -> bool {
+        let n = &self.g.nodes[id];
+        let call_ok = match &n.form {
+            Form::Call { binding: Binding::None, call } => matches!(call.head, HeadForm::Global(_)),
+            Form::Run { .. } => true,
+            _ => false,
+        };
+        call_ok
+            && n.closures.is_empty()
+            && n.exec_outs.len() == 1
+            && n.inputs.iter().all(|i| matches!(i.value, Value::Literal(_) | Value::Path(_) | Value::Array(_)))
+    }
+
+    /// Whether call `id` (just lifted) can join run (or call) `run`: both foldable, the same function.
+    fn joins_run(&self, run: NodeId, id: NodeId) -> bool {
+        id + 1 == self.g.nodes.len() && self.foldable(run) && self.foldable(id) && self.g.nodes[run].callee() == self.g.nodes[id].callee()
+    }
+
+    /// Fold call `id` (the last node added) into `run`, making `run` a run node if it is still a call.
+    fn fold_into(&mut self, run: NodeId, id: NodeId) {
+        let joining = self.g.nodes.pop().expect("the call just lifted");
+        debug_assert_eq!(self.g.nodes.len(), id);
+        let r = &mut self.g.nodes[run];
+        if let Form::Call { call, .. } = &r.form {
+            let first = RunCall {
+                call: call.clone(),
+                inputs: 0..r.inputs.len(),
+                line: r.line,
+                semi: r.semi.clone(),
+                indent: r.indent.clone(),
+            };
+            r.form = Form::Run { title: r.title.clone(), calls: vec![first] };
+        }
+        let offset = r.inputs.len();
+        let Form::Call { call, .. } = joining.form else { unreachable!("a joining statement is a call") };
+        r.inputs.extend(joining.inputs);
+        let end = r.inputs.len();
+        let Form::Run { title, calls } = &mut r.form else { unreachable!("made a run above") };
+        calls.push(RunCall {
+            call: shift_call(call, offset),
+            inputs: offset..end,
+            line: joining.line,
+            semi: joining.semi,
+            indent: joining.indent,
+        });
+        let titled = format!("{title} ×{}", calls.len());
+        r.title = titled;
     }
 
     fn scoped_block(&mut self, b: &Block, from: (NodeId, usize)) {
@@ -947,6 +1276,10 @@ impl<'c> Lifter<'c> {
                 binding: Binding::Local(Box::new(la.clone())),
                 values,
             };
+            if self.chunk {
+                let member = data_member(la.expressions().iter(), &|n| self.is_local(n));
+                self.g.nodes[id].member = member;
+            }
             self.next(id);
             id
         };
@@ -999,6 +1332,12 @@ impl<'c> Lifter<'c> {
                 values.push((self.slot(id, label, None, p.value()), p.punctuation().cloned()));
             }
             self.g.nodes[id].form = Form::Set { binding, values };
+            // A global given a value: a local's assignment is code, not a declaration.
+            let globals = a.variables().iter().all(|v| matches!(v, Var::Name(n) if !self.is_local(&n.token().to_string())));
+            if self.chunk && globals {
+                let member = data_member(a.expressions().iter(), &|n| self.is_local(n));
+                self.g.nodes[id].member = member;
+            }
             self.next(id);
         }
         id
@@ -1008,6 +1347,9 @@ impl<'c> Lifter<'c> {
         let short = name.rsplit(['.', ':']).next().unwrap_or(name);
         if self.ctx.base_fn(short).is_some() {
             self.g.nodes[id].category = Category::Lifecycle;
+        }
+        if self.chunk {
+            self.g.nodes[id].member = Some(Member::Function);
         }
         self.g.nodes[id].sub = Some(Box::new(sub));
         self.g.nodes[id].form = Form::Function(decl);
@@ -1109,7 +1451,15 @@ impl<'c> Lifter<'c> {
                 _ => None,
             })
             .collect();
-        match (head, dot_names.as_slice(), method) {
+        // An engine binding's arguments, named or typed from what the executables read (engine_calls),
+        // when no Lua function of the corpus answers for the call.
+        let engine = || match (head, method) {
+            (HeadForm::Global(m), None) if !dot_names.is_empty() => {
+                crate::engine_calls::engine().params(&format!("{}.{}", m.token(), dot_names.join(".")))
+            }
+            _ => None,
+        };
+        let lua = match (head, dot_names.as_slice(), method) {
             (HeadForm::Global(m), [f], None) => ctx.module_fn(&m.token().to_string(), f).cloned(),
             (HeadForm::Global(m), [], Some(mc)) => ctx
                 .module_fn(&m.token().to_string(), &mc.name().token().to_string())
@@ -1125,7 +1475,8 @@ impl<'c> Lifter<'c> {
                     .map(|p| p.iter().skip(1).cloned().collect())
             }
             _ => None,
-        }
+        };
+        lua.or_else(engine)
     }
 
     fn args_form(&mut self, owner: NodeId, args: &FunctionArgs, params: Option<&[String]>) -> ArgsForm {
@@ -1716,6 +2067,15 @@ impl Emitter<'_> {
                     }
                     last = Some((s, n.semi.clone()));
                 }
+                Form::Run { calls, .. } => {
+                    for c in calls {
+                        let mut s = Stmt::FunctionCall(self.call(id, &c.call)?);
+                        if n.fresh {
+                            s = reindent(s, &c.indent, &self.indent);
+                        }
+                        stmts.push((s, c.semi.clone()));
+                    }
+                }
                 _ => {
                     let mut s = self.stmt(id)?;
                     if n.fresh {
@@ -2138,6 +2498,14 @@ impl Graph {
                 strip_outer(LastStmt::Return(ret.clone().with_returns(returns))).to_string()
             }
             Form::Break(t) => strip_outer(LastStmt::Break(t.clone())).to_string(),
+            Form::Run { calls, .. } => {
+                let mut lines = Vec::new();
+                for c in calls {
+                    let fc = em.call(node, &c.call).map_err(|p| p.message)?;
+                    lines.push(strip_outer(Stmt::FunctionCall(fc)).to_string());
+                }
+                lines.join("\n")
+            }
             _ if n.exec_in => strip_outer(em.stmt(node).map_err(|p| p.message)?).to_string(),
             _ => strip_outer(em.expr(node).map_err(|p| p.message)?).to_string(),
         };
@@ -2148,6 +2516,113 @@ impl Graph {
             .join("\n"))
     }
 
+    /// The input ranges of a run node's calls, in order: which pins each call's card holds.
+    pub fn run_calls(&self, node: NodeId) -> Vec<(std::ops::Range<usize>, u32)> {
+        match &self.nodes[node].form {
+            Form::Run { calls, .. } => calls.iter().map(|c| (c.inputs.clone(), c.line)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Turn run node `node` back into one call node per call, chained in order where it stood: the
+    /// first keeps `node`'s id. Returns the call nodes.
+    pub fn unfold(&mut self, node: NodeId) -> Result<Vec<NodeId>, String> {
+        let n = self.nodes.get(node).ok_or("no such node")?;
+        let Form::Run { title, calls } = &n.form else { return Err(format!("`{}` is not a run of calls", n.title)) };
+        let (title, calls, template) = (title.clone(), calls.clone(), n.clone());
+        let after = template.next.and_then(|o| self.exec_target(node, o));
+        let mut ids = Vec::new();
+        for (k, c) in calls.into_iter().enumerate() {
+            let start = c.inputs.start;
+            let mut one = Node::new(
+                template.category,
+                title.clone(),
+                c.line,
+                true,
+                Form::Call { binding: Binding::None, call: remap_call(c.call, |i| i - start) },
+            );
+            one.inputs = template.inputs[c.inputs].to_vec();
+            one.exec_outs = vec!["next".into()];
+            one.next = Some(0);
+            one.semi = c.semi;
+            one.indent = c.indent;
+            one.fresh = template.fresh;
+            if k == 0 {
+                self.nodes[node] = one;
+                ids.push(node);
+            } else {
+                self.nodes.push(one);
+                ids.push(self.nodes.len() - 1);
+            }
+        }
+        self.exec.retain(|w| w.from != (node, 0));
+        for w in ids.windows(2) {
+            self.exec.push(ExecWire { from: (w[0], 0), to: w[1] });
+        }
+        if let Some(t) = after {
+            self.exec.push(ExecWire { from: (*ids.last().expect("a run has calls"), 0), to: t });
+        }
+        Ok(ids)
+    }
+
+    /// Add a call to `node` after its last, a copy of the last: a run grows by one, and a call whose
+    /// arguments are all literals or names becomes a run of two.
+    pub fn add_call(&mut self, node: NodeId) -> Result<(), String> {
+        let n = self.nodes.get_mut(node).ok_or("no such node")?;
+        let plain = n.inputs.iter().all(|i| matches!(i.value, Value::Literal(_) | Value::Path(_) | Value::Array(_)));
+        if let Form::Call { binding: Binding::None, call } = &n.form {
+            if !plain || !n.closures.is_empty() || !matches!(call.head, HeadForm::Global(_)) {
+                return Err(format!("`{}` keeps a value, a callback or a wired argument, so it cannot repeat as a run", n.title));
+            }
+            let first = RunCall { call: call.clone(), inputs: 0..n.inputs.len(), line: n.line, semi: n.semi.clone(), indent: n.indent.clone() };
+            n.form = Form::Run { title: n.title.clone(), calls: vec![first] };
+        }
+        let Form::Run { title, calls } = &mut n.form else { return Err(format!("`{}` is not a call that can repeat", n.title)) };
+        let last = calls.last().expect("a run has calls").clone();
+        let start = n.inputs.len();
+        let copied: Vec<Input> = n.inputs[last.inputs.clone()].to_vec();
+        let by = start - last.inputs.start;
+        n.inputs.extend(copied);
+        calls.push(RunCall { call: shift_call(last.call, by), inputs: start..n.inputs.len(), line: 0, ..last });
+        let titled = format!("{title} ×{}", calls.len());
+        n.title = titled;
+        Ok(())
+    }
+
+    /// Remove call `k` of run node `node` and its pins; a run left with one call is a call again.
+    pub fn remove_call(&mut self, node: NodeId, k: usize) -> Result<(), String> {
+        let n = self.nodes.get_mut(node).ok_or("no such node")?;
+        let Form::Run { title, calls } = &mut n.form else { return Err(format!("`{}` is not a run of calls", n.title)) };
+        if k >= calls.len() {
+            return Err(format!("`{}` has no call {}", n.title, k + 1));
+        }
+        let gone = calls.remove(k).inputs;
+        let len = gone.len();
+        n.inputs.drain(gone.clone());
+        for c in calls.iter_mut() {
+            if c.inputs.start >= gone.end {
+                c.call = remap_call(c.call.clone(), |i| i - len);
+                c.inputs = c.inputs.start - len..c.inputs.end - len;
+            }
+        }
+        let base = title.clone();
+        if calls.len() == 1 {
+            let only = calls.remove(0);
+            n.form = Form::Call { binding: Binding::None, call: only.call };
+            n.line = only.line;
+            n.semi = only.semi;
+            n.indent = only.indent;
+            n.title = base;
+        } else {
+            let (line, indent) = (calls[0].line, calls[0].indent.clone());
+            let titled = format!("{base} ×{}", calls.len());
+            n.title = titled;
+            n.line = line;
+            n.indent = indent;
+        }
+        Ok(())
+    }
+
     /// The data wire feeding a pin, if one does.
     pub fn feeder(&self, node: NodeId, pin: usize) -> Option<(NodeId, usize)> {
         self.data.iter().find(|w| w.to == (node, pin)).map(|w| w.from)
@@ -2156,6 +2631,77 @@ impl Graph {
     /// Where an exec output leads, if it is wired.
     pub fn exec_target(&self, node: NodeId, out: usize) -> Option<NodeId> {
         self.exec.iter().find(|w| w.from == (node, out)).map(|w| w.to)
+    }
+
+    /// Which nodes the canvas leaves out of a chunk: the members ([`Member`]), which the page lists beside
+    /// it, unless an output of one feeds a node that is drawn; and the data nodes that only feed nodes left
+    /// out. Every other canvas draws every node.
+    pub fn hidden(&self) -> Vec<bool> {
+        let mut hidden: Vec<bool> = self.nodes.iter().map(|n| n.member.is_some()).collect();
+        loop {
+            let mut changed = false;
+            // A member a drawn node reads is drawn.
+            for w in &self.data {
+                if hidden[w.from.0] && !hidden[w.to.0] && self.nodes[w.from.0].member.is_some() {
+                    hidden[w.from.0] = false;
+                    changed = true;
+                }
+            }
+            // A data node is left out when everything it feeds is.
+            for (i, n) in self.nodes.iter().enumerate() {
+                if i == ENTRY || n.exec_in || n.member.is_some() {
+                    continue;
+                }
+                let mut feeds = self.data.iter().filter(|w| w.from.0 == i).peekable();
+                let out = feeds.peek().is_some() && feeds.all(|w| hidden[w.to.0]);
+                if out != hidden[i] {
+                    hidden[i] = out;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return hidden;
+            }
+        }
+    }
+
+    /// The canvas as drawn when `hidden` ([`Graph::hidden`]) nodes are left out: each keeps its id as an
+    /// empty node with no pins and no wires, and an exec wire into one runs on to the first drawn node
+    /// after it.
+    pub fn shown(&self, hidden: &[bool]) -> Graph {
+        let nodes = self
+            .nodes
+            .iter()
+            .zip(hidden)
+            .map(|(n, &h)| if h { Node::new(Category::Data, String::new(), 0, false, Form::Entry) } else { n.clone() })
+            .collect();
+        let exec = self
+            .exec
+            .iter()
+            .filter(|w| !hidden[w.from.0])
+            .filter_map(|w| {
+                let mut to = w.to;
+                while hidden[to] {
+                    to = self.exec_target(to, self.nodes[to].next?)?;
+                }
+                Some(ExecWire { from: w.from, to })
+            })
+            .collect();
+        let data = self.data.iter().filter(|w| !hidden[w.from.0] && !hidden[w.to.0]).copied().collect();
+        Graph { nodes, exec, data }
+    }
+
+    /// The exec output an edit made on the drawn canvas at `from` stands for: when the wire from `from`
+    /// runs through `hidden` nodes, the last of them's continuation, so the edit keeps them on the chain.
+    pub fn through(&self, from: (NodeId, usize), hidden: &[bool]) -> (NodeId, usize) {
+        let mut f = from;
+        while let Some(t) = self.exec_target(f.0, f.1).filter(|&t| hidden[t]) {
+            match self.nodes[t].next {
+                Some(k) => f = (t, k),
+                None => break,
+            }
+        }
+        f
     }
 
     /// The whitespace and comments around what a pin holds now, to carry over to what replaces it.
@@ -2403,13 +2949,33 @@ impl Graph {
     /// lifted the way the source's own statements are; names of this canvas's parameters wire to
     /// them. It is on no chain until wired.
     pub fn add_statement(&mut self, lua: &str, ctx: &Context<'_>) -> Result<NodeId, String> {
+        self.add_lifted(lua, ctx, false)
+    }
+
+    /// [`Graph::add_statement`] for a main chunk, as a top-level statement: what it declares is a member,
+    /// and it runs on from the end of the chunk's chain.
+    pub fn add_top_level(&mut self, lua: &str, ctx: &Context<'_>) -> Result<NodeId, String> {
+        let id = self.add_lifted(lua, ctx, true)?;
+        self.nodes[id].tag_import();
+        let mut end = (ENTRY, 0);
+        while let Some(t) = self.exec_target(end.0, end.1) {
+            match self.nodes[t].next {
+                Some(k) => end = (t, k),
+                None => return Err("the main chunk ends in a return, so nothing can follow it".into()),
+            }
+        }
+        self.connect_exec(end, id)?;
+        Ok(id)
+    }
+
+    fn add_lifted(&mut self, lua: &str, ctx: &Context<'_>, chunk: bool) -> Result<NodeId, String> {
         let ast = full_moon::parse_fallible(lua, full_moon::LuaVersion::lua52())
             .into_result()
             .map_err(|errs| errs.iter().map(|e| e.error_message().to_string()).collect::<Vec<_>>().join("; "))?;
         let block = ast.nodes();
         let stmts: Vec<&Stmt> = block.stmts().collect();
         let before = self.nodes.len();
-        let mut l = Lifter::new(ctx, Vec::new(), Node::new(Category::Chunk, String::new(), 0, false, Form::Entry), false);
+        let mut l = Lifter::new(ctx, Vec::new(), Node::new(Category::Chunk, String::new(), 0, false, Form::Entry), chunk);
         l.g = std::mem::replace(
             self,
             Graph {
@@ -2524,12 +3090,56 @@ fn ends_line(trivia: &[Token]) -> bool {
 
 /// The leading trivia of a node's first token and the trailing trivia of its last.
 fn outer_trivia(n: &impl AstNode) -> (Vec<Token>, Vec<Token>) {
-    let first = n.tokens().next();
-    let last = n.tokens().last();
+    // By position, not by order: full_moon lists a call's parentheses before its arguments, so the
+    // last token listed is not the `)` that ends it.
+    let first = n.tokens().min_by_key(|t| t.start_position().map(|p| p.bytes()));
+    let last = n.tokens().max_by_key(|t| t.end_position().map(|p| p.bytes()));
     (
         first.map(|t| t.leading_trivia().cloned().collect()).unwrap_or_default(),
         last.map(|t| t.trailing_trivia().cloned().collect()).unwrap_or_default(),
     )
+}
+
+/// Whether `trivia` holds a comment.
+fn has_comment(mut trivia: impl Iterator<Item = Token>) -> bool {
+    trivia.any(|t| matches!(t.token_type(), TokenType::SingleLineComment { .. } | TokenType::MultiLineComment { .. }))
+}
+
+/// `call` with every input slot it names moved `by` places (a call's inputs appended to a run's).
+fn shift_call(call: CallForm, by: usize) -> CallForm {
+    remap_call(call, |i| i + by)
+}
+
+/// `call` with every input slot `i` it names made `to(i)`.
+fn remap_call(mut call: CallForm, to: impl Fn(usize) -> usize + Copy) -> CallForm {
+    fn slot(s: &mut SlotRef, to: impl Fn(usize) -> usize) {
+        if let SlotRef::In(i) = s {
+            *i = to(*i);
+        }
+    }
+    fn table(t: &mut TableForm, to: impl Fn(usize) -> usize + Copy) {
+        for (f, _) in &mut t.fields {
+            match f {
+                FieldForm::Named { value, .. } | FieldForm::Keyed { value, .. } | FieldForm::Positional(value) => slot(value, to),
+            }
+        }
+    }
+    if let HeadForm::Slot(s) = &mut call.head {
+        slot(s, to);
+    }
+    match &mut call.args {
+        ArgsForm::Parens { args, .. } => {
+            for (a, _) in args {
+                match a {
+                    ArgForm::Slot(s) => slot(s, to),
+                    ArgForm::Table(t) => table(t, to),
+                }
+            }
+        }
+        ArgsForm::String(s) => slot(s, to),
+        ArgsForm::Table(t) => table(t, to),
+    }
+    call
 }
 
 /// The whitespace a statement's line starts with.
@@ -2876,6 +3486,47 @@ fn is_literal(e: &Expression) -> bool {
 }
 
 /// A non-empty table of positional literals only: `{"a", "b"}`.
+/// Whether `e` is data — a literal (`nil`, `true`, a number, a string), a global path, or a table whose
+/// keys are names or literals and whose values are data — and, if so, whether it is a table. A name
+/// `local` says is a local is not data: its value is whatever the code put there.
+fn data_expr(e: &Expression, local: &dyn Fn(&str) -> bool) -> Option<bool> {
+    match e {
+        _ if is_literal(e) => Some(false),
+        Expression::Var(Var::Name(n)) => (!local(&n.token().to_string())).then_some(false),
+        Expression::Var(Var::Expression(v)) => match v.prefix() {
+            Prefix::Name(n) if !local(&n.token().to_string()) => {
+                v.suffixes().all(|s| matches!(s, Suffix::Index(Index::Dot { .. }))).then_some(false)
+            }
+            _ => None,
+        },
+        Expression::Parentheses { expression, .. } => data_expr(expression, local),
+        Expression::TableConstructor(tc) => tc
+            .fields()
+            .iter()
+            .all(|f| match f {
+                Field::NameKey { value, .. } => data_expr(value, local).is_some(),
+                Field::NoKey(value) => data_expr(value, local).is_some(),
+                Field::ExpressionKey { key, value, .. } => is_literal(key) && data_expr(value, local).is_some(),
+                _ => false,
+            })
+            .then_some(true),
+        _ => None,
+    }
+}
+
+/// The member a top-level assignment of `exprs` to plain names declares: data when a value is a table.
+fn data_member<'e>(mut exprs: impl Iterator<Item = &'e Expression>, local: &dyn Fn(&str) -> bool) -> Option<Member> {
+    let mut table = false;
+    let all = exprs.all(|e| match data_expr(e, local) {
+        Some(t) => {
+            table |= t;
+            true
+        }
+        None => false,
+    });
+    all.then_some(if table { Member::Data } else { Member::Variable })
+}
+
 fn is_literal_list(tc: &TableConstructor) -> bool {
     !tc.fields().is_empty()
         && tc.fields().iter().all(|f| matches!(f, Field::NoKey(e) if is_literal(e)))
@@ -3008,6 +3659,176 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// mrxbriefing's functions, reached as the executables and the corpus show (the table in the Missions page
+    /// doc): the engine names nine of them, `Event.Create*` holds two, Lua libraries call back others, and
+    /// four have no caller anywhere.
+    #[test]
+    fn mrxbriefing_s_functions_are_reached_as_the_exe_and_the_corpus_show() {
+        let corpus = corpus();
+        let index = CorpusIndex::build(corpus.iter().map(|(p, s)| (p.as_str(), s.as_str()))).expect("the corpus indexes");
+        let path = "lua/resident/mrxbriefing.lua";
+        let src = &corpus.iter().find(|(p, _)| p == path).expect("mrxbriefing is in the corpus").1;
+        let script = Script::parse(src).expect("parses");
+        let g = lift(&script, &index.context(path));
+        let reach = |name: &str| g.nodes.iter().find(|n| n.title == name && n.member == Some(Member::Function)).unwrap_or_else(|| panic!("{name}")).reach.clone();
+        let engine = |name: &str| reach(name).into_iter().find_map(|r| match r {
+            Reach::Engine { module, images } => Some((module, images)),
+            _ => None,
+        });
+        for name in [
+            "NetSafeIsSpielLoaded",
+            "NetSafeUnloadSpiel",
+            "NetSafeLoadSpiel",
+            "NetSafeSetStarter",
+            "NetSafeClearStarter",
+            "NetSafeIsStarterLoaded",
+            "NetSafeAreBriefingAssetsLoaded",
+            "NetSafePlayCheapCinematic",
+        ] {
+            let (module, images) = engine(name).unwrap_or_else(|| panic!("the engine calls {name}"));
+            assert_eq!(module, EngineModule::This, "{name}");
+            assert!(images.iter().any(|i| i == "pc-v10"), "{name}: {images:?}");
+        }
+        assert_eq!(engine("NetEventCallback").map(|e| e.0), Some(EngineModule::Runtime));
+        let passed = |name: &str, callee: &str| {
+            reach(name).into_iter().find_map(|r| match r {
+                Reach::Passed { callee: c, to, .. } if c == callee => Some(to),
+                _ => None,
+            })
+        };
+        assert_eq!(passed("SendPlayerJoinEvents", "Event.CreatePersistent"), Some(Callee::Engine));
+        assert_eq!(passed("_JobRequest", "Event.Create"), Some(Callee::Engine));
+        // `fCallback = _JobRequest` is a field of the table `Hud.CardFanfare:Commence` takes (line 628)
+        assert_eq!(passed("_JobRequest", "Hud.CardFanfare:Commence"), Some(Callee::Unresolved));
+        assert_eq!(passed("_RootMenuOptionSelected", "MrxGui.DisplayDialogBox"), Some(Callee::Lua));
+        assert_eq!(passed("_TransitCallback", "MrxTransit.OpenInterface"), Some(Callee::Lua));
+        assert_eq!(passed("_EndBegin", "_Fade"), Some(Callee::Lua));
+        assert_eq!(passed("_FileLoaded", "dynamic_import"), Some(Callee::Unresolved));
+        assert!(reach("_Fade").iter().any(|r| matches!(r, Reach::Called(_))));
+        for name in ["NetClientProcessCameraSettings", "NetSafeShowFlashBriefing", "NetSafeRemoveFlashBriefing", "_ProcessCheapCinematicAsText"] {
+            assert_eq!(reach(name), Vec::new(), "{name} has no caller");
+        }
+        // The members: the constants, the voice-line table, the imports; every function.
+        let member = |title: &str| g.nodes.iter().find(|n| n.title.starts_with(title)).and_then(|n| n.member).unwrap_or_else(|| panic!("{title}"));
+        assert_eq!(member("CHEAP_GREETING ="), Member::Variable);
+        assert_eq!(member("_tHeroWrapperVo ="), Member::Data);
+        assert_eq!(member("import"), Member::Import);
+        assert_eq!(member("Deinit"), Member::Function);
+        // Nothing on mrxbriefing's chunk is behaviour: the drawn chunk is its entry alone.
+        let hidden = g.hidden();
+        let drawn: Vec<&str> = g.nodes.iter().zip(&hidden).filter(|(_, h)| !**h).map(|(n, _)| n.title.as_str()).collect();
+        assert_eq!(drawn, vec!["mrxbriefing.lua"]);
+    }
+
+    /// A drawn chunk skips its members: the exec wire runs on through them, and an edit made on that wire
+    /// keeps them on the chain, so the script emits as before.
+    #[test]
+    fn the_drawn_chunk_runs_its_wire_through_members_and_an_edit_on_it_keeps_them() {
+        let src = "import(\"MrxGui\")\nPg.Spawn(\"a\", 1)\nX = 1\nT = {a = 1, {\"b\"}}\nfunction F() end\nPg.Spawn(\"b\", 2)\nlocal y = 2\nPg.Print(y)\n";
+        let index = CorpusIndex::build([("lua/vz/m.lua", src)]).expect("indexes");
+        let script = Script::parse(src).expect("parses");
+        let mut g = lift(&script, &index.context("lua/vz/m.lua"));
+        let id = |t: &str| g.nodes.iter().position(|n| n.title.starts_with(t)).unwrap_or_else(|| panic!("{t}"));
+        let (x, f, y) = (id("X ="), id("F"), id("local y"));
+        let spawns: Vec<NodeId> = g.nodes.iter().enumerate().filter(|(_, n)| n.title == "Pg.Spawn").map(|(i, _)| i).collect();
+        let [spawn_a, spawn_b] = spawns[..] else { panic!("two Pg.Spawn calls: {spawns:?}") };
+        let hidden = g.hidden();
+        assert!(hidden[id("import")] && hidden[x] && hidden[id("T =")] && hidden[f], "members");
+        assert!(!hidden[y], "a local the drawn chunk reads stays drawn");
+        assert!(hidden.iter().enumerate().any(|(i, &h)| h && g.nodes[i].member.is_none()), "T's table nodes go with it");
+        let shown = g.shown(&hidden);
+        assert_eq!(shown.exec_target(ENTRY, 0), Some(spawn_a), "the wire skips the import");
+        let next = g.nodes[spawn_a].next.expect("continues");
+        assert_eq!(shown.exec_target(spawn_a, next), Some(spawn_b), "and X, T and F");
+        assert!(shown.data.iter().all(|w| !hidden[w.from.0] && !hidden[w.to.0]));
+        // Break the drawn wire from spawn_a and connect it back: the members stay on the chain.
+        let from = g.through((spawn_a, next), &hidden);
+        assert_eq!(from.0, f, "the last member before spawn_b");
+        g.break_exec(from);
+        g.connect_exec(from, spawn_b).expect("connects");
+        assert_eq!(emit(&script, &g).expect("emits"), src);
+    }
+
+    const RUNS: &str = "import(\"MrxCoop\")\nimport(\"MrxGui\");\nimport(\"MrxGuiManager\") -- the front end\nimport(\"MrxSound\")\nlocal x = 1\nimport(x)\nimport(\"MrxHq\")\nPg.Spawn(\"a\", 1)\nPg.Spawn(\"b\", 2)\n";
+
+    fn runs() -> (Script, Graph) {
+        let index = CorpusIndex::build([("lua/vz/runs.lua", RUNS)]).expect("indexes");
+        let script = Script::parse(RUNS).expect("parses");
+        let g = lift(&script, &index.context("lua/vz/runs.lua"));
+        (script, g)
+    }
+
+    /// A call's trailing comment is found on its `)`, which full_moon lists before the arguments.
+    #[test]
+    fn a_call_s_trailing_comment_is_its_last_token_s() {
+        let script = Script::parse("f(1, g(2)) -- after\n").expect("parses");
+        let stmt = script.ast().nodes().stmts().next().expect("a statement");
+        let (_, trail) = outer_trivia(stmt);
+        assert!(has_comment(trail.into_iter()), "the comment after `)` is the call's trailing trivia");
+    }
+
+    /// The chain's statements from the entry, by title.
+    fn chain_titles(g: &Graph) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = g.exec_target(ENTRY, 0);
+        while let Some(id) = cur {
+            out.push(g.nodes[id].title.clone());
+            cur = g.nodes[id].next.and_then(|o| g.exec_target(id, o));
+        }
+        out
+    }
+
+    /// Consecutive calls to one function whose arguments are literals or names fold into one run node,
+    /// a comment after a call ends its run, a wired argument stands alone, and the run emits its calls
+    /// back byte for byte with their own lines.
+    #[test]
+    fn repeated_calls_fold_into_a_run_that_emits_every_call() {
+        let (script, g) = runs();
+        assert_eq!(
+            chain_titles(&g),
+            vec!["import ×3", "import", "local x", "import", "import", "Pg.Spawn ×2"],
+            "a comment ends a run; `import(x)` is wired; `MrxHq` follows a wired call"
+        );
+        let run = g.nodes.iter().position(|n| n.title == "import ×3").expect("the run");
+        assert_eq!(g.nodes[run].lines(), vec![1, 2, 3]);
+        assert_eq!(g.run_calls(run).iter().map(|(r, _)| r.len()).collect::<Vec<_>>(), vec![1, 1, 1]);
+        let spawn = g.nodes.iter().position(|n| n.title == "Pg.Spawn ×2").expect("the spawn run");
+        assert_eq!(g.run_calls(spawn).iter().map(|(r, _)| r.clone()).collect::<Vec<_>>(), vec![0..2, 2..4]);
+        assert_eq!(emit(&script, &g).expect("emits"), RUNS);
+        assert_eq!(g.node_source(run).expect("source"), "import(\"MrxCoop\")\nimport(\"MrxGui\")\nimport(\"MrxGuiManager\")");
+    }
+
+    /// A run edits as a run: a typed value lands in its own call, a call can be added (a copy of the
+    /// last) and removed, a run of one is a call again, and unfolding gives back one node per call in
+    /// order, emitting the same Lua.
+    #[test]
+    fn a_run_adds_removes_and_unfolds_its_calls() {
+        let (script, mut g) = runs();
+        let run = g.nodes.iter().position(|n| n.title == "import ×3").expect("the run");
+        g.set_value(run, 1, "\"MrxGuiBase\"").expect("typed");
+        let edited = RUNS.replace("\"MrxGui\"", "\"MrxGuiBase\"");
+        assert_eq!(emit(&script, &g).expect("emits"), edited);
+
+        g.add_call(run).expect("adds");
+        assert_eq!(g.nodes[run].title, "import ×4");
+        let added = edited.replace("-- the front end\n", "-- the front end\nimport(\"MrxGuiManager\") -- the front end\n");
+        assert_eq!(emit(&script, &g).expect("emits"), added);
+        g.remove_call(run, 3).expect("removes");
+        assert_eq!(emit(&script, &g).expect("emits"), edited);
+
+        let ids = g.unfold(run).expect("unfolds");
+        assert_eq!(ids.len(), 3);
+        assert_eq!(chain_titles(&g)[..4], ["import", "import", "import", "import"]);
+        assert_eq!(emit(&script, &g).expect("emits"), edited);
+
+        let (_, mut g) = runs();
+        let spawn = g.nodes.iter().position(|n| n.title == "Pg.Spawn ×2").expect("the spawn run");
+        g.remove_call(spawn, 0).expect("removes");
+        assert_eq!(g.nodes[spawn].title, "Pg.Spawn");
+        assert_eq!(g.node_source(spawn).expect("source"), "Pg.Spawn(\"b\", 2)");
+        assert!(g.unfold(spawn).is_err(), "a single call is no run");
     }
 
     const RACE: &str = r#"inherit("MrxTaskContract")

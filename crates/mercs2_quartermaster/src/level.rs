@@ -221,18 +221,112 @@ pub fn levels_of<'a>(shipments: &[&'a crate::discover::LoadedShipment]) -> Vec<L
 /// One chunk of a block: `(name, type hash, table word, bytes)`.
 type BlockChunk = (u32, u32, u32, Vec<u8>);
 
-/// The rows of `assets` the manifest names for `level`.
+/// The rows of `assets` the manifest names for `level`. A row naming `templates` is no asset: its
+/// templates are appended to the game's worldentity ([`vz_templates`]).
 pub fn assets_of<'a>(manifest: &'a Manifest, level: &str) -> Vec<Asset<'a>> {
     manifest
         .contributions
         .iter()
         .filter_map(|c| match c {
-            Contribution::LevelAsset { level: l, asset_type, name, rungs } if l == level => {
+            Contribution::LevelAsset { level: l, asset_type, name, rungs, templates, .. } if l == level && templates.is_empty() => {
                 Some(Asset { asset_type, name, rungs })
             }
             _ => None,
         })
         .collect()
+}
+
+/// The main campaign. A `level_asset` row of this level needs no `add_level`: its assets ship in the
+/// Shipment's overlay, in `blocks\VZ\<block>.block` ([`compile_vz`]), and may only add.
+pub const VZ: &str = "vz";
+
+/// The type of the one `level: vz` row that ships nothing: it names templates of its container.
+pub const WORLDENTITY_TYPE: &str = "world_entity_data";
+
+/// One `level: vz` worldentity row: its contribution index, the container's rungs, the templates it
+/// names and the field edits it sets on them.
+#[derive(Debug, Clone, Copy)]
+pub struct VzTemplates<'a> {
+    pub index: usize,
+    pub rungs: &'a [LevelRung],
+    pub templates: &'a [String],
+    pub edits: &'a BTreeMap<String, crate::template::FieldEdits>,
+}
+
+/// Every `level: vz` row of `manifest` that names templates.
+pub fn vz_templates(manifest: &Manifest) -> Vec<VzTemplates<'_>> {
+    manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, c)| match c {
+            Contribution::LevelAsset { level, rungs, templates, edits, .. } if level == VZ && !templates.is_empty() => {
+                Some(VzTemplates { index, rungs, templates, edits })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The path of a block `vz.wad` already has that a `level: vz` asset names, or `None` when its blocks are
+/// new. Such an asset cannot ship in a block of its own path (the overlay's block would replace vz.wad's
+/// whole), so the deploy link adds it to its own copy of that block (`build::link_installed`), and a
+/// standalone build leaves it out ([`compile_vz`]).
+pub fn joins_link(a: &Asset, game: &GameStack) -> Option<String> {
+    a.rungs.iter().map(|r| format!("blocks\\VZ\\{}.block", r.block)).find(|p| game.base_has_path(p))
+}
+
+/// Compile the `level: vz` `assets` under `root` into overlay blocks `blocks\VZ\<block>.block`, checked
+/// against `game`: refused, each listed, an asset whose name and type `vz.wad` holds, and a reference
+/// neither the rows nor the game resolve ([`reach`]). An asset in a block `vz.wad` already has is left
+/// to the deploy link ([`joins_link`]) and comes back in the second list, as `name (type) in path`. A
+/// streamed wavebank plays only from its stream, and the main campaign opens no stream of a Shipment's
+/// on its own, so each must be one of `opened` (the entry names the Shipment's `load_sound` streams
+/// open, `crate::sound::opened_streams`). The blocks number their rungs from 0 ([`compile`]);
+/// `mercs2_formats::patch_wad::rebase_after` renumbers them after the overlay's other blocks.
+pub fn compile_vz(root: &Path, assets: &[Asset], game: &GameStack, opened: &[String]) -> Result<(Vec<PatchBlock>, Vec<String>), String> {
+    let mut bad = Vec::new();
+    for a in assets {
+        let (_, type_id) = type_by_name(a.asset_type).ok_or_else(|| format!("{}: no asset type is named {:?}", a.name, a.asset_type))?;
+        if game.base_has_asset(crate::manifest::asset_hash(a.name), type_id) {
+            bad.push(format!("{} ({}): vz.wad holds it, and a level: vz row only adds", a.name, a.asset_type));
+        }
+    }
+    let mut own = Vec::new();
+    let mut joined = Vec::new();
+    for a in assets {
+        match joins_link(a, game) {
+            Some(path) => joined.push(format!("{} ({}) in {path}", a.name, a.asset_type)),
+            None => own.push(*a),
+        }
+    }
+    let assets = own.as_slice();
+    let blocks = compile(root, "VZ", assets, &BTreeMap::new())?;
+    let held: BTreeSet<(u32, u32)> = blocks.iter().flat_map(|b| b.aset_entries.iter().map(|e| (e.asset_hash, e.u32_3))).collect();
+    let refs = reach(&blocks)?;
+    bad.extend(unresolved(&refs, &held, game));
+    let opened: BTreeSet<u32> = opened.iter().map(|s| m2(s)).collect();
+    bad.extend(
+        refs.streamed
+            .iter()
+            .filter(|h| !opened.contains(h))
+            .map(|h| format!("streamed wavebank 0x{h:08X} plays from a stream, and no load_sound of the Shipment opens one for it")),
+    );
+    if !bad.is_empty() {
+        return Err(format!("the level: vz rows have {} problem(s):\n  {}", bad.len(), bad.join("\n  ")));
+    }
+    Ok((blocks, joined))
+}
+
+/// Each reference of `refs` that neither `held` nor `game` resolves, and each shader retail does not
+/// register, as a line.
+fn unresolved(refs: &Reach, held: &BTreeSet<(u32, u32)>, game: &GameStack) -> Vec<String> {
+    let mut bad = missing("script", &refs.scripts, |h| held.contains(&(h, TYPE_ID_SCRIPT)) || game.has_asset(h, TYPE_ID_SCRIPT));
+    bad.extend(missing("texture", &refs.textures, |h| held.contains(&(h, TYPE_ID_TEXTURE)) || game.has_asset(h, TYPE_ID_TEXTURE)));
+    let keys = crate::shader::ShaderKeys::with(&[]);
+    bad.extend(missing("pixel shader", &refs.pixel, |h| keys.pixel.contains(&h)));
+    bad.extend(missing("vertex shader", &refs.vertex, |h| keys.vertex.contains(&h)));
+    bad
 }
 
 /// Why `block` cannot be a rung of a level, or `None`. It becomes a filename's stem in the WAD's path
@@ -247,11 +341,18 @@ pub fn block_refusal(block: &str) -> Option<String> {
 /// Compile `assets` into the level's blocks. Every asset naming one block ships in it, its row in the
 /// block of its first rung; blocks run coarsest rung first, by name. An asset's rungs must start at
 /// `_P000` and run without a gap, and no block may hold one (name, type) twice.
-pub fn compile(root: &Path, level: &str, assets: &[Asset]) -> Result<Vec<PatchBlock>, String> {
+///
+/// An asset whose `(name hash, type hash)` is in `linked` ships those bytes instead of its file: the
+/// level's master script, which the link splices qm's hooks onto. Such an asset has one rung.
+pub fn compile(root: &Path, level: &str, assets: &[Asset], linked: &BTreeMap<(u32, u32), Vec<u8>>) -> Result<Vec<PatchBlock>, String> {
     let mut held: BTreeMap<(usize, &str), Vec<BlockChunk>> = BTreeMap::new();
     for a in assets {
         let (type_hash, _) = type_by_name(a.asset_type).ok_or_else(|| format!("{}: no asset type is named {:?}", a.name, a.asset_type))?;
         let name = crate::manifest::asset_hash(a.name);
+        let replaced = linked.get(&(name, type_hash));
+        if replaced.is_some() && a.rungs.len() != 1 {
+            return Err(format!("{}: the link replaces its bytes, and it has {} rungs, not 1", a.name, a.rungs.len()));
+        }
         // A rung's table word is the bytes of the rungs before it: all 1,236 model and 9,562 texture
         // chains of the retail WAD.
         let mut below = 0u32;
@@ -263,8 +364,13 @@ pub fn compile(root: &Path, level: &str, assets: &[Asset]) -> Result<Vec<PatchBl
             if rung != i {
                 return Err(format!("{}: rung {i} of its chain is in {}, a block of rung {rung}", a.name, r.block));
             }
-            let at = root.join(&r.file);
-            let bytes = std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+            let bytes = match replaced {
+                Some(b) => b.clone(),
+                None => {
+                    let at = root.join(&r.file);
+                    std::fs::read(&at).map_err(|e| format!("{}: {e}", at.display()))?
+                }
+            };
             let rows = held.entry((rung, r.block.as_str())).or_default();
             if rows.iter().any(|c| c.0 == name && c.1 == type_hash) {
                 return Err(format!("{}: {} holds it twice", a.name, r.block));
@@ -304,18 +410,14 @@ pub fn compile(root: &Path, level: &str, assets: &[Asset]) -> Result<Vec<PatchBl
 
 /// Read and check level `name` from its assets and streams, under `root`, against `game`.
 pub fn read(root: &Path, name: &str, assets: &[Asset], streams: &[PathBuf], game: &GameStack) -> Result<Level, String> {
-    let blocks = compile(root, name, assets)?;
+    let blocks = compile(root, name, assets, &BTreeMap::new())?;
     let rows = || blocks.iter().flat_map(|b| b.aset_entries.iter().map(|e| (e.asset_hash, e.u32_3)));
     if !holds_level(rows(), name) {
         return Err(format!("the level_asset rows hold no script {name:?} and layer \"{name}_base\", so they are not level {name:?}"));
     }
     let held: BTreeSet<(u32, u32)> = rows().collect();
     let refs = reach(&blocks)?;
-    let mut bad = missing("script", &refs.scripts, |h| held.contains(&(h, TYPE_ID_SCRIPT)) || game.has_asset(h, TYPE_ID_SCRIPT));
-    bad.extend(missing("texture", &refs.textures, |h| held.contains(&(h, TYPE_ID_TEXTURE)) || game.has_asset(h, TYPE_ID_TEXTURE)));
-    let keys = crate::shader::ShaderKeys::with(&[]);
-    bad.extend(missing("pixel shader", &refs.pixel, |h| keys.pixel.contains(&h)));
-    bad.extend(missing("vertex shader", &refs.vertex, |h| keys.vertex.contains(&h)));
+    let mut bad = unresolved(&refs, &held, game);
     let mut files = Vec::with_capacity(streams.len());
     for s in streams {
         let file = s.file_name().and_then(|f| f.to_str()).ok_or_else(|| format!("{}: no file name", s.display()))?.to_ascii_lowercase();
@@ -375,7 +477,7 @@ mod tests {
             Asset { asset_type: "model", name: "0x00000001", rungs: &a },
             Asset { asset_type: "texture", name: "0x00000002", rungs: &b },
         ];
-        let blocks = compile(&root, "lvl", &assets).unwrap();
+        let blocks = compile(&root, "lvl", &assets, &BTreeMap::new()).unwrap();
         assert_eq!(blocks.iter().map(|b| b.path_string.as_str()).collect::<Vec<_>>(), [r"blocks\lvl\x_P000_Q3.block", r"blocks\lvl\x_P001_Q2.block"]);
         assert_eq!(blocks.iter().map(|b| b.packed_field >> 24).collect::<Vec<_>>(), [0, 1], "the tier is the rung");
         let raw = mercs2_formats::sges::decompress_sges(&blocks[0].compressed_data).unwrap();
@@ -393,8 +495,25 @@ mod tests {
     fn a_chain_must_start_at_the_coarsest_rung_and_run_in_order() {
         let root = scratch("order");
         let late = [rung("x_P001_Q2", "a")];
-        let e = compile(&root, "lvl", &[Asset { asset_type: "model", name: "a", rungs: &late }]).unwrap_err();
+        let e = compile(&root, "lvl", &[Asset { asset_type: "model", name: "a", rungs: &late }], &BTreeMap::new()).unwrap_err();
         assert!(e.contains("rung 0"), "{e}");
+    }
+
+    /// The link's bytes for an asset (the level's master with qm's hooks spliced on) ship in place of its
+    /// file, and only for an asset of one rung.
+    #[test]
+    fn an_asset_the_link_replaced_ships_the_link_s_bytes() {
+        let root = scratch("linked");
+        let one = [rung("x_P000_Q3", "a")];
+        let (ty, _) = type_by_name("script").expect("script type");
+        let linked = BTreeMap::from([((crate::manifest::asset_hash("lvl"), ty), b"spliced".to_vec())]);
+        let blocks = compile(&root, "lvl", &[Asset { asset_type: "script", name: "lvl", rungs: &one }], &linked).unwrap();
+        let raw = mercs2_formats::sges::decompress_sges(&blocks[0].compressed_data).unwrap();
+        let chunks = mercs2_formats::ucfx::block_chunk_spans(&raw).unwrap();
+        assert_eq!(&raw[chunks[0].1.clone()], &b"spliced"[..]);
+        let two = [rung("x_P000_Q3", "a"), rung("x_P001_Q2", "b")];
+        let e = compile(&root, "lvl", &[Asset { asset_type: "script", name: "lvl", rungs: &two }], &linked).unwrap_err();
+        assert!(e.contains("has 2 rungs, not 1"), "{e}");
     }
 
     #[test]
@@ -402,8 +521,8 @@ mod tests {
         let root = scratch("twice");
         let r = [rung("x_P000_Q3", "a")];
         let twice = [Asset { asset_type: "model", name: "a", rungs: &r }, Asset { asset_type: "model", name: "a", rungs: &r }];
-        assert!(compile(&root, "lvl", &twice).unwrap_err().contains("twice"));
-        assert!(compile(&root, "lvl", &[Asset { asset_type: "nothing", name: "a", rungs: &r }]).is_err());
+        assert!(compile(&root, "lvl", &twice, &BTreeMap::new()).unwrap_err().contains("twice"));
+        assert!(compile(&root, "lvl", &[Asset { asset_type: "nothing", name: "a", rungs: &r }], &BTreeMap::new()).is_err());
     }
 
     #[test]
@@ -414,7 +533,7 @@ mod tests {
             std::fs::write(root.join(file), bytes).unwrap();
         }
         let rungs = [rung("x_P000_Q3", "src/a"), rung("x_P001_Q2", "src/b")];
-        let blocks = compile(&root, "lv", &[Asset { asset_type: "model", name: "0x00000001", rungs: &rungs }]).unwrap();
+        let blocks = compile(&root, "lv", &[Asset { asset_type: "model", name: "0x00000001", rungs: &rungs }], &BTreeMap::new()).unwrap();
         let word = |b: &PatchBlock| {
             let raw = mercs2_formats::sges::decompress_sges(&b.compressed_data).unwrap();
             u32::from_le_bytes(raw[12..16].try_into().unwrap())

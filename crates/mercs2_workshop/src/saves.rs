@@ -10,7 +10,7 @@
 //!
 //! - [`navigator`] — the save-file list (one `.profile` per row, grouped by hero).
 //! - [`center`]    — the viewport card: hero model + at-a-glance HUD.
-//! - [`inspector`] — the scalar editor: character / upgrade / cash / fuel / contract.
+//! - [`inspector`] — the scalar editor: character / cash / fuel / contract.
 //! - [`verbs`]     — the top-row actions: reload-from-disk, back up, write to `.profile`.
 //!
 //! Each returns a `Vec<Act>`; the app collects them into `saves_acts` and reduces via
@@ -46,14 +46,11 @@ pub enum Act {
     Write,
     /// `@0x4D` — hero (1 Mattias / 2 Chris / 3 Jen). Writes to the pending Profile.
     SetCharacter(u8),
-    /// `@0x4F` — upgrade tier 0..3. Drives `_tCharacterMap[hero].templates[iUpgrade]`
-    /// at spawn time (`mrxplayer.lua:167-168`).
-    SetUpgrade(u8),
-    /// `@0x24A` — unlocked-costume count, 1..=5. Not the active costume (that one is a
-    /// runtime-only override at `+0x63` whose on-disk byte is open).
+    /// `@0x24A` — unlocked-costume count, 1..=5. Not the worn costume, which is `@0x4F`
+    /// (`Profile::costume_index`).
     SetUnlockedCostumes(u8),
-    /// Render the hero viewport in `hero_outfits(hero)[i]` instead of the upgrade-tier model,
-    /// or back to the upgrade-tier model on `None`. Viewport-only; nothing is written.
+    /// Render the hero viewport in `hero_outfits(hero)[i]` instead of the saved costume's model,
+    /// or back to the saved costume's model on `None`. Viewport-only; nothing is written.
     SetWardrobePreview(Option<usize>),
     /// Open the saves folder in the OS file manager.
     RevealFolder,
@@ -221,9 +218,8 @@ pub struct Panel {
     /// time the viewport paints that hero.
     pub hero_cam: HashMap<u32, crate::shot::OrbitCam>,
     /// WARDROBE "Active override" pick: an index into `hero_outfits(hero)` the viewport renders
-    /// instead of the upgrade-tier model. Viewport-only — the costume override is a runtime
-    /// field (profile object `+0x63`) whose `.profile` byte isn't located, so nothing is
-    /// written. Cleared when the selection or hero changes.
+    /// instead of the saved costume's model (`@0x4F`, `Profile::costume_index`). Viewport-only:
+    /// nothing is written. Cleared when the selection or hero changes.
     pub wardrobe_preview: Option<usize>,
     /// Hero viewport frame size in physical pixels, reported by the viewport every time it
     /// changes. `(0, 0)` until the viewport first paints.
@@ -234,6 +230,9 @@ pub struct Panel {
     /// `worldentity` template names by key, loaded by `app.rs` from the open WAD stack — names the
     /// save's carried weapons. `None` until loaded; `Some(Err)` names why it couldn't be.
     pub templates: Option<Result<HashMap<u32, String>, String>>,
+    /// The vz wardrobe and character map, read by `app.rs` from the game's `vz.wad` — what a saved
+    /// costume restores as. `None` until loaded; `Some(Err)` names why it couldn't be.
+    pub outfits: Option<Result<mercs2_quartermaster::outfits::RetailLevel, String>>,
     /// The `.profile` awaiting delete confirmation.
     pub confirm_delete: Option<PathBuf>,
     /// The save the Inspect window shows, decoded once when it is opened.
@@ -477,7 +476,7 @@ fn tail(p: &Path) -> String {
 ///
 /// On the first frame `panel.profiles` is `None` → we emit [`Act::Reload`] which populates it
 /// in the next frame's reducer. From then on each row is a clickable [`theme::row_chip`]: the
-/// hero letter, the file stem, and a compact meta line (`playtime · cash · upgrade N`).
+/// hero letter, the file stem, and a compact meta line (`playtime · cash · costume N`).
 pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
 
@@ -925,7 +924,7 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
             let tail = if e.stem.starts_with("auto_") {
                 "auto".to_string()
             } else {
-                format!("upgrade {}", h.upgrade_index)
+                format!("costume {}", h.costume_index)
             };
             format!("{} · {} · {tail}", hms(h.play_time_seconds), money(h.cash))
         }
@@ -1143,9 +1142,10 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
     let outfit = p
         .wardrobe_preview
         .and_then(|i| hero_outfits(h.character_index).get(i).copied());
+    let (saved_model, saved_label) = saved_costume_model(h, p);
     let model_name = match outfit {
         Some((_, model)) => model.to_string(),
-        None => upgrade_model_for(h.character_index, h.upgrade_index),
+        None => saved_model,
     };
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
     let cached_tex = p.hero_textures.get(&hash).cloned();
@@ -1161,13 +1161,13 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
     let mut out = HeroReq::default();
     let model_label = match outfit {
         Some((name, _)) => format!("OUTFIT {name} · {model_name}"),
-        None => format!("UPGRADE {} · {}", h.upgrade_index, model_name),
+        None => saved_label,
     };
     let identity_label = format!(
-        "{} · hero={} · upgrade={}",
+        "{} · hero={} · costume={}",
         hero_name(h.character_index),
         h.character_index,
-        h.upgrade_index
+        h.costume_index
     );
     egui::Frame::NONE
         .fill(theme::G0)
@@ -1382,21 +1382,22 @@ fn chip(ui: &mut egui::Ui, label: &str, fg: egui::Color32, bg: egui::Color32, bo
         });
 }
 
-/// The hero's spawn model for the given upgrade tier. Reproduces the engine's
-/// `_tCharacterMap[hero].templates[iUpgrade] or base` resolution without the engine. The
-/// returned string is the model-registry name a modder would look up in the Inspect tab.
-/// Tier 3 for every hero maps to the hero's `_v3`; the other tiers are the template names
-/// (we don't have the per-tier model mapping tabulated beyond tier 3).
-fn upgrade_model_for(hero: u8, tier: u8) -> String {
-    let base = hero_base_model(hero);
-    let templates = hero_tier_templates(hero);
-    match (hero, tier) {
-        (_, 0) => base.to_string(),
-        (1, 3) => "pmc_hum_mattias_v3".to_string(),
-        (2, 3) => "pmc_hum_chris_v3".to_string(),
-        (3, 3) => "pmc_hum_jen_v3".to_string(),
-        (_, t) if (1..=3).contains(&t) => format!("{} → template", templates[t as usize]),
-        _ => base.to_string(),
+/// The model the join puts on for `h`'s saved costume (`@0x4F`), and the viewport's label for it,
+/// by the vz character map (`RetailLevel::restore`: `models[costume]`, base for 0 and past the map).
+/// Until the map is read, or when it can't be, the base model is drawn and the label says why.
+fn saved_costume_model(h: &Profile, p: &Panel) -> (String, String) {
+    use mercs2_quartermaster::outfits::Restore;
+    let base = hero_base_model(h.character_index).to_string();
+    let c = h.costume_index;
+    match p.outfits.as_ref() {
+        None => (base, format!("COSTUME {c} · reading the character map")),
+        Some(Err(e)) => (base, format!("COSTUME {c} · no character map: {e}")),
+        Some(Ok(r)) => match r.restore(h.character_index, c) {
+            Some(Restore::Model(m)) => (m.to_string(), format!("COSTUME {c} · {m}")),
+            Some(Restore::Base) => (base.clone(), format!("COSTUME {c} · {base}")),
+            Some(Restore::Unmapped) => (base.clone(), format!("COSTUME {c} · past the vz map, the join keeps {base}")),
+            None => (base, format!("COSTUME {c} · hero {} has no map entry", h.character_index)),
+        },
     }
 }
 
@@ -1829,19 +1830,6 @@ fn hero_base_model(index: u8) -> &'static str {
     }
 }
 
-/// `_tCharacterMap[hero].templates` — the four `iUpgrade` template names the engine passes
-/// through at spawn (`mrxplayer.lua:167-168`: `tTemplates[iUpgrade] or tCharacterData.base`).
-/// Tier 0 falls back to the base template; tiers 1-3 are the hero's progression templates.
-/// Source: `mrxplayer.lua:23-27, 44-48, 60-64`.
-fn hero_tier_templates(index: u8) -> [&'static str; 4] {
-    match index {
-        1 => ["mattias", "mattiasupgrade1", "mattiasupgrade2", "mattiasupgrade3"],
-        2 => ["chris", "chrisupgrade1", "chrisupgrade2", "chrisupgrade3"],
-        3 => ["jen", "jenupgrade1", "jenupgrade2", "jenupgrade3"],
-        _ => ["", "", "", ""],
-    }
-}
-
 /// `_tOutfits[hero]` — the base-game costumes a hero can switch to at the mirror. All three
 /// heroes' tables extracted verbatim from `docs/mercs2-luacd/src/vz/wifpmcinterior.lua`:
 ///   - Mattias: lines 215-241 (5 outfits)
@@ -2054,8 +2042,8 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 
     // WARDROBE — UNLOCKED COUNT stepper over `@0x24A` + the hero's `_tOutfits` list. Clicking a
     // skin makes it the active skin and, because unlocks are a prefix count, raises the count
-    // to include it. The active skin drives the viewport only: the costume override is runtime
-    // field `+0x63` whose `.profile` byte isn't located. A hero with no catalogued `_tOutfits`
+    // to include it. The active skin drives the viewport only; the saved costume (`@0x4F`) is
+    // not written from here. A hero with no catalogued `_tOutfits`
     // table gets a plain note instead of an empty list under a stepper of "/ 1".
     let mut costumes_edit: Option<u8> = None;
     let mut active_edit: Option<usize> = None;
@@ -2078,13 +2066,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             );
             return;
         }
-        // With no pick, the active skin is the outfit whose model the upgrade tier spawns (tiers
-        // whose template isn't an outfit leave nothing highlighted).
-        let default_model = upgrade_model_for(pending.character_index, pending.upgrade_index);
+        // With no pick, the active skin is the saved costume's row: costume c is row c + 1
+        // (`wifpmcinterior.lua:1472`), index c here. A costume past the wardrobe highlights nothing.
+        let saved = usize::from(pending.costume_index);
         let active = p
             .wardrobe_preview
             .filter(|&i| i < outfits.len())
-            .or_else(|| outfits.iter().position(|(_, m)| *m == default_model));
+            .or_else(|| (saved < outfits.len()).then_some(saved));
 
         let cap = outfits.len() as u8;
         ui.horizontal(|ui| {
@@ -2301,7 +2289,7 @@ pub(crate) fn lookup_errors(ui: &mut egui::Ui, p: &Panel) {
 fn profile_differs(pending: &Profile, on_disk: &Profile) -> bool {
     pending.raw_bytes() != on_disk.raw_bytes()
         || pending.character_index != on_disk.character_index
-        || pending.upgrade_index != on_disk.upgrade_index
+        || pending.costume_index != on_disk.costume_index
         || pending.unlocked_costumes != on_disk.unlocked_costumes
         || pending.cash != on_disk.cash
         || pending.fuel != on_disk.fuel
@@ -2405,7 +2393,6 @@ pub fn apply(act: Act, p: &mut Panel) {
             mutate_pending(p, |pr| pr.character_index = v)
         }
         Act::SetWardrobePreview(i) => p.wardrobe_preview = i,
-        Act::SetUpgrade(v) => mutate_pending(p, |pr| pr.upgrade_index = v),
         Act::SetUnlockedCostumes(v) => mutate_pending(p, |pr| pr.unlocked_costumes = v),
         Act::SetCash(v) => mutate_pending(p, |pr| pr.cash = v),
         Act::SetFuel(v) => mutate_pending(p, |pr| pr.fuel = v),

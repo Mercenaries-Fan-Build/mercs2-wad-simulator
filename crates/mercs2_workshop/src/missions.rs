@@ -5,11 +5,14 @@
 //! emits the script and compiles it with the game's Lua 5.1; Add to Shipment stages the result in
 //! the open Shipment as a `replace_lua` contribution.
 //!
-//! Left: the mission scripts (scripts whose inherit chain reaches the base task), what the open
-//! script defines, and the palette — built from the corpus: the base task's lifecycle hooks, the
-//! `Event.*` kinds, the objective classes `CreateChild` names, the calls the scripts make (each
-//! with a real call site to start from), and Lua's own statements. Centre: the canvas. Right: the
-//! selected node's execution, parameters and source. Bottom: compile state, counts and zoom.
+//! Left: the scripts — the mission scripts (scripts whose inherit chain reaches the base task) or the
+//! library scripts (every other one) — and below them one tab at a time: the open script's members
+//! (its functions by how they are reached, its variables, data and imports, which the main chunk's canvas
+//! leaves out), the palette — built from the corpus: the base task's lifecycle hooks, the `Event.*`
+//! kinds, the objective classes `CreateChild` names, the calls the scripts make (each with a real call
+//! site to start from), and Lua's own statements — Debug mode's breakpoints in every script, and the
+//! save that badges the list. Centre: the canvas. Right: the selected node's execution, parameters and
+//! source. Bottom: compile state, counts and zoom.
 //!
 //! Canvas text comes from the Workshop type scale times the zoom, like the rest of the drawing:
 //! zoomed out, it shrinks below the scale's smallest size rather than disappearing, so a whole
@@ -25,6 +28,8 @@ use crate::blueprint::{
 };
 use crate::gui::theme;
 use crate::lua_source::Script;
+use crate::missions_debug::{Debug, LineRun, LinkState};
+use mercs2_formats::lua_debug::Step;
 
 // ───────────────────────────────────────────────────────────────────── reference data
 
@@ -47,7 +52,7 @@ impl Reference {
 /// The module every mission task inherits from.
 const TASK_BASE: &str = "mrxtask";
 
-/// One mission script.
+/// One corpus script.
 #[derive(Clone, Debug)]
 pub struct MissionEntry {
     /// Corpus path (`lua/vz/pmccon016.lua`).
@@ -56,17 +61,39 @@ pub struct MissionEntry {
     pub name: String,
     /// The class it inherits, as its `inherit()` call writes it.
     pub inherits: String,
+    /// Whether its inherit chain reaches the base task: a mission script, else a library script.
+    pub mission: bool,
 }
 
-/// Every corpus script whose inherit chain reaches the base task, by name.
+/// Which scripts the navigator lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    Missions,
+    Library,
+}
+
+/// What the navigator's lower pane shows, one at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lower {
+    /// The open script's members.
+    Script,
+    /// What can be added to the canvas.
+    Palette,
+    /// Debug mode's breakpoints, in every script.
+    Breakpoints,
+    /// The save whose progress badges the script list.
+    Saves,
+}
+
+/// Every corpus script, by name.
 fn build_catalog(index: &CorpusIndex, corpus: &[(String, String, String)]) -> Vec<MissionEntry> {
     let mut out: Vec<MissionEntry> = corpus
         .iter()
-        .filter(|(path, _, _)| index.context(path).bases.iter().any(|b| b == TASK_BASE))
         .map(|(path, _, _)| MissionEntry {
             path: path.clone(),
             name: stem(path),
             inherits: index.inherits(path).unwrap_or_default().to_string(),
+            mission: index.context(path).bases.iter().any(|b| b == TASK_BASE),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
@@ -76,6 +103,17 @@ fn build_catalog(index: &CorpusIndex, corpus: &[(String, String, String)]) -> Ve
 fn stem(path: &str) -> String {
     let file = path.rsplit('/').next().unwrap_or(path);
     file.strip_suffix(".lua").unwrap_or(file).to_string()
+}
+
+/// The file stem of every corpus script of `path`'s bank: what pairs a file named after no shipped
+/// script with the one of its code.
+fn bank_files(corpus: &[(String, String, String)], path: &str) -> Vec<String> {
+    let bank = crate::missions_debug::bank_of(path).ok();
+    corpus
+        .iter()
+        .filter(|(p, _, _)| bank.is_some() && crate::missions_debug::bank_of(p).ok() == bank)
+        .map(|(p, _, _)| stem(p))
+        .collect()
 }
 
 // ───────────────────────────────────────────────────────────────────── save overlay
@@ -128,7 +166,10 @@ pub struct ShipmentRequest {
 pub struct Panel {
     reference: Option<Reference>,
     catalog: Vec<MissionEntry>,
+    shown: Shown,
     filter: String,
+    /// What is typed into Debug mode's engine breakpoint picker.
+    engine_query: String,
     open: Option<Open>,
     save: Option<SaveOverlay>,
     /// The last thing that went wrong or was done, for the footer.
@@ -139,6 +180,11 @@ pub struct Panel {
     pub pending_save_open: bool,
     /// Set by `apply` on Add to Shipment; drained by the host, which owns the Quartermaster.
     pub pending_shipment: Option<ShipmentRequest>,
+    /// The script list's height in the navigator, as the user dragged the divider.
+    script_pane: f32,
+    lower: Lower,
+    /// What is typed into the members' filter.
+    member_filter: String,
 }
 
 impl Default for Panel {
@@ -146,13 +192,18 @@ impl Default for Panel {
         Panel {
             reference: None,
             catalog: Vec::new(),
+            shown: Shown::Missions,
             filter: String::new(),
+            engine_query: String::new(),
             open: None,
             save: None,
             status: None,
             pending_lua_open: None,
             pending_save_open: false,
             pending_shipment: None,
+            script_pane: SCRIPT_PANE_DEFAULT,
+            lower: Lower::Script,
+            member_filter: String::new(),
         }
     }
 }
@@ -333,6 +384,39 @@ impl Panel {
         Ok(())
     }
 
+    /// Whether the corpus reference is in, so scripts can open.
+    pub fn has_reference(&self) -> bool {
+        self.reference.is_some()
+    }
+
+    /// Open the script the script list shows as `name` (its file stem), listing it where it is listed, on the
+    /// canvas of its top-level `function` when one is named. A name no script has, or that scripts of more
+    /// than one bank have, and a function the script does not define, are errors naming them.
+    pub fn open_named(&mut self, name: &str, function: Option<&str>, corpus: &[(String, String, String)]) -> Result<(), String> {
+        let found: Vec<usize> = (0..self.catalog.len()).filter(|&i| self.catalog[i].name == name).collect();
+        let i = match found.as_slice() {
+            [i] => *i,
+            [] => return Err(format!("no Missions script is named {name:?}")),
+            many => {
+                let paths: Vec<&str> = many.iter().map(|&i| self.catalog[i].path.as_str()).collect();
+                return Err(format!("{name:?} names {} scripts: {}", many.len(), paths.join(", ")));
+            }
+        };
+        self.shown = if self.catalog[i].mission { Shown::Missions } else { Shown::Library };
+        pick(self, i, corpus);
+        let Some(o) = self.open.as_mut() else {
+            return Err(self.status.as_ref().map(|(_, e)| e.clone()).unwrap_or_else(|| format!("{name} did not open")));
+        };
+        if let Some(f) = function {
+            let at = o.chunk.nodes.iter().position(|n| n.is_function() && n.title == f).ok_or_else(|| {
+                let all: Vec<&str> = o.chunk.nodes.iter().filter(|n| n.is_function()).map(|n| n.title.as_str()).collect();
+                format!("{name} defines no function {f:?}; it defines {}", all.join(", "))
+            })?;
+            o.path = vec![at];
+        }
+        Ok(())
+    }
+
     fn fail(&mut self, msg: impl Into<String>) {
         self.status = Some((false, msg.into()));
     }
@@ -352,7 +436,6 @@ pub enum Act {
     Select(Vec<NodeId>, bool),
     /// Open the canvas holding a node and select it.
     Reveal(Vec<NodeId>, NodeId),
-    SelectAll,
     Pan(Vec2),
     /// Zoom by `factor` keeping the canvas point under `at` (relative to the canvas corner) still.
     ZoomAt { factor: f32, at: Vec2 },
@@ -372,6 +455,12 @@ pub enum Act {
     Add(PaletteEntry),
     Delete(Vec<NodeId>),
     Clone(Vec<NodeId>),
+    /// Turn a run of calls back into one node per call.
+    Unfold(NodeId),
+    /// Add a call to a run (or make a call a run of two): a copy of its last.
+    AddCall(NodeId),
+    /// Remove one call (its index in the run) from a run.
+    RemoveCall(NodeId, usize),
     Copy(Vec<NodeId>),
     Paste(Pos2),
     Undo,
@@ -383,14 +472,154 @@ pub enum Act {
     JumpToSource(Option<NodeId>),
     OpenSavePicker,
     ClearSave,
+    /// The Edit/Debug switch.
+    DebugMode(bool),
+    /// Open the debug link to the live game on the bridge port; the context repaints as frames arrive.
+    DebugConnect(egui::Context),
+    DebugDisconnect,
+    DebugAttach,
+    /// Add the open script to the running attach.
+    DebugAddOpen,
+    DebugDetach,
+    /// Continue (`None`) or step a paused run.
+    DebugResume(Option<Step>),
+    /// Add or remove the breakpoint on a corpus line of the open script.
+    ToggleBreakpoint(u32),
+    /// The same on a line of the open script's main chunk (a member's), whichever canvas is open.
+    ToggleChunkBreakpoint(u32),
+    /// Add or remove the breakpoint on entry to a function of the open script (its node in the chunk).
+    BreakOnEntry(NodeId),
+    /// Remove the breakpoint on a corpus line of the script at a corpus path.
+    RemoveBreakpoint(String, u32),
+    /// Open the script at a corpus path on the node of a corpus line.
+    ShowLine(String, u32),
+    /// Add or remove the engine breakpoint on a binding.
+    ToggleEngine(String),
+    /// The text typed into the engine breakpoint picker.
+    EngineQuery(String),
+    /// Which scripts the navigator lists.
+    Show(Shown),
+    /// The navigator's divider was dragged: the script list's new height.
+    ScriptPane(f32),
+    /// What the navigator's lower pane shows.
+    Lower(Lower),
+    /// The text typed into the members' filter.
+    MemberFilter(String),
+    /// Add a new member of this kind at the end of the main chunk.
+    AddMember(blueprint::Member),
+    /// Delete a member: a statement of the main chunk.
+    DeleteMember(NodeId),
 }
 
-pub fn apply(act: Act, p: &mut Panel, corpus: &[(String, String, String)]) {
+impl Act {
+    /// Whether the act changes the script. Debug mode lays a run over the graph and refuses these.
+    fn edits(&self) -> bool {
+        matches!(
+            self,
+            Act::SetValue { .. }
+                | Act::ConnectData { .. }
+                | Act::BreakData(_)
+                | Act::ConnectExec { .. }
+                | Act::BreakExec(_)
+                | Act::BreakExecInto(_)
+                | Act::BeginAdd { .. }
+                | Act::Add(_)
+                | Act::Delete(_)
+                | Act::AddMember(_)
+                | Act::DeleteMember(_)
+                | Act::Clone(_)
+                | Act::Unfold(_)
+                | Act::AddCall(_)
+                | Act::RemoveCall(..)
+                | Act::Paste(_)
+                | Act::Undo
+                | Act::Redo
+                | Act::Revert
+                | Act::Compile
+                | Act::AddToShipment
+        )
+    }
+}
+
+/// Carry out `act`. `d` is the app's one debug session (the host takes one debug client), which the page
+/// drives and lays over its graph.
+pub fn apply(act: Act, p: &mut Panel, d: &mut Debug, corpus: &[(String, String, String)]) {
+    if d.on && act.edits() {
+        p.fail("Debug mode lays a run over the graph: switch to Edit to change it");
+        return;
+    }
     match act {
-        Act::Pick(i) => pick(p, i, corpus),
+        Act::Pick(i) => {
+            pick(p, i, corpus);
+            debug_open(p, d, corpus);
+        }
         Act::Filter(f) => p.filter = f,
+        Act::Show(s) => p.shown = s,
+        Act::ScriptPane(h) => p.script_pane = h.max(SCRIPT_PANE_MIN),
+        Act::Lower(l) => p.lower = l,
+        Act::MemberFilter(f) => p.member_filter = f,
         Act::OpenSavePicker => p.pending_save_open = true,
         Act::ClearSave => p.save = None,
+        Act::DebugMode(on) => {
+            d.on = on;
+            if let Some(o) = p.open.as_mut() {
+                o.adding = None;
+            }
+            debug_open(p, d, corpus);
+        }
+        Act::DebugConnect(ctx) => d.connect(mercs2_bridge::DEFAULT_ADDR, ctx),
+        Act::DebugDisconnect => d.disconnect(),
+        Act::DebugAttach => debug_attach(p, d, false),
+        Act::DebugAddOpen => debug_attach(p, d, true),
+        Act::DebugDetach => d.detach(),
+        Act::DebugResume(step) => d.resume(step),
+        Act::ToggleBreakpoint(line) => {
+            let Some(o) = p.open.as_ref() else { return };
+            // Named for the function it is in: the canvas's, or the main chunk.
+            let label = match o.path.first().and_then(|&i| o.chunk.nodes.get(i)) {
+                Some(f) => format!("{}()", f.title),
+                None => "main chunk".to_string(),
+            };
+            let path = o.entry.path.clone();
+            if let Err(e) = d.toggle_breakpoint(&path, line, &label) {
+                p.fail(format!("breakpoint on line {line}: {e}"));
+            }
+        }
+        Act::ToggleChunkBreakpoint(line) => {
+            let Some(o) = p.open.as_ref() else { return };
+            let path = o.entry.path.clone();
+            if let Err(e) = d.toggle_breakpoint(&path, line, "main chunk") {
+                p.fail(format!("breakpoint on line {line}: {e}"));
+            }
+        }
+        Act::BreakOnEntry(i) => {
+            let Some(o) = p.open.as_ref() else { return };
+            let Some(f) = o.chunk.nodes.get(i).filter(|n| n.is_function()) else { return };
+            let (path, title, defined) = (o.entry.path.clone(), f.title.clone(), f.line);
+            let line = match d.scripts.get(&path).map(|w| w.mapped.as_ref()) {
+                Some(Ok(m)) => crate::missions_debug::entry_line(m, defined),
+                Some(Err(e)) => Err(format!("no line map for {}: {e}", o.entry.name)),
+                None => Err(format!("{} is not mapped: switch to Debug first", o.entry.name)),
+            };
+            if let Err(e) = line.and_then(|line| d.toggle_breakpoint(&path, line, &format!("{title}() entry"))) {
+                p.fail(format!("break on entry to {title}: {e}"));
+            }
+        }
+        Act::RemoveBreakpoint(path, line) => {
+            let label = d.scripts.get(&path).and_then(|w| w.breakpoints.get(&line)).cloned().unwrap_or_default();
+            if let Err(e) = d.toggle_breakpoint(&path, line, &label) {
+                p.fail(format!("breakpoint on line {line}: {e}"));
+            }
+        }
+        Act::ShowLine(path, line) => show_line(p, d, corpus, &path, line),
+        Act::ToggleEngine(binding) => {
+            if let Err(e) = d.toggle_engine(&binding) {
+                p.fail(format!("engine breakpoint on {binding}: {e}"));
+            } else {
+                p.engine_query.clear();
+            }
+        }
+        Act::EngineQuery(q) => p.engine_query = q,
         other => {
             let Some(o) = p.open.as_mut() else { return };
             let compiling = matches!(other, Act::Compile | Act::AddToShipment);
@@ -456,6 +685,74 @@ fn pick(p: &mut Panel, i: usize, corpus: &[(String, String, String)]) {
     });
 }
 
+/// The open script for Debug mode: the session knows it is open, and in Debug mode it is mapped (the page
+/// says why when it cannot be). An edited graph is not mapped: the run is of the script that shipped.
+fn debug_open(p: &mut Panel, d: &mut Debug, corpus: &[(String, String, String)]) {
+    let Some(o) = p.open.as_ref() else { return };
+    d.open_script(&o.entry.path);
+    if d.on && !o.edited {
+        let files = bank_files(corpus, &o.entry.path);
+        let files: Vec<&str> = files.iter().map(String::as_str).collect();
+        d.watch(&o.entry.path, &o.entry.name, &o.script, &o.chunk, &files);
+    }
+}
+
+/// Attach to the open script and every script with a breakpoint, or add the open one to the running
+/// attach (`add`).
+fn debug_attach(p: &mut Panel, d: &mut Debug, add: bool) {
+    let Some(o) = p.open.as_ref() else { return };
+    if o.edited {
+        p.fail("the graph is edited: Revert it to attach, so the run is laid over the script that shipped");
+        return;
+    }
+    let attached = if add { d.add_open() } else { d.attach() };
+    if let Err(e) = attached {
+        p.fail(format!("attach: {e}"));
+    }
+}
+
+/// Open the script at corpus path `path` (when it is not the open one) on the canvas of corpus line
+/// `line`, its node selected.
+fn show_line(p: &mut Panel, d: &mut Debug, corpus: &[(String, String, String)], path: &str, line: u32) {
+    if p.open.as_ref().is_none_or(|o| o.entry.path != path) {
+        let Some(i) = p.catalog.iter().position(|e| e.path == path) else {
+            p.fail(format!("{path} is not in the script list"));
+            return;
+        };
+        pick(p, i, corpus);
+        debug_open(p, d, corpus);
+    }
+    let Some(o) = p.open.as_mut() else { return };
+    let mut found = None;
+    each_node(&o.chunk, &mut Vec::new(), &mut |path, id, n| {
+        if found.is_none() && n.lines().contains(&line) && n.sub.is_none() {
+            found = Some((path.to_vec(), id));
+        }
+    });
+    if let Some((path, id)) = found {
+        // A member has no node on the drawn chunk: its row in This script shows the line instead.
+        let member = path.is_empty() && o.chunk.hidden().get(id).copied().unwrap_or(false);
+        o.path = path;
+        o.selection = vec![id];
+        if member {
+            p.lower = Lower::Script;
+        }
+    }
+}
+
+impl Panel {
+    /// Take what the debug link sent; when the run has just paused in a watched script, open that script on
+    /// the canvas of the paused node and select it.
+    pub fn poll(&mut self, d: &mut Debug, corpus: &[(String, String, String)]) {
+        if !d.poll() {
+            return;
+        }
+        let Some(at) = d.run.paused.clone() else { return };
+        let (Some(line), Some(path)) = (at.line, d.script_of(&at.module).map(|w| w.path.clone())) else { return };
+        show_line(self, d, corpus, &path, line);
+    }
+}
+
 /// Carry out an act on the open script.
 fn edit(
     o: &mut Open,
@@ -491,9 +788,6 @@ fn edit(
             o.path = path;
             o.selection = vec![id];
             o.adding = None;
-        }
-        Act::SelectAll => {
-            o.selection = (0..o.canvas().map(|g| g.nodes.len()).unwrap_or(0)).filter(|&i| i != ENTRY).collect();
         }
         Act::Pan(d) => o.view_mut().pan += d,
         Act::ZoomAt { factor, at } => {
@@ -603,6 +897,48 @@ fn edit(
             o.selection = copies;
             o.recheck();
         }
+        Act::AddMember(kind) => {
+            let reference = reference.ok_or("the reference corpus is not loaded")?;
+            let ctx = reference.index.context(&o.entry.path);
+            let lua = new_member(&o.chunk, kind)?;
+            o.snapshot();
+            let id = o.chunk.add_top_level(&lua, &ctx)?;
+            // A function opens on its canvas; anything else opens the chunk, selected for the inspector.
+            o.path = if kind == blueprint::Member::Function { vec![id] } else { Vec::new() };
+            o.selection = if kind == blueprint::Member::Function { Vec::new() } else { vec![id] };
+            o.adding = None;
+            o.recheck();
+        }
+        Act::DeleteMember(id) => {
+            if id == ENTRY || o.chunk.nodes.get(id).is_none() {
+                return Ok(());
+            }
+            o.snapshot();
+            let map = o.chunk.delete(&[id]);
+            let v = o.views.entry(Vec::new()).or_default();
+            v.pos = v.pos.iter().filter_map(|(&k, &p)| Some((map.get(k).copied().flatten()?, p))).collect();
+            // The canvases under the chunk are keyed by function node; they move with the renumbering.
+            o.views = std::mem::take(&mut o.views)
+                .into_iter()
+                .filter_map(|(path, view)| match path.split_first() {
+                    Some((&f, rest)) => map.get(f).copied().flatten().map(|f| ([&[f][..], rest].concat(), view)),
+                    None => Some((path, view)),
+                })
+                .collect();
+            o.path = match o.path.split_first() {
+                Some((&f, rest)) => map.get(f).copied().flatten().map(|f| [&[f][..], rest].concat()).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            o.selection.clear();
+            o.settle();
+            o.recheck();
+        }
+        Act::Unfold(id) => {
+            // The calls after the first are new nodes; the canvas places them when it next draws.
+            change(o, |g| g.unfold(id).map(|_| ()))?;
+        }
+        Act::AddCall(id) => change(o, |g| g.add_call(id))?,
+        Act::RemoveCall(id, k) => change(o, |g| g.remove_call(id, k))?,
         Act::Copy(ids) => {
             let g = o.canvas().ok_or("no canvas")?;
             o.clipboard = ids
@@ -693,9 +1029,49 @@ fn edit(
                 _ => return Err("a node made in the editor has no source line yet".into()),
             }
         }
-        Act::Pick(_) | Act::Filter(_) | Act::OpenSavePicker | Act::ClearSave => {}
+        Act::Pick(_)
+        | Act::Filter(_)
+        | Act::ScriptPane(_)
+        | Act::OpenSavePicker
+        | Act::ClearSave
+        | Act::DebugMode(_)
+        | Act::DebugConnect(_)
+        | Act::DebugDisconnect
+        | Act::DebugAttach
+        | Act::DebugAddOpen
+        | Act::DebugDetach
+        | Act::DebugResume(_)
+        | Act::ToggleBreakpoint(_)
+        | Act::ToggleChunkBreakpoint(_)
+        | Act::BreakOnEntry(_)
+        | Act::RemoveBreakpoint(..)
+        | Act::ShowLine(..)
+        | Act::ToggleEngine(_)
+        | Act::EngineQuery(_)
+        | Act::Show(_)
+        | Act::Lower(_)
+        | Act::MemberFilter(_) => {}
     }
     Ok(())
+}
+
+/// The Lua of a new member of `kind`: a placeholder named after the kind that no top-level statement of
+/// `chunk` uses yet (`NewFunction`, `NewFunction2`, …).
+fn new_member(chunk: &Graph, kind: blueprint::Member) -> Result<String, String> {
+    let (base, lua): (&str, fn(&str) -> String) = match kind {
+        blueprint::Member::Function => ("NewFunction", |n| format!("function {n}()\nend")),
+        blueprint::Member::Variable => ("NewValue", |n| format!("{n} = nil")),
+        blueprint::Member::Data => ("tNewData", |n| format!("{n} = {{}}")),
+        blueprint::Member::Import => return Err("a new import needs the module it names, which no placeholder can give".into()),
+    };
+    let taken = |n: &str| chunk.nodes.iter().any(|m| member_name(m) == n);
+    let name = (1..).map(|k| if k == 1 { base.to_string() } else { format!("{base}{k}") }).find(|n| !taken(n)).expect("a free name");
+    Ok(lua(&name))
+}
+
+/// The name a member is listed under: a function's, or the names an assignment gives (`X, Y =` → `X, Y`).
+fn member_name(n: &blueprint::Node) -> String {
+    n.title.trim_end_matches(" =").trim_start_matches("local ").to_string()
 }
 
 /// Change the current canvas with an undo point, and re-check the script.
@@ -914,9 +1290,6 @@ const ICON: f32 = 18.0;
 const PIN_R: f32 = 5.0;
 const ROUND: f32 = 10.0;
 const GRID: f32 = 26.0;
-const GAP_X: f32 = 56.0;
-const GAP_Y: f32 = 36.0;
-const INDENT_X: f32 = 48.0;
 /// Screen pixels kept clear around a fitted canvas.
 const FIT_MARGIN: f32 = 48.0;
 /// Longest literal shown beside a pin before it is cut.
@@ -992,23 +1365,31 @@ fn measure(ui: &egui::Ui, n: &blueprint::Node) -> Vec2 {
         right = right.max(w(&o.label, &TextStyle::Small));
     }
     let side = PAD_X + PIN_R * 2.0 + 8.0;
-    let body = side + left + 24.0 + right + side;
+    // Data pins sit inside the node's sides; a run's cards are also numbered at their right.
+    let inset = if n.inputs.is_empty() { 0.0 } else { PIN_INSET }
+        + if n.outputs.is_empty() { 0.0 } else { PIN_INSET }
+        + if n.run_len() > 1 { 16.0 } else { 0.0 };
+    let body = side + inset + left + 24.0 + right + side;
     let (l, r) = rows(n);
     Vec2::new(title.max(body).max(140.0), HEADER_H + PAD_Y * 2.0 + ROW_H * l.max(r).max(1) as f32)
 }
 
 /// Where row `i` of a side sits, in canvas units from the node's corner.
-fn row_y(i: usize) -> f32 {
+pub(crate) fn row_y(i: usize) -> f32 {
     HEADER_H + PAD_Y + ROW_H * (i as f32 + 0.5)
 }
 
+/// How far data pins sit inside a node's sides: an input left-aligned with the header's icon (a run's
+/// inside its cards), an output the same distance from the right edge. Exec pins stay on the edges.
+const PIN_INSET: f32 = 9.0 + PIN_R + 1.0;
+
 /// A pin's centre in canvas units.
-fn pin_at(n: &blueprint::Node, pos: Pos2, size: Vec2, pin: PinRef) -> Pos2 {
+pub(crate) fn pin_at(n: &blueprint::Node, pos: Pos2, size: Vec2, pin: PinRef) -> Pos2 {
     match pin {
         PinRef::ExecIn(_) => pos + Vec2::new(0.0, row_y(0)),
-        PinRef::In(_, i) => pos + Vec2::new(0.0, row_y(n.exec_in as usize + i)),
+        PinRef::In(_, i) => pos + Vec2::new(PIN_INSET, row_y(n.exec_in as usize + i)),
         PinRef::ExecOut(_, k) => pos + Vec2::new(size.x, row_y(k)),
-        PinRef::Out(_, k) => pos + Vec2::new(size.x, row_y(n.exec_outs.len() + k)),
+        PinRef::Out(_, k) => pos + Vec2::new(size.x - PIN_INSET, row_y(n.exec_outs.len() + k)),
     }
 }
 
@@ -1025,138 +1406,10 @@ fn pins_of(id: NodeId, n: &blueprint::Node) -> Vec<PinRef> {
 
 // ───────────────────────────────────────────────────────────────────── layout
 
-/// The width a canvas's rows wrap at: the width of a rectangle of the canvas's shape whose area is
-/// every node's footprint with its gaps, and never narrower than what the canvas shows at 1:1 or
-/// than the widest node — so a function that fits stays in one row, and a long one comes out the
-/// canvas's shape rather than one long strip.
-fn wrap_width(sizes: &[Vec2], canvas: Vec2) -> f32 {
-    let aspect = canvas.x / canvas.y.max(1.0);
-    let area: f32 = sizes.iter().map(|s| (s.x + GAP_X) * (s.y + GAP_Y)).sum();
-    let widest = sizes.iter().map(|s| s.x).fold(0.0, f32::max);
-    (area * aspect.max(0.1)).sqrt().max(canvas.x - FIT_MARGIN * 2.0).max(widest)
-}
-
-/// Positions for a canvas: each exec chain runs left to right, a statement's values stack under
-/// it, and the blocks off a statement (a branch's arms, a loop's body, a callback) chain below
-/// the row they hang from. A chain row that would pass [`wrap_width`] for the `canvas` (its size
-/// on screen) ends, and the chain carries on in a new row under that row's blocks, back at the
-/// row's start.
-fn layout(g: &Graph, sizes: &[Vec2], canvas: Vec2) -> HashMap<NodeId, Pos2> {
-    struct L<'a> {
-        g: &'a Graph,
-        sizes: &'a [Vec2],
-        pos: HashMap<NodeId, Pos2>,
-        /// The x no row's statements start past, once the row holds one.
-        right: f32,
-    }
-    impl L<'_> {
-        /// Stack the data nodes feeding `id` under it from `y`; returns the stack's width and
-        /// height, and collects every node placed.
-        fn values(&mut self, id: NodeId, x: f32, y: f32, placed: &mut Vec<NodeId>) -> (f32, f32) {
-            let mut h = 0.0_f32;
-            let mut w = 0.0_f32;
-            let producers: Vec<NodeId> = self
-                .g
-                .data
-                .iter()
-                .filter(|d| d.to.0 == id && !self.g.nodes[d.from.0].exec_in && d.from.0 != ENTRY)
-                .map(|d| d.from.0)
-                .collect();
-            for p in producers {
-                if self.pos.contains_key(&p) {
-                    continue;
-                }
-                let at = Pos2::new(x + INDENT_X * 0.5, y + h);
-                self.pos.insert(p, at);
-                placed.push(p);
-                let s = self.sizes[p];
-                let (cw, ch) = self.values(p, at.x, at.y + s.y + GAP_Y * 0.5, placed);
-                w = w.max(INDENT_X * 0.5 + s.x.max(cw));
-                h += s.y + GAP_Y * 0.5 + ch;
-            }
-            (w, h)
-        }
-
-        /// Lay out the chain from `from` starting at (x, y); returns the y below everything.
-        fn chain(&mut self, from: (NodeId, usize), x: f32, y: f32) -> f32 {
-            let mut ids = Vec::new();
-            let mut cur = self.g.exec_target(from.0, from.1);
-            while let Some(id) = cur {
-                if self.pos.contains_key(&id) || ids.contains(&id) {
-                    break;
-                }
-                ids.push(id);
-                cur = self.g.nodes[id].next.and_then(|n| self.g.exec_target(id, n));
-            }
-            let mut cx = x;
-            let mut row_y = y;
-            let mut bottom = y;
-            let mut placed = Vec::new();
-            for &id in &ids {
-                let s = self.sizes[id];
-                if cx > x && cx + s.x > self.right {
-                    row_y = self.blocks(&placed, bottom + GAP_Y) + GAP_Y;
-                    placed.clear();
-                    cx = x;
-                    bottom = row_y;
-                }
-                self.pos.insert(id, Pos2::new(cx, row_y));
-                placed.push(id);
-                let (vw, vh) = self.values(id, cx, row_y + s.y + GAP_Y * 0.5, &mut placed);
-                bottom = bottom.max(row_y + s.y + if vh > 0.0 { GAP_Y * 0.5 + vh } else { 0.0 });
-                cx += s.x.max(vw) + GAP_X;
-            }
-            self.blocks(&placed, bottom + GAP_Y)
-        }
-
-        /// Chain the blocks off `placed` (every exec out but `next`) one under another from `y`,
-        /// each indented from the node it hangs from; returns the y below the last.
-        fn blocks(&mut self, placed: &[NodeId], y: f32) -> f32 {
-            let mut below = y;
-            for &id in placed {
-                let n = &self.g.nodes[id];
-                for k in 0..n.exec_outs.len() {
-                    if Some(k) == n.next {
-                        continue;
-                    }
-                    if self.g.exec_target(id, k).is_some() {
-                        let bx = self.pos[&id].x + INDENT_X;
-                        below = self.chain((id, k), bx, below) + GAP_Y;
-                    }
-                }
-            }
-            below - GAP_Y
-        }
-    }
-    let mut l = L {
-        g,
-        sizes,
-        pos: HashMap::new(),
-        right: wrap_width(sizes, canvas),
-    };
-    l.pos.insert(ENTRY, Pos2::ZERO);
-    let mut entry_values = Vec::new();
-    let (_, eh) = l.values(ENTRY, 0.0, sizes[ENTRY].y + GAP_Y * 0.5, &mut entry_values);
-    let mut bottom = l.chain((ENTRY, 0), sizes[ENTRY].x + GAP_X, 0.0).max(sizes[ENTRY].y + eh);
-    // Whatever no chain reaches (unwired statements, loose values) goes in rows underneath,
-    // wrapping at the same width.
-    let mut x = 0.0;
-    bottom += GAP_Y * 2.0;
-    let mut row_h: f32 = 0.0;
-    for id in 0..g.nodes.len() {
-        if l.pos.contains_key(&id) {
-            continue;
-        }
-        if x > 0.0 && x + sizes[id].x > l.right {
-            x = 0.0;
-            bottom += row_h + GAP_Y;
-            row_h = 0.0;
-        }
-        l.pos.insert(id, Pos2::new(x, bottom));
-        x += sizes[id].x + GAP_X;
-        row_h = row_h.max(sizes[id].y);
-    }
-    l.pos
+/// Positions for a canvas's nodes, measured at `sizes`: `missions_layout`'s rules (no wrapping; a long
+/// function is wide and the canvas pans).
+fn layout(g: &Graph, sizes: &[Vec2]) -> HashMap<NodeId, Pos2> {
+    crate::missions_layout::layout(g, sizes, &crate::missions_layout::Rules::default())
 }
 
 /// The pan and zoom that fit `bounds` (canvas units) into a canvas of `size`, no closer than 1:1.
@@ -1170,32 +1423,98 @@ fn fit(bounds: Rect, size: Vec2) -> (Vec2, f32) {
 
 // ───────────────────────────────────────────────────────────────────── navigator
 
-pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
+pub fn navigator(ui: &mut egui::Ui, p: &Panel, d: &Debug) -> Vec<Act> {
     let mut acts = Vec::new();
     ui.label(theme::disp_text("MISSIONS", theme::style_title(), theme::TX));
-    ui.add_space(6.0);
-    let mut filter = p.filter.clone();
-    if ui
-        .add(egui::TextEdit::singleline(&mut filter).hint_text("Filter mission…").desired_width(f32::INFINITY))
-        .changed()
-    {
-        acts.push(Act::Filter(filter));
-    }
-    ui.add_space(6.0);
+    ui.add_space(PANE_GAP);
     let Some(r) = &p.reference else {
         ui.label(egui::RichText::new("Loading the Lua corpus…").small().color(theme::FAINT));
         return acts;
     };
-    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
-        scripts(ui, p, &mut acts);
-        if let Some(o) = &p.open {
-            in_this_script(ui, o, &mut acts);
+    // Two panes, each scrolling on its own: the script list above, the open script and the palette below,
+    // split where the user dragged the divider (content never moves it). Both are built alike — a row of
+    // tabs, a filter, the list — with [`PANE_GAP`] between each.
+    let width = ui.available_width();
+    let top = p.script_pane.clamp(SCRIPT_PANE_MIN, (ui.available_height() - DETAIL_PANE_MIN - DIVIDER_H).max(SCRIPT_PANE_MIN));
+    ui.allocate_ui(Vec2::new(width, top), |ui| {
+        ui.set_min_size(Vec2::new(width, top));
+        ui.horizontal(|ui| {
+            theme::eyebrow(ui, "Script");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Right to left: Library is drawn first so Missions reads first.
+                let count = |mission: bool| p.catalog.iter().filter(|e| e.mission == mission).count();
+                for (shown, label) in [(Shown::Library, format!("Library {}", count(false))), (Shown::Missions, format!("Missions {}", count(true)))] {
+                    if ui.selectable_label(p.shown == shown, label).clicked() && p.shown != shown {
+                        acts.push(Act::Show(shown));
+                    }
+                }
+            });
+        });
+        ui.add_space(PANE_GAP);
+        let mut filter = p.filter.clone();
+        if ui
+            .add(egui::TextEdit::singleline(&mut filter).hint_text("Filter scripts…").desired_width(f32::INFINITY))
+            .changed()
+        {
+            acts.push(Act::Filter(filter));
         }
-        palette(ui, r, p.open.as_ref(), &mut acts);
-        save_section(ui, p, &mut acts);
+        ui.add_space(PANE_GAP);
+        theme::scroll_vertical().id_salt("mb-scripts").auto_shrink([false, false]).show(ui, |ui| {
+            scripts(ui, p, d, &mut acts);
+        });
+    });
+    let (bar, drag) = ui.allocate_exact_size(Vec2::new(width, DIVIDER_H), Sense::drag());
+    let hot = drag.hovered() || drag.dragged();
+    let line = if hot { theme::BRASS_DK } else { NODE_BORDER };
+    ui.painter().hline(bar.x_range(), bar.center().y, Stroke::new(if hot { 2.0 } else { 1.0 }, line));
+    for dx in [-8.0, 0.0, 8.0] {
+        ui.painter().circle_filled(bar.center() + Vec2::new(dx, 0.0), 1.8, if hot { theme::BRASS_DK } else { ANNOT });
+    }
+    if hot {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if drag.dragged() {
+        acts.push(Act::ScriptPane(top + drag.drag_delta().y));
+    }
+    // The lower pane: one scope at a time, picked by its tab.
+    let lower = if p.lower == Lower::Breakpoints && !d.on { Lower::Script } else { p.lower };
+    ui.horizontal(|ui| {
+        let marks: usize = d.scripts.values().map(|w| w.breakpoints.len()).sum::<usize>() + d.engine.len();
+        let mut tabs = vec![(Lower::Script, "This script".to_string()), (Lower::Palette, "Palette".to_string())];
+        if d.on {
+            tabs.push((Lower::Breakpoints, format!("Breakpoints {marks}")));
+        }
+        tabs.push((Lower::Saves, "Saves".to_string()));
+        for (tab, label) in tabs {
+            if ui.selectable_label(lower == tab, label).clicked() && lower != tab {
+                acts.push(Act::Lower(tab));
+            }
+        }
+    });
+    ui.add_space(PANE_GAP);
+    theme::scroll_vertical().id_salt("mb-script-detail").auto_shrink([false, false]).show(ui, |ui| match lower {
+        Lower::Script => match &p.open {
+            Some(o) => members(ui, o, &p.member_filter, d, &mut acts),
+            None => {
+                ui.label(egui::RichText::new("Open a script to see what it declares.").small().color(theme::FAINT));
+            }
+        },
+        Lower::Palette => palette(ui, r, p.open.as_ref(), &mut acts),
+        Lower::Breakpoints => breakpoints(ui, p, d, &mut acts),
+        Lower::Saves => save_section(ui, p, &mut acts),
     });
     acts
 }
+
+/// Between a navigator pane's tab row, its filter and its list.
+const PANE_GAP: f32 = 6.0;
+
+/// The script list's pane, before the user drags the divider.
+const SCRIPT_PANE_DEFAULT: f32 = 260.0;
+const SCRIPT_PANE_MIN: f32 = 90.0;
+/// What the lower pane keeps however far the divider is dragged down.
+const DETAIL_PANE_MIN: f32 = 120.0;
+const DIVIDER_H: f32 = 12.0;
 
 fn section_head(ui: &mut egui::Ui, title: &str, note: &str) {
     ui.add_space(8.0);
@@ -1216,43 +1535,204 @@ fn swatch(ui: &mut egui::Ui, c: Color32, round: bool) {
 
 /// One clickable row: swatch, label, and a faint note at the right.
 fn nav_row(ui: &mut egui::Ui, colour: Color32, round: bool, label: &str, note: &str, on: bool) -> egui::Response {
+    nav_row_marked(ui, colour, round, label, note, on, false)
+}
+
+/// [`nav_row`], with a breakpoint dot before the note when `marked`.
+fn nav_row_marked(ui: &mut egui::Ui, colour: Color32, round: bool, label: &str, note: &str, on: bool, marked: bool) -> egui::Response {
     let fill = if on { theme::BRASS_SOFT } else { Color32::TRANSPARENT };
     let border = if on { theme::BRASS_DK } else { Color32::TRANSPARENT };
     let r = theme::row_chip(ui, fill, border, |ui| {
         swatch(ui, colour, round);
-        ui.label(egui::RichText::new(label).color(if on { theme::TX } else { theme::DIM }));
+        // The note first, from the right; the label takes what is left and is cut to it, so a long name
+        // never runs under the note.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(egui::RichText::new(note).monospace().color(theme::FAINT));
+            if marked {
+                swatch(ui, BAD, true);
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(label).color(if on { theme::TX } else { theme::DIM })).truncate());
+            });
         });
     });
     r.interact(Sense::click())
 }
 
-fn scripts(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
-    section_head(ui, "Script", &format!("{} mission scripts", p.catalog.len()));
-    let needle = p.filter.to_ascii_lowercase();
-    theme::scroll_vertical().id_salt("mb-scripts").max_height(220.0).show(ui, |ui| {
-        for (i, e) in p.catalog.iter().enumerate() {
-            if !needle.is_empty()
-                && !e.name.to_ascii_lowercase().contains(&needle)
-                && !e.inherits.to_ascii_lowercase().contains(&needle)
-            {
-                continue;
+/// How far a navigator section's card reaches past the rows inside it on every side.
+const SECTION_PAD: i8 = 4;
+
+/// A navigator section's header: its title (also the key its open state is kept under), its count, whether
+/// it starts open, what its `+` adds (hover text), and what its title explains on hover.
+struct Head<'a> {
+    title: &'a str,
+    count: usize,
+    open: bool,
+    add: Option<&'a str>,
+    hover: Option<&'a str>,
+}
+
+impl<'a> Head<'a> {
+    fn new(title: &'a str, count: usize) -> Self {
+        Head { title, count, open: true, add: None, hover: None }
+    }
+    fn closed(self) -> Self {
+        Head { open: false, ..self }
+    }
+    fn open_if(self, open: bool) -> Self {
+        Head { open, ..self }
+    }
+    fn add(self, add: Option<&'a str>) -> Self {
+        Head { add, ..self }
+    }
+    fn hover(self, hover: &'a str) -> Self {
+        Head { hover: Some(hover), ..self }
+    }
+}
+
+/// A navigator section: a card whose header is a row like the rows under it — collapse arrow, title, count,
+/// and a `+` when `add` names what it adds. The card reaches [`SECTION_PAD`] past the column on each side, so
+/// its rows line up with the column's own rows (the script list's), and it pads its top as much as the last
+/// row's margin pads its bottom. A closed or empty section is its header. Returns whether `+` was clicked.
+fn nav_section(ui: &mut egui::Ui, head: Head<'_>, rows: impl FnOnce(&mut egui::Ui)) -> bool {
+    let Head { title, count, open: default_open, add, hover } = head;
+    let id = ui.make_persistent_id(("mb-section", title));
+    let open = ui.data_mut(|d| *d.get_persisted_mut_or(id, default_open));
+    let mut clicked = false;
+    let mut toggle = false;
+    egui::Frame::NONE
+        .fill(theme::G2)
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin { left: SECTION_PAD, right: SECTION_PAD, top: SECTION_PAD, bottom: 0 })
+        .outer_margin(egui::Margin { left: -SECTION_PAD, right: -SECTION_PAD, top: 0, bottom: 10 })
+        .apply_stroke_and_expansion_without_layout_shift(Stroke::new(1.0, theme::LINE), 0.0)
+        .show(ui, |ui| {
+            // The header: a row's padding and height, so it reads as the first row of the section.
+            theme::row_chip(ui, Color32::TRANSPARENT, Color32::TRANSPARENT, |ui| {
+                ui.set_min_height(ui.text_style_height(&TextStyle::Body));
+                // The arrow is painted: the display face has no triangle glyphs.
+                let (r, arrow) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::click());
+                let c = r.center();
+                let points = if open {
+                    vec![c + Vec2::new(-4.0, -2.0), c + Vec2::new(4.0, -2.0), c + Vec2::new(0.0, 3.0)]
+                } else {
+                    vec![c + Vec2::new(-2.0, -4.0), c + Vec2::new(3.0, 0.0), c + Vec2::new(-2.0, 4.0)]
+                };
+                ui.painter().add(egui::Shape::convex_polygon(points, theme::DIM, Stroke::NONE));
+                let mut head = ui.add(egui::Label::new(theme::disp_text(title.to_uppercase(), theme::style_eyebrow(), theme::DIM)).sense(Sense::click()));
+                if let Some(h) = hover {
+                    head = head.on_hover_text(h);
+                }
+                toggle = head.clicked() || arrow.clicked();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(hover) = add {
+                        clicked = ui.small_button("+").on_hover_text(hover).clicked();
+                    }
+                    ui.label(egui::RichText::new(count.to_string()).monospace().color(theme::FAINT));
+                });
+            });
+            if open {
+                rows(ui);
             }
-            let on = p.open.as_ref().is_some_and(|o| o.entry.path == e.path);
-            let state = p.save.as_ref().map(|s| s.state_for(&e.name)).unwrap_or(MissionState::None);
-            let (colour, badge) = match state {
-                MissionState::Completed => (GOOD, " · done"),
-                MissionState::InProgress => (SELECT, " · in progress"),
-                MissionState::Offered => (WARN, " · offered"),
-                MissionState::None => (look(Category::Lifecycle).icon, ""),
-            };
-            let resp = nav_row(ui, colour, false, &e.name, &format!("{}{badge}", e.inherits), on).on_hover_text(&e.path);
-            if resp.clicked() {
-                acts.push(Act::Pick(i));
+        });
+    if toggle {
+        ui.data_mut(|d| d.insert_persisted(id, !open));
+    }
+    clicked
+}
+
+/// How many engine bindings the picker lists under what is typed.
+const ENGINE_SUGGESTIONS: usize = 8;
+
+/// Debug mode's breakpoints, in every script: each opens its script on its line, × removes it. Then the
+/// engine breakpoints, and the picker that adds one from the bindings the game named.
+fn breakpoints(ui: &mut egui::Ui, p: &Panel, d: &Debug, acts: &mut Vec<Act>) {
+    let count: usize = d.scripts.values().map(|w| w.breakpoints.len()).sum::<usize>() + d.engine.len();
+    section_head(ui, "Breakpoints", if count == 0 { "right-click a node or a function" } else { "every script" });
+    for binding in &d.engine {
+        let on = d.run.paused.as_ref().and_then(|p| p.call.as_ref()).is_some_and(|c| &c.binding == binding);
+        ui.horizontal(|ui| {
+            if ui.small_button("×").on_hover_text("Remove this engine breakpoint").clicked() {
+                acts.push(Act::ToggleEngine(binding.clone()));
             }
+            nav_row(ui, BAD, false, binding, "engine", on).on_hover_text("Pauses when any script calls it, before it runs");
+        });
+    }
+    ui.horizontal(|ui| {
+        let hint = match &d.bindings {
+            Some(Ok(_)) => "Break on an engine call…",
+            Some(Err(_)) => "The game named no engine bindings",
+            None => "Connect to break on engine calls",
+        };
+        let mut q = p.engine_query.clone();
+        let field = ui.add_enabled(matches!(d.bindings, Some(Ok(_))), egui::TextEdit::singleline(&mut q).hint_text(hint).desired_width(f32::INFINITY));
+        if field.changed() {
+            acts.push(Act::EngineQuery(q));
         }
     });
+    if let Some(Err(e)) = &d.bindings {
+        ui.label(egui::RichText::new(e).small().color(WARN));
+    }
+    let needle = p.engine_query.to_ascii_lowercase();
+    if let (Some(Ok(names)), false) = (&d.bindings, needle.is_empty()) {
+        let found: Vec<&String> = names.iter().filter(|n| n.to_ascii_lowercase().contains(&needle) && !d.engine.contains(*n)).collect();
+        for n in found.iter().take(ENGINE_SUGGESTIONS) {
+            if nav_row(ui, ANNOT, false, n, "add", false).clicked() {
+                acts.push(Act::ToggleEngine((*n).clone()));
+            }
+        }
+        let more = found.len().saturating_sub(ENGINE_SUGGESTIONS);
+        let note = match (found.len(), more) {
+            (0, _) => format!("no binding has {:?} in its name", p.engine_query),
+            (_, 0) => String::new(),
+            (_, m) => format!("{m} more: type more of the name"),
+        };
+        if !note.is_empty() {
+            ui.label(egui::RichText::new(note).small().color(theme::FAINT));
+        }
+    }
+    for w in d.scripts.values() {
+        for (&line, label) in &w.breakpoints {
+            let on = d.run.paused.as_ref().is_some_and(|p| {
+                p.line == Some(line) && w.mapped.as_ref().is_ok_and(|m| m.module.eq_ignore_ascii_case(&p.module))
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("×").on_hover_text("Remove this breakpoint").clicked() {
+                    acts.push(Act::RemoveBreakpoint(w.path.clone(), line));
+                }
+                let resp = nav_row(ui, BAD, true, &format!("{} · {label}", w.name), &format!(":{line}"), on);
+                if resp.on_hover_text(&w.path).clicked() {
+                    acts.push(Act::ShowLine(w.path.clone(), line));
+                }
+            });
+        }
+    }
+}
+
+fn scripts(ui: &mut egui::Ui, p: &Panel, d: &Debug, acts: &mut Vec<Act>) {
+    let needle = p.filter.to_ascii_lowercase();
+    for (i, e) in p.catalog.iter().enumerate() {
+        if e.mission != (p.shown == Shown::Missions) {
+            continue;
+        }
+        if !needle.is_empty() && !e.name.to_ascii_lowercase().contains(&needle) && !e.inherits.to_ascii_lowercase().contains(&needle) {
+            continue;
+        }
+        let on = p.open.as_ref().is_some_and(|o| o.entry.path == e.path);
+        let state = p.save.as_ref().map(|s| s.state_for(&e.name)).unwrap_or(MissionState::None);
+        let (colour, badge) = match state {
+            MissionState::Completed => (GOOD, " · done"),
+            MissionState::InProgress => (SELECT, " · in progress"),
+            MissionState::Offered => (WARN, " · offered"),
+            MissionState::None => (look(Category::Lifecycle).icon, ""),
+        };
+        let kind = if e.inherits.is_empty() { crate::missions_debug::bank_of(&e.path).unwrap_or("") } else { &e.inherits };
+        let marked = d.scripts.get(&e.path).is_some_and(|w| !w.breakpoints.is_empty());
+        let resp = nav_row_marked(ui, colour, false, &e.name, &format!("{kind}{badge}"), on, marked).on_hover_text(&e.path);
+        if resp.clicked() {
+            acts.push(Act::Pick(i));
+        }
+    }
 }
 
 /// Walk every canvas of a chunk with its path.
@@ -1267,22 +1747,201 @@ fn each_node(g: &Graph, path: &mut Vec<NodeId>, f: &mut impl FnMut(&[NodeId], No
     }
 }
 
-fn in_this_script(ui: &mut egui::Ui, o: &Open, acts: &mut Vec<Act>) {
-    section_head(ui, "In this script", &o.entry.name);
-    // Functions: the canvases.
-    for (i, n) in o.chunk.nodes.iter().enumerate() {
-        if !n.is_function() {
-            continue;
-        }
-        let lk = look(n.category);
-        let note = if n.category == Category::Lifecycle { "override" } else { "fn" };
-        let on = o.path.first() == Some(&i);
-        if nav_row(ui, lk.icon, false, &n.title, note, on).clicked() {
-            acts.push(Act::OpenCanvas(vec![i]));
+/// The section of the members a top-level function is listed under, by how it is reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FnSection {
+    /// Called by name from outside the script: by the engine, or by the base class's framework.
+    Events,
+    /// Handed to an engine binding to be called back.
+    Handlers,
+    /// Handed to Lua or to something unresolved, or stored, to be called back.
+    Callbacks,
+    /// Anything else.
+    Functions,
+}
+
+fn fn_section(n: &blueprint::Node) -> FnSection {
+    use blueprint::{Callee, Reach};
+    let r = n.reach();
+    if r.iter().any(|x| matches!(x, Reach::Engine { .. } | Reach::Override(_))) {
+        FnSection::Events
+    } else if r.iter().any(|x| matches!(x, Reach::Passed { to: Callee::Engine, .. })) {
+        FnSection::Handlers
+    } else if r.iter().any(|x| matches!(x, Reach::Passed { .. } | Reach::Stored { .. })) {
+        FnSection::Callbacks
+    } else {
+        FnSection::Functions
+    }
+}
+
+/// A function row's note: who reaches it, in a word or two.
+fn fn_note(n: &blueprint::Node) -> String {
+    use blueprint::{EngineModule, Reach};
+    let r = n.reach();
+    let first = |f: fn(&Reach) -> Option<String>| r.iter().find_map(f);
+    match fn_section(n) {
+        FnSection::Events => first(|x| match x {
+            Reach::Engine { module: EngineModule::This, .. } => Some("engine".into()),
+            Reach::Engine { module: EngineModule::Object, .. } => Some("object".into()),
+            Reach::Engine { module: EngineModule::Runtime, .. } => Some("runtime".into()),
+            _ => None,
+        })
+        .or_else(|| first(|x| matches!(x, Reach::Override(_)).then(|| "override".into())))
+        .unwrap_or_default(),
+        FnSection::Handlers | FnSection::Callbacks => first(|x| match x {
+            Reach::Passed { callee, .. } => Some(callee.clone()),
+            Reach::Stored { target, .. } => Some(format!("→ {target}")),
+            _ => None,
+        })
+        .unwrap_or_default(),
+        FnSection::Functions => match (r.iter().any(|x| matches!(x, Reach::Called(_))), r.iter().any(|x| matches!(x, Reach::Named(_)))) {
+            (_, true) => "module".into(),
+            (true, false) => "called".into(),
+            (false, false) => "none found".into(),
+        },
+    }
+}
+
+/// Every way a function is reached, a line each, for its row's hover.
+fn reach_text(n: &blueprint::Node) -> String {
+    use blueprint::{Callee, EngineModule, Reach};
+    let mut called: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    for r in n.reach() {
+        match r {
+            Reach::Engine { module, images } => lines.push(format!(
+                "{} — {}",
+                match module {
+                    EngineModule::This => "The engine calls it by name in this module",
+                    EngineModule::Object => "The engine calls it in a world object's script",
+                    EngineModule::Runtime => "The engine calls it by name in a module it picks at run time",
+                },
+                images.join(", ")
+            )),
+            Reach::Override(base) => lines.push(format!("Replaces {base}'s {}", n.title)),
+            Reach::Passed { callee, line, to } => lines.push(format!(
+                "Passed to {callee} on line {line}{}",
+                match to {
+                    Callee::Engine => ", an engine binding",
+                    Callee::Lua => "",
+                    Callee::Unresolved => ", which no corpus module or engine binding is",
+                }
+            )),
+            Reach::Stored { target, line } => lines.push(format!("Stored in {target} on line {line}")),
+            Reach::Called(line) => called.push(line.to_string()),
+            Reach::Named(paths) => lines.push(format!("Named by {}: {}", paths.len(), paths.join(", "))),
         }
     }
-    if nav_row(ui, look(Category::Chunk).icon, false, "main chunk", "top level", o.path.is_empty()).clicked() {
+    if !called.is_empty() {
+        lines.push(format!("Called on line {}", called.join(", ")));
+    }
+    if lines.is_empty() {
+        lines.push("No caller found in the corpus's Lua or the executables' read by-name calls (not every engine path is read: Init's and Deinit's are not)".into());
+    }
+    lines.join("\n")
+}
+
+/// The open script's members, as the canvas leaves them out of the main chunk: its functions by how they
+/// are reached, its variables, data and imports, then the objectives it creates and the globals it sets.
+/// One filter narrows every section.
+fn members(ui: &mut egui::Ui, o: &Open, filter: &str, d: &Debug, acts: &mut Vec<Act>) {
+    let mut f = filter.to_string();
+    if ui.add(egui::TextEdit::singleline(&mut f).hint_text("Filter members…").desired_width(f32::INFINITY)).changed() {
+        acts.push(Act::MemberFilter(f));
+    }
+    ui.add_space(PANE_GAP);
+    let needle = filter.to_ascii_lowercase();
+    let shows = |name: &str| needle.is_empty() || name.to_ascii_lowercase().contains(&needle);
+    let chunk = &o.chunk;
+    let hidden = chunk.hidden();
+    let drawn = chunk.nodes.iter().zip(&hidden).filter(|(n, h)| n.exec_in && !**h).count();
+    if nav_row(ui, look(Category::Chunk).icon, false, "Main chunk", &format!("{drawn} statements"), o.path.is_empty()).clicked() {
         acts.push(Act::OpenCanvas(Vec::new()));
+    }
+    ui.add_space(6.0);
+    let fns: Vec<(NodeId, &blueprint::Node)> = chunk.nodes.iter().enumerate().filter(|(_, n)| n.is_function()).collect();
+    for (sect, title) in [
+        (FnSection::Events, "Events"),
+        (FnSection::Handlers, "Handlers"),
+        (FnSection::Callbacks, "Callbacks"),
+        (FnSection::Functions, "Functions"),
+    ] {
+        let rows: Vec<&(NodeId, &blueprint::Node)> = fns.iter().filter(|(_, n)| fn_section(n) == sect && shows(&n.title)).collect();
+        let addable = sect == FnSection::Functions;
+        if rows.is_empty() && !addable {
+            continue;
+        }
+        let plus = nav_section(ui, Head::new(title, rows.len()).add(addable.then_some("Add a function")), |ui| {
+            for &&(i, n) in &rows {
+                let on = o.path.first() == Some(&i);
+                let resp = nav_row(ui, look(n.category).icon, false, &n.title, &fn_note(n), on).on_hover_text(reach_text(n));
+                if resp.clicked() {
+                    acts.push(Act::OpenCanvas(vec![i]));
+                }
+                theme::context_menu(&resp, |ui| {
+                    if ui.button("Open").clicked() {
+                        acts.push(Act::OpenCanvas(vec![i]));
+                        ui.close();
+                    }
+                    if d.on {
+                        if ui.button("Break on entry").clicked() {
+                            acts.push(Act::BreakOnEntry(i));
+                            ui.close();
+                        }
+                    } else if ui.button("Delete").clicked() {
+                        acts.push(Act::DeleteMember(i));
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if plus {
+            acts.push(Act::AddMember(blueprint::Member::Function));
+        }
+    }
+    for (kind, title, add) in [
+        (blueprint::Member::Variable, "Variables", Some("Add a variable")),
+        (blueprint::Member::Data, "Data", Some("Add a table")),
+        (blueprint::Member::Import, "Imports", None),
+    ] {
+        let mut rows = member_rows(chunk, kind);
+        rows.retain(|r| shows(&r.name));
+        if rows.is_empty() && add.is_none() {
+            continue;
+        }
+        let plus = nav_section(ui, Head::new(title, rows.len()).open_if(kind != blueprint::Member::Import).add(add), |ui| {
+            for row in &rows {
+                // In Debug mode a member's line keeps what its node had on the canvas: its run count, its
+                // breakpoint, the pause on it.
+                let run = d.on.then(|| d.line_run(&o.entry.path, row.line));
+                let note = match &run {
+                    Some(r) if r.hits > 0 => format!("{} ×{}", row.note, r.hits),
+                    _ => row.note.clone(),
+                };
+                let on = run.as_ref().is_some_and(|r| r.paused) || (o.path.is_empty() && o.selection.contains(&row.node));
+                let colour = pin_colour(if kind == blueprint::Member::Data { PinTy::Arr } else { PinTy::Obj });
+                let marked = run.as_ref().is_some_and(|r| r.breakpoint);
+                let resp = nav_row_marked(ui, colour, true, &row.name, &note, on, marked).on_hover_text(format!("line {}", row.line));
+                if resp.clicked() {
+                    acts.push(Act::Reveal(Vec::new(), row.node));
+                }
+                theme::context_menu(&resp, |ui| {
+                    if d.on {
+                        let label = if marked { "Remove breakpoint" } else { "Add breakpoint" };
+                        if ui.button(format!("{label} (line {})", row.line)).clicked() {
+                            acts.push(Act::ToggleChunkBreakpoint(row.line));
+                            ui.close();
+                        }
+                    } else if ui.button("Delete").clicked() {
+                        acts.push(Act::DeleteMember(row.node));
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if plus {
+            acts.push(Act::AddMember(kind));
+        }
     }
     // Objectives and the globals the script sets.
     let mut objectives = Vec::new();
@@ -1307,16 +1966,63 @@ fn in_this_script(ui: &mut egui::Ui, o: &Open, acts: &mut Vec<Act>) {
             }
         }
     });
-    for (name, module, path, id) in objectives {
-        if nav_row(ui, look(Category::Objective).icon, false, &name, &module, false).clicked() {
-            acts.push(Act::Reveal(path, id));
+    objectives.retain(|(name, ..)| shows(name));
+    globals.retain(|name, _| shows(name));
+    if !objectives.is_empty() {
+        nav_section(ui, Head::new("Objectives", objectives.len()), |ui| {
+            for (name, module, path, id) in objectives {
+                if nav_row(ui, look(Category::Objective).icon, false, &name, &module, false).clicked() {
+                    acts.push(Act::Reveal(path, id));
+                }
+            }
+        });
+    }
+    if !globals.is_empty() {
+        nav_section(ui, Head::new("Globals set", globals.len()).closed(), |ui| {
+            for (name, (path, id)) in globals {
+                if nav_row(ui, pin_colour(PinTy::Obj), true, &name, "global", false).clicked() {
+                    acts.push(Act::Reveal(path, id));
+                }
+            }
+        });
+    }
+}
+
+/// One row of a members section: the node it opens, the name and note it shows, and its source line.
+#[derive(Clone, Debug, PartialEq)]
+struct MemberRow {
+    node: NodeId,
+    name: String,
+    note: String,
+    line: u32,
+}
+
+/// The rows of the members of `kind` of a main chunk: a variable with its value (`nil` for a `local`
+/// given none), a table, and one row per import call with the module its first argument names.
+fn member_rows(chunk: &Graph, kind: blueprint::Member) -> Vec<MemberRow> {
+    let mut rows = Vec::new();
+    for (i, n) in chunk.nodes.iter().enumerate().filter(|(_, n)| n.member() == Some(kind)) {
+        match kind {
+            blueprint::Member::Import => {
+                let call = n.callee().unwrap_or_default();
+                let mut calls = chunk.run_calls(i);
+                if calls.is_empty() {
+                    calls.push((0..n.inputs.len(), n.line));
+                }
+                for (pins, line) in calls {
+                    let module = n.inputs[pins].first().and_then(|i| annot(&i.value)).unwrap_or_default();
+                    rows.push(MemberRow { node: i, name: module.trim_matches(['"', '\'']).to_string(), note: call.clone(), line });
+                }
+            }
+            blueprint::Member::Data => rows.push(MemberRow { node: i, name: member_name(n), note: "table".into(), line: n.line }),
+            blueprint::Member::Function => rows.push(MemberRow { node: i, name: n.title.clone(), note: "function".into(), line: n.line }),
+            blueprint::Member::Variable => {
+                let value = n.inputs.iter().enumerate().find(|(k, _)| !n.is_target(*k)).map(|(_, v)| annot(&v.value).unwrap_or_default());
+                rows.push(MemberRow { node: i, name: member_name(n), note: value.unwrap_or_else(|| "nil".into()), line: n.line });
+            }
         }
     }
-    for (name, (path, id)) in globals {
-        if nav_row(ui, pin_colour(PinTy::Obj), true, &name, "global", false).clicked() {
-            acts.push(Act::Reveal(path, id));
-        }
-    }
+    rows
 }
 
 fn palette(ui: &mut egui::Ui, r: &Reference, open: Option<&Open>, acts: &mut Vec<Act>) {
@@ -1325,11 +2031,9 @@ fn palette(ui: &mut egui::Ui, r: &Reference, open: Option<&Open>, acts: &mut Vec
         ui.label(egui::RichText::new("Open a script to add to it.").small().color(theme::FAINT));
     }
     let mut group = |ui: &mut egui::Ui, title: &str, note: String, entries: &[PaletteEntry]| {
-        egui::CollapsingHeader::new(egui::RichText::new(title).text_style(theme::style_eyebrow()).color(theme::DIM))
-            .id_salt(("mb-palette", title))
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(note).small().color(theme::FAINT));
+        // Its own id scope: a palette group keeps its open state apart from a member section of its name.
+        ui.push_id("mb-palette", |ui| {
+            nav_section(ui, Head::new(title, entries.len()).closed().hover(&note), |ui| {
                 for e in entries {
                     let lk = look(e.category);
                     let uses = if e.uses > 0 { e.uses.to_string() } else { String::new() };
@@ -1341,7 +2045,8 @@ fn palette(ui: &mut egui::Ui, r: &Reference, open: Option<&Open>, acts: &mut Vec
                         acts.push(Act::Add(e.clone()));
                     }
                 }
-            });
+            })
+        });
     };
     group(ui, "Lua", "Lua's own statements".into(), &r.palette.flow);
     group(
@@ -1382,19 +2087,35 @@ fn save_section(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
 
 // ───────────────────────────────────────────────────────────────────── canvas
 
-pub fn center(root: &mut egui::Ui, p: &Panel) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel, d: &Debug) -> Vec<Act> {
     let mut acts = Vec::new();
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(CANVAS_BG)).show(root, |ui| {
         let Some(o) = &p.open else {
             let r = ui.available_rect_before_wrap();
-            let msg = if p.reference.is_some() { "Pick a mission script on the left." } else { "Loading the Lua corpus…" };
+            let msg = if p.reference.is_some() { "Pick a script on the left." } else { "Loading the Lua corpus…" };
             ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, msg, theme::font(&TextStyle::Body), theme::DIM);
             return;
         };
-        header(ui, o, &mut acts);
+        header(ui, d, o, &mut acts);
+        if d.on {
+            debug_bar(ui, d, o, &mut acts);
+        }
         let rect = ui.available_rect_before_wrap();
         match o.canvas() {
-            Some(g) => canvas(ui, rect, p, o, g, &mut acts),
+            Some(g) => {
+                // The main chunk is drawn without its members, which the navigator lists.
+                let hidden = if o.path.is_empty() { g.hidden() } else { vec![false; g.nodes.len()] };
+                let shown_chunk;
+                let shown = if hidden.contains(&true) {
+                    shown_chunk = g.shown(&hidden);
+                    &shown_chunk
+                } else {
+                    g
+                };
+                let mut drawn = Vec::new();
+                canvas(ui, rect, p, d, o, Drawn { g: shown, hidden: &hidden }, &mut drawn);
+                acts.extend(drawn.into_iter().map(|a| through_hidden(a, g, &hidden)));
+            }
             None => {
                 ui.painter().text(
                     rect.center(),
@@ -1409,74 +2130,223 @@ pub fn center(root: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     acts
 }
 
+/// An act made on the drawn canvas, for the graph it was drawn from: an exec wire the canvas runs
+/// through hidden nodes is edited at the last of them ([`Graph::through`]), so they stay on the chain.
+fn through_hidden(a: Act, g: &Graph, hidden: &[bool]) -> Act {
+    match a {
+        Act::ConnectExec { from, to } => Act::ConnectExec { from: g.through(from, hidden), to },
+        Act::BreakExec(from) => Act::BreakExec(g.through(from, hidden)),
+        Act::BeginAdd { at, screen, from: Some(PinRef::ExecOut(n, k)) } => {
+            let (n, k) = g.through((n, k), hidden);
+            Act::BeginAdd { at, screen, from: Some(PinRef::ExecOut(n, k)) }
+        }
+        other => other,
+    }
+}
+
 /// The id under which the canvas asks itself to fit to view on its next frame.
 fn fit_request() -> egui::Id {
     egui::Id::unique("mb-fit")
 }
 
-fn header(ui: &mut egui::Ui, o: &Open, acts: &mut Vec<Act>) {
+fn header(ui: &mut egui::Ui, debug: &Debug, o: &Open, acts: &mut Vec<Act>) {
     egui::Frame::NONE
         .fill(Color32::from_rgb(0x14, 0x19, 0x21))
         .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let file = o.entry.path.rsplit('/').next().unwrap_or(&o.entry.path);
-                if ui.link(egui::RichText::new(file).monospace().color(LABEL)).clicked() {
-                    acts.push(Act::OpenCanvas(Vec::new()));
-                }
-                let mut g = &o.chunk;
-                for (k, &id) in o.path.iter().enumerate() {
-                    let Some(n) = g.nodes.get(id) else { break };
-                    ui.label(egui::RichText::new("›").color(ANNOT));
-                    if ui.link(egui::RichText::new(format!("{}()", n.title)).color(LABEL_STRONG)).clicked() {
-                        acts.push(Act::OpenCanvas(o.path[..=k].to_vec()));
+            let editing = !debug.on;
+            // The actions are laid out first, from the right; the mode and the breadcrumb take the width
+            // left over and truncate in it, so a long breadcrumb never runs under the actions.
+            let mut left = Vec::new();
+            egui::containers::Sides::new().shrink_left().truncate().show(
+                ui,
+                |ui| {
+                    if ui.selectable_label(!debug.on, "Edit").clicked() && debug.on {
+                        left.push(Act::DebugMode(false));
                     }
-                    match n.sub.as_deref() {
-                        Some(s) => g = s,
-                        None => break,
+                    if ui.selectable_label(debug.on, "Debug").on_hover_text("Lay a live run over this graph").clicked() && !debug.on {
+                        left.push(Act::DebugMode(true));
                     }
-                }
-                ui.add_space(12.0);
-                theme::menu_button(ui, "View", |ui| {
-                    if ui.button("Fit to view   F").clicked() {
-                        ui.memory_mut(|m| m.data.insert_temp(fit_request(), true));
-                        ui.close();
+                    ui.add_space(8.0);
+                    let mut crumbs = Vec::new();
+                    let mut g = &o.chunk;
+                    for &id in &o.path {
+                        let Some(n) = g.nodes.get(id) else { break };
+                        crumbs.push(egui::RichText::new(format!("{}()", n.title)).color(LABEL_STRONG));
+                        match n.sub.as_deref() {
+                            Some(s) => g = s,
+                            None => break,
+                        }
                     }
-                    if ui.button("Actual size").clicked() {
-                        acts.push(Act::SetView { pan: o.view().pan, zoom: 1.0 });
-                        ui.close();
-                    }
-                });
-                if ui.button("Script").on_hover_text("Open this function in the Lua viewer").clicked() {
-                    acts.push(Act::JumpToSource(None));
-                }
-                let add = ui.button("Add Node  Tab");
-                if add.clicked() {
-                    acts.push(Act::BeginAdd {
-                        at: free_spot(&o.view()),
-                        screen: add.rect.left_bottom(),
-                        from: None,
+                    // the functions keep their width; the file name shrinks first
+                    let sep = egui::RichText::new("›").color(ANNOT);
+                    let width = |t: &egui::RichText| {
+                        egui::WidgetText::from(t.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x
+                    };
+                    let gap = ui.spacing().item_spacing.x;
+                    let crumbs_w: f32 = crumbs.iter().map(|c| width(&sep) + width(c) + 2.0 * gap).sum();
+                    let file = o.entry.path.rsplit('/').next().unwrap_or(&o.entry.path);
+                    let file_w = (ui.available_width() - crumbs_w).max(0.0);
+                    ui.allocate_ui_with_layout(egui::vec2(file_w, ui.available_height()), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if ui.link(egui::RichText::new(file).monospace().color(LABEL)).clicked() {
+                            left.push(Act::OpenCanvas(Vec::new()));
+                        }
                     });
-                }
-                if ui.add_enabled(!o.undo.is_empty(), egui::Button::new("Undo")).clicked() {
-                    acts.push(Act::Undo);
-                }
-                if ui.add_enabled(!o.redo.is_empty(), egui::Button::new("Redo")).clicked() {
-                    acts.push(Act::Redo);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::primary_button(ui, "Compile", true).clicked() {
+                    for (k, c) in crumbs.into_iter().enumerate() {
+                        ui.label(sep.clone());
+                        if ui.link(c).clicked() {
+                            left.push(Act::OpenCanvas(o.path[..=k].to_vec()));
+                        }
+                    }
+                },
+                |ui| {
+                    if theme::primary_button(ui, "Compile", editing).clicked() {
                         acts.push(Act::Compile);
                     }
                     if ui
-                        .add_enabled(o.edited, egui::Button::new("Revert"))
+                        .add_enabled(editing && o.edited, egui::Button::new("Revert"))
                         .on_hover_text("Back to the script as shipped (undoable)")
                         .clicked()
                     {
                         acts.push(Act::Revert);
                     }
-                });
+                    ui.add_space(12.0);
+                    if ui.add_enabled(editing && !o.redo.is_empty(), egui::Button::new("Redo")).clicked() {
+                        acts.push(Act::Redo);
+                    }
+                    if ui.add_enabled(editing && !o.undo.is_empty(), egui::Button::new("Undo")).clicked() {
+                        acts.push(Act::Undo);
+                    }
+                    let add = ui.add_enabled(editing, egui::Button::new("Add Node  Tab"));
+                    if add.clicked() {
+                        acts.push(Act::BeginAdd {
+                            at: free_spot(&o.view()),
+                            screen: add.rect.left_bottom(),
+                            from: None,
+                        });
+                    }
+                    if ui.button("Script").on_hover_text("Open this function in the Lua viewer").clicked() {
+                        acts.push(Act::JumpToSource(None));
+                    }
+                    theme::menu_button(ui, "View", |ui| {
+                        if ui.button("Fit to view   F").clicked() {
+                            ui.memory_mut(|m| m.data.insert_temp(fit_request(), true));
+                            ui.close();
+                        }
+                        if ui.button("Actual size").clicked() {
+                            acts.push(Act::SetView { pan: o.view().pan, zoom: 1.0 });
+                            ui.close();
+                        }
+                    });
+                },
+            );
+            acts.extend(left);
+        });
+}
+
+/// Debug mode's run bar: the live host, attach and detach, the transport, and why there is no overlay
+/// when there is none.
+fn debug_bar(ui: &mut egui::Ui, d: &Debug, o: &Open, acts: &mut Vec<Act>) {
+    egui::Frame::NONE
+        .fill(Color32::from_rgb(0x11, 0x16, 0x1d))
+        .inner_margin(egui::Margin::symmetric(12, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let host = d.host.as_ref().map(|(k, b)| format!("{k:?} · {b}")).unwrap_or_default();
+                match &d.state {
+                    LinkState::Off => {
+                        ui.label(egui::RichText::new(format!("Live game on {}", mercs2_bridge::DEFAULT_ADDR)).color(LABEL));
+                        if ui.button("Connect").clicked() {
+                            acts.push(Act::DebugConnect(ui.ctx().clone()));
+                        }
+                    }
+                    LinkState::Connecting => {
+                        ui.label(egui::RichText::new("Connecting… (the game answers on its next Lua tick)").color(LABEL));
+                    }
+                    LinkState::Failed(e) => {
+                        ui.label(egui::RichText::new(e).color(BAD));
+                        if ui.button("Connect").clicked() {
+                            acts.push(Act::DebugConnect(ui.ctx().clone()));
+                        }
+                    }
+                    LinkState::Ready => {
+                        ui.label(egui::RichText::new(&host).color(LABEL_STRONG));
+                        let attach = ui
+                            .add_enabled(!o.edited, egui::Button::new(format!("Attach to {}", o.entry.name)))
+                            .on_hover_text("The run watches this script and every script with a breakpoint");
+                        if attach.on_disabled_hover_text("The graph is edited: Revert it to attach").clicked() {
+                            acts.push(Act::DebugAttach);
+                        }
+                        if ui.button("Disconnect").clicked() {
+                            acts.push(Act::DebugDisconnect);
+                        }
+                    }
+                    LinkState::Attaching => {
+                        ui.label(egui::RichText::new(format!("{host} · attaching…")).color(LABEL));
+                    }
+                    LinkState::Attached | LinkState::Paused => {
+                        let paused = d.state == LinkState::Paused;
+                        let place = |at: &crate::missions_debug::PausedAt| match (d.script_of(&at.module), at.line) {
+                            (Some(w), Some(line)) => format!("{}:{line}", w.name),
+                            _ => format!("{}, which the run does not watch", at.module),
+                        };
+                        let what = match (paused, &d.run.paused) {
+                            (true, Some(at)) => match &at.call {
+                                Some(call) => format!("Paused before {}, called from {}", call.binding, place(at)),
+                                None => format!("Paused at {}", place(at)),
+                            },
+                            (true, None) => "Paused".to_string(),
+                            (false, _) => "Running".to_string(),
+                        };
+                        ui.label(egui::RichText::new(what).color(if paused { WARN } else { GOOD }));
+                        let watching: Vec<&str> = d.attached.iter().filter_map(|p| d.scripts.get(p)).map(|w| w.name.as_str()).collect();
+                        ui.label(egui::RichText::new(format!("{host} · watching {} · {} events", watching.join(", "), d.run.events)).color(ANNOT));
+                        for (label, step) in
+                            [("Continue", None), ("Step over", Some(Step::Over)), ("Step into", Some(Step::Into)), ("Step out", Some(Step::Out))]
+                        {
+                            let enabled = if step.is_none() { paused } else { d.can_step() };
+                            let b = ui.add_enabled(enabled, egui::Button::new(label));
+                            let b = if paused && !enabled {
+                                b.on_disabled_hover_text("Paused in a script the run does not watch: no line to step to. Continue, or add a breakpoint in it")
+                            } else {
+                                b
+                            };
+                            if b.clicked() {
+                                acts.push(Act::DebugResume(step));
+                            }
+                        }
+                        if ui.button("Detach").clicked() {
+                            acts.push(Act::DebugDetach);
+                        }
+                        if !d.attached.contains(&o.entry.path) {
+                            ui.label(egui::RichText::new(format!("{} is not in this run", o.entry.name)).color(WARN));
+                            let add = ui.add_enabled(!o.edited, egui::Button::new("Add to the run")).on_hover_text("The run watches this script too");
+                            if add.on_disabled_hover_text("The graph is edited: Revert it to add it").clicked() {
+                                acts.push(Act::DebugAddOpen);
+                            }
+                        }
+                    }
+                }
             });
+            if let Some(call) = d.run.paused.as_ref().and_then(|p| p.call.as_ref()) {
+                let args: Vec<String> = call.args.iter().map(ToString::to_string).collect();
+                ui.label(egui::RichText::new(format!("{}({})", call.binding, args.join(", "))).monospace().color(LABEL_STRONG));
+            }
+            match d.scripts.get(&o.entry.path).map(|w| &w.mapped) {
+                Some(Err(e)) => {
+                    ui.label(egui::RichText::new(format!("No overlay for {}: {e}", o.entry.name)).color(WARN));
+                }
+                None if o.edited => {
+                    ui.label(egui::RichText::new(format!("No overlay for {}: the graph is edited", o.entry.name)).color(WARN));
+                }
+                _ => {}
+            }
+            if let Some(e) = &d.run.unmapped {
+                ui.label(egui::RichText::new(format!("Not shown: {e}")).color(WARN));
+            }
+            if let Some(e) = &d.problem {
+                ui.label(egui::RichText::new(e).color(BAD));
+            }
         });
 }
 
@@ -1492,7 +2362,14 @@ struct Marquee {
     start: Pos2,
 }
 
-fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &mut Vec<Act>) {
+/// A canvas as drawn: its graph, and which of its nodes are left out (a main chunk's members).
+struct Drawn<'g> {
+    g: &'g Graph,
+    hidden: &'g [bool],
+}
+
+fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, d: &Debug, o: &Open, drawn: Drawn<'_>, acts: &mut Vec<Act>) {
+    let Drawn { g, hidden } = drawn;
     let view = o.view();
     let sizes: Vec<Vec2> = g.nodes.iter().map(|n| measure(ui, n)).collect();
     // Positions: lay the canvas out the first time it is shown; place anything new by the layout.
@@ -1502,12 +2379,13 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
         if pos.is_empty() {
             fit_now = true;
         }
-        let missing: HashMap<NodeId, Pos2> = layout(g, &sizes, rect.size()).into_iter().filter(|(k, _)| !pos.contains_key(k)).collect();
+        let missing: HashMap<NodeId, Pos2> = layout(g, &sizes).into_iter().filter(|(k, _)| !pos.contains_key(k)).collect();
         pos.extend(missing.clone());
         acts.push(Act::Place(missing));
     }
     if fit_now {
         let bounds = (0..g.nodes.len())
+            .filter(|&id| !hidden[id])
             .map(|id| Rect::from_min_size(pos[&id], sizes[id]))
             .reduce(|a, b| a.union(b))
             .unwrap_or(Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)));
@@ -1578,7 +2456,7 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
     let mut pin_hits: Vec<(PinRef, Rect)> = Vec::new();
     for (id, n) in g.nodes.iter().enumerate() {
         let r = node_rect(id);
-        if !visible(r) {
+        if hidden[id] || !visible(r) {
             continue;
         }
         let resp = ui.interact(r, egui::Id::unique(("mb-node", &o.path, id)), Sense::click_and_drag());
@@ -1610,6 +2488,41 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
             if ui.add_enabled(n.line > 0 && !n.is_new(), egui::Button::new("Jump to source")).clicked() {
                 acts.push(Act::JumpToSource(Some(id)));
                 ui.close();
+            }
+            if !n.is_new() {
+                // A run has a line per call, each its own breakpoint.
+                for line in n.lines().into_iter().filter(|&l| l > 0) {
+                    let label = if d.line_run(&o.entry.path, line).breakpoint { "Remove breakpoint" } else { "Add breakpoint" };
+                    if ui.button(format!("{label} (line {line})")).clicked() {
+                        acts.push(Act::ToggleBreakpoint(line));
+                        ui.close();
+                    }
+                }
+            }
+            if n.exec_in && n.callee().is_some() && !d.on {
+                if n.run_len() > 1 {
+                    if ui.button("Unfold calls").clicked() {
+                        acts.push(Act::Unfold(id));
+                        ui.close();
+                    }
+                    if ui.button("Add a call").clicked() {
+                        acts.push(Act::AddCall(id));
+                        ui.close();
+                    }
+                    ui.menu_button("Remove a call", |ui| {
+                        for (k, (pins, line)) in g.run_calls(id).into_iter().enumerate() {
+                            let what = pins.clone().map(|i| annot(&n.inputs[i].value).unwrap_or_default()).collect::<Vec<_>>().join(", ");
+                            let at = if line > 0 { format!(" (line {line})") } else { String::new() };
+                            if ui.button(format!("#{} {what}{at}", k + 1)).clicked() {
+                                acts.push(Act::RemoveCall(id, k));
+                                ui.close();
+                            }
+                        }
+                    });
+                } else if ui.button("Repeat this call").on_hover_text("Make it a run: a copy of it follows, to edit").clicked() {
+                    acts.push(Act::AddCall(id));
+                    ui.close();
+                }
             }
             if id != ENTRY {
                 if ui.button("Clone").clicked() {
@@ -1675,17 +2588,27 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
     };
     for (id, n) in g.nodes.iter().enumerate() {
         let r = node_rect(id);
-        if !visible(r) {
+        if hidden[id] || !visible(r) {
             continue;
         }
-        let state = if o.selection.contains(&id) {
+        // A run's calls each have a line: it ran as often as they all did, and pauses or breaks on any.
+        let run = (d.on && n.line > 0).then(|| {
+            n.lines().into_iter().filter(|&l| l > 0).map(|l| d.line_run(&o.entry.path, l)).fold(LineRun::default(), |a, b| LineRun {
+                hits: a.hits + b.hits,
+                paused: a.paused || b.paused,
+                breakpoint: a.breakpoint || b.breakpoint,
+            })
+        });
+        let state = if run.as_ref().is_some_and(|r| r.paused) {
+            Some(WARN)
+        } else if o.selection.contains(&id) {
             Some(SELECT)
         } else if problem_nodes.contains(&id) {
             Some(BAD)
         } else {
             None
         };
-        paint_node(&painter, g, id, n, r, zoom, state);
+        paint_node(&painter, g, id, n, r, zoom, Mark { state, run });
     }
 
     // The wire being dragged, and what releasing it does: wire into the pin under the pointer,
@@ -1720,12 +2643,12 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
         painter.rect(r, 2.0, SELECT.gamma_multiply(0.12), Stroke::new(1.0, SELECT), egui::StrokeKind::Middle);
         if ui.input(|i| i.pointer.any_released()) {
             ui.memory_mut(|mm| mm.data.remove::<Marquee>(marquee_id));
-            let ids: Vec<NodeId> = (0..g.nodes.len()).filter(|&id| node_rect(id).intersects(r)).collect();
+            let ids: Vec<NodeId> = (0..g.nodes.len()).filter(|&id| !hidden[id] && node_rect(id).intersects(r)).collect();
             acts.push(Act::Select(ids, false));
         }
     }
 
-    keys(ui, rect, o, pointer, &to_canvas, acts);
+    keys(ui, rect, o, pointer, &to_canvas, hidden, acts);
     paint_legend(&painter, rect);
     acts.extend(zoom_pill(ui, rect, zoom));
     if let Some(a) = &o.adding {
@@ -1779,7 +2702,7 @@ fn break_pin(g: &Graph, pin: PinRef) -> Vec<Act> {
 }
 
 /// The canvas's keys, while the pointer is over it and no field has the keyboard.
-fn keys(ui: &egui::Ui, rect: Rect, o: &Open, pointer: Option<Pos2>, to_canvas: &dyn Fn(Pos2) -> Pos2, acts: &mut Vec<Act>) {
+fn keys(ui: &egui::Ui, rect: Rect, o: &Open, pointer: Option<Pos2>, to_canvas: &dyn Fn(Pos2) -> Pos2, hidden: &[bool], acts: &mut Vec<Act>) {
     let Some(at) = pointer.filter(|p| rect.contains(*p)) else { return };
     if ui.ctx().egui_wants_keyboard_input() || o.adding.is_some() {
         return;
@@ -1819,7 +2742,8 @@ fn keys(ui: &egui::Ui, rect: Rect, o: &Open, pointer: Option<Pos2>, to_canvas: &
         acts.push(Act::Clone(o.selection.clone()));
     }
     if all {
-        acts.push(Act::SelectAll);
+        // Every drawn node but the entry: a hidden member is selected from the navigator, not swept up.
+        acts.push(Act::Select((1..hidden.len()).filter(|&i| !hidden[i]).collect(), false));
     }
     if redo {
         acts.push(Act::Redo);
@@ -1871,12 +2795,58 @@ fn wire(p: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, zoom: f32) {
     p.add(egui::epaint::CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, stroke));
 }
 
-fn paint_node(p: &egui::Painter, g: &Graph, id: NodeId, n: &blueprint::Node, r: Rect, zoom: f32, state: Option<Color32>) {
+/// How a node is marked: an outline colour (selected, a problem, paused), and Debug mode's run on its line
+/// (how often it ran, whether the run is paused on it, its breakpoint).
+struct Mark {
+    state: Option<Color32>,
+    run: Option<LineRun>,
+}
+
+fn paint_node(p: &egui::Painter, g: &Graph, id: NodeId, n: &blueprint::Node, r: Rect, zoom: f32, mark: Mark) {
+    let Mark { state, run } = mark;
+    if let Some(run) = &run {
+        if run.hits > 0 && state.is_none() {
+            p.rect_stroke(r.expand(2.0 * zoom), ROUND * zoom + 2.0, Stroke::new(1.5, GOOD), egui::StrokeKind::Middle);
+        }
+        if run.hits > 0 {
+            let at = r.right_top() + Vec2::new(0.0, -4.0 * zoom);
+            p.text(at, egui::Align2::RIGHT_BOTTOM, format!("×{}", run.hits), scaled(&TextStyle::Small, zoom), GOOD);
+        }
+        if run.breakpoint {
+            p.circle_filled(Pos2::new(r.min.x - 9.0 * zoom, r.min.y + HEADER_H * 0.5 * zoom), 5.0 * zoom.max(0.5), BAD);
+        }
+    }
     let round = ROUND * zoom;
     let lk = look(n.category);
     p.rect_filled(r.translate(Vec2::new(0.0, 8.0 * zoom)), round, Color32::from_black_alpha(90));
     let rounding = egui::CornerRadius::from(round);
+    // A run of calls is a stack of cards: the edges of the cards under it show behind its left side.
+    let calls = g.run_calls(id);
+    if calls.len() > 1 {
+        for k in (1..=2).rev() {
+            let under = r.translate(Vec2::new(-5.0, 5.0) * k as f32 * zoom);
+            p.rect_filled(under, round, NODE_BOTTOM);
+            p.rect_stroke(under, round, Stroke::new(1.0, NODE_BORDER), egui::StrokeKind::Middle);
+        }
+    }
     gradient(p, r, NODE_TOP, NODE_BOTTOM, rounding);
+    // Each call is a card around its own rows, numbered at its right.
+    let one_each = !calls.is_empty() && calls.iter().all(|(pins, _)| pins.len() == 1);
+    for (k, (pins, _)) in calls.iter().enumerate().filter(|(_, (pins, _))| !pins.is_empty()) {
+        let first = n.exec_in as usize + pins.start;
+        let top = r.min.y + (row_y(first) - ROW_H * 0.5 + 2.0) * zoom;
+        let bottom = r.min.y + (row_y(first + pins.len() - 1) + ROW_H * 0.5 - 2.0) * zoom;
+        let card = Rect::from_min_max(Pos2::new(r.min.x + 4.0 * zoom, top), Pos2::new(r.max.x - 4.0 * zoom, bottom));
+        p.rect_filled(card, 5.0 * zoom, Color32::from_white_alpha(if k % 2 == 0 { 10 } else { 5 }));
+        p.rect_stroke(card, 5.0 * zoom, Stroke::new(1.0, Color32::from_white_alpha(26)), egui::StrokeKind::Inside);
+        p.text(
+            Pos2::new(card.max.x - 6.0 * zoom, card.center().y),
+            egui::Align2::RIGHT_CENTER,
+            format!("{}", k + 1),
+            scaled(&TextStyle::Small, zoom),
+            ANNOT,
+        );
+    }
     let header = Rect::from_min_size(r.min, Vec2::new(r.width(), HEADER_H * zoom));
     gradient(p, header, lk.top, lk.bottom, egui::CornerRadius { sw: 0, se: 0, ..rounding });
     match state {
@@ -1926,6 +2896,11 @@ fn paint_node(p: &egui::Painter, g: &Graph, id: NodeId, n: &blueprint::Node, r: 
         let colour = if strong { LABEL_STRONG } else { LABEL };
         let offset = (PIN_R + 8.0) * zoom;
         match pin {
+            // A run whose calls take one argument each: the card shows the value alone.
+            PinRef::In(_, i) if one_each => {
+                let a = annot(&n.inputs[i].value).unwrap_or(label);
+                body.text(c + Vec2::new(offset, 0.0), egui::Align2::LEFT_CENTER, a, mono.clone(), LABEL_STRONG);
+            }
             PinRef::ExecIn(_) | PinRef::In(..) => {
                 let lr = body.text(c + Vec2::new(offset, 0.0), egui::Align2::LEFT_CENTER, &label, f.clone(), colour);
                 if let PinRef::In(_, i) = pin {
@@ -2144,7 +3119,7 @@ fn heading(ui: &mut egui::Ui, n: &blueprint::Node, pills: &[String]) {
 
 fn canvas_summary(ui: &mut egui::Ui, o: &Open, g: &Graph, acts: &mut Vec<Act>) {
     let entry = &g.nodes[ENTRY];
-    heading(ui, entry, &[format!("{} nodes", g.nodes.len())]);
+    heading(ui, entry, &[format!("{} nodes", canvas_counts(o, g).nodes)]);
     ui.add_space(6.0);
     let names = |kind: OutKind| entry.outputs.iter().filter(|p| p.kind == kind).map(|p| p.label.as_str()).collect::<Vec<_>>();
     let (params, captured) = (names(OutKind::Var), names(OutKind::Captured));
@@ -2294,9 +3269,18 @@ fn exec_row(ui: &mut egui::Ui, label: &str, other: Option<NodeId>, g: &Graph, ac
 
 /// One parameter: a typed editor for what it holds, or the wire that feeds it.
 fn parameter(ui: &mut egui::Ui, o: &Open, g: &Graph, id: NodeId, i: usize, input: &blueprint::Input, acts: &mut Vec<Act>) {
+    // An engine binding's argument carries what is known of it: its name's evidence, the type its reader reads.
+    let note = g.nodes[id].callee().and_then(|callee| {
+        let engine = crate::engine_calls::engine();
+        let position = engine.params(&callee)?.iter().position(|l| *l == input.label)?;
+        engine.param_note(&callee, position as i64 + 1)
+    });
     ui.horizontal(|ui| {
         swatch(ui, pin_colour(input.ty), true);
-        ui.label(egui::RichText::new(&input.label).color(theme::TX));
+        let label = ui.label(egui::RichText::new(&input.label).color(theme::TX));
+        if let Some(note) = &note {
+            label.on_hover_text(note);
+        }
         ui.label(egui::RichText::new(input.ty.name()).monospace().color(theme::FAINT));
     });
     let key = egui::Id::unique(("mb-param", &o.entry.path, &o.path, id, i));
@@ -2482,16 +3466,33 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         ui.label(egui::RichText::new(zoom).monospace().color(LABEL));
         ui.separator();
         if let Some(g) = o.canvas() {
-            let counts = format!(
-                "{} nodes · {} wires · {} selected",
-                g.nodes.len(),
-                g.exec.len() + g.data.len(),
-                o.selection.len()
-            );
+            let c = canvas_counts(o, g);
+            let members = if c.members > 0 { format!(" · {} members listed", c.members) } else { String::new() };
+            let counts = format!("{} nodes · {} wires{members} · {} selected", c.nodes, c.wires, o.selection.len());
             ui.label(egui::RichText::new(counts).monospace().color(LABEL));
         }
     });
     acts
+}
+
+/// What a canvas draws, and how many members the navigator lists in its place.
+struct Counts {
+    nodes: usize,
+    wires: usize,
+    members: usize,
+}
+
+fn canvas_counts(o: &Open, g: &Graph) -> Counts {
+    if !o.path.is_empty() {
+        return Counts { nodes: g.nodes.len(), wires: g.exec.len() + g.data.len(), members: 0 };
+    }
+    let hidden = g.hidden();
+    let shown = g.shown(&hidden);
+    Counts {
+        nodes: hidden.iter().filter(|h| !**h).count(),
+        wires: shown.exec.len() + shown.data.len(),
+        members: g.nodes.iter().zip(&hidden).filter(|(n, h)| **h && n.member().is_some()).count(),
+    }
 }
 
 #[cfg(test)]
@@ -2550,21 +3551,95 @@ mod tests {
     }
 
     /// Draw the whole page for a frame, the way the app lays it out, and apply what it asked for.
-    fn frame(ctx: &egui::Context, p: &mut Panel, corpus: &[(String, String, String)]) {
+    fn frame(ctx: &egui::Context, p: &mut Panel, d: &mut Debug, corpus: &[(String, String, String)]) {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))),
             ..Default::default()
         };
         let mut acts = Vec::new();
         crate::gui::run_headless(ctx, input, |root| {
-            egui::Panel::left("nav").show(root, |ui| acts.extend(navigator(ui, p)));
+            egui::Panel::left("nav").show(root, |ui| acts.extend(navigator(ui, p, d)));
             egui::Panel::right("inspector").show(root, |ui| acts.extend(inspector(ui, p)));
             egui::Panel::bottom("verbs").show(root, |ui| ui.horizontal(|ui| acts.extend(verbs(ui, p))));
-            acts.extend(center(root, p));
+            acts.extend(center(root, p, d));
         });
         for a in acts {
-            apply(a, p, corpus);
+            apply(a, p, d, corpus);
         }
+    }
+
+    /// The navigator's divider sets the script list's height and never squeezes it below its minimum.
+    #[test]
+    fn the_divider_sets_the_script_list_height() {
+        let mut p = Panel::default();
+        let mut d = Debug::default();
+        assert_eq!(p.script_pane, SCRIPT_PANE_DEFAULT);
+        apply(Act::ScriptPane(480.0), &mut p, &mut d, &[]);
+        assert_eq!(p.script_pane, 480.0);
+        apply(Act::ScriptPane(10.0), &mut p, &mut d, &[]);
+        assert_eq!(p.script_pane, SCRIPT_PANE_MIN);
+    }
+
+    /// Debug mode over a real contract and the library script it calls: the bundle's text of pmccon016 and
+    /// of mrxutil map onto the chunks `vz.wad` ships, a node's line and a library function's entry take
+    /// breakpoints, the library list holds mrxutil, the renamed `Init` finds the script it shipped as by
+    /// its code, edits are refused, and the page draws with the run bar and the breakpoint list. Game-gated:
+    /// reads the retail `vz.wad` (`cargo xtask retail-test`).
+    #[cfg(feature = "retail")]
+    #[test]
+    fn debug_mode_maps_a_real_contract_and_a_library_script_onto_their_shipped_chunks() {
+        let home = crate::index::data_home().unwrap_or_else(|e| panic!("the page test opens the reference bundle's Lua: {e}"));
+        let corpus = crate::index::lua_corpus_at(&home).expect("the reference bundle's Lua corpus");
+        let reference = Reference::build(&corpus).expect("the corpus indexes and lifts");
+        let mut p = Panel::default();
+        let mut d = Debug::default();
+        p.set_reference(reference, &corpus);
+        d.set_base_wad(Some(&crate::app::retail_vz_wad()));
+        apply(Act::DebugMode(true), &mut p, &mut d, &corpus);
+        let i = p.catalog.iter().position(|e| e.name == "pmccon016").expect("pmccon016 is a mission script");
+        assert!(p.catalog[i].mission);
+        apply(Act::Pick(i), &mut p, &mut d, &corpus);
+        let o = p.open.as_ref().expect("open");
+        let m = d.scripts[&o.entry.path].mapped.as_ref().unwrap_or_else(|e| panic!("pmccon016 maps: {e}"));
+        let unmapped: Vec<String> = m.map.unmapped().map(|f| format!("{:?}: {}", f.path, f.unmapped.as_deref().unwrap_or(""))).collect();
+        assert!(unmapped.is_empty(), "every function maps: {unmapped:?}");
+        assert_eq!(m.module, "pmccon016", "the game runs it under its source name");
+        eprintln!("pmccon016: {} functions map", m.map.functions.len());
+
+        // A breakpoint on the line of a node in the open canvas, named for its function.
+        let line = o.canvas().expect("canvas").nodes.iter().map(|n| n.line).find(|&l| l > 0 && !m.map.positions(l).is_empty()).expect("a node line with code");
+        let pmccon016 = o.entry.path.clone();
+        apply(Act::ToggleBreakpoint(line), &mut p, &mut d, &corpus);
+        assert!(p.status.is_none(), "{:?}", p.status);
+        assert!(d.scripts[&pmccon016].breakpoints.contains_key(&line));
+
+        // The library script pmccon016 calls: listed under Library, and its SpawnObject breaks on entry.
+        let u = p.catalog.iter().position(|e| e.name.eq_ignore_ascii_case("mrxutil")).expect("mrxutil is in the corpus");
+        assert!(!p.catalog[u].mission, "mrxutil is a library script");
+        apply(Act::Show(Shown::Library), &mut p, &mut d, &corpus);
+        apply(Act::Pick(u), &mut p, &mut d, &corpus);
+        let o = p.open.as_ref().expect("open");
+        let mrxutil = o.entry.path.clone();
+        let spawn = o.chunk.nodes.iter().position(|n| n.is_function() && n.title == "SpawnObject").expect("SpawnObject");
+        apply(Act::BreakOnEntry(spawn), &mut p, &mut d, &corpus);
+        assert!(p.status.is_none(), "{:?}", p.status);
+        let w = &d.scripts[&mrxutil];
+        assert_eq!(w.breakpoints.values().collect::<Vec<_>>(), vec!["SpawnObject() entry"]);
+        assert!(d.scripts[&pmccon016].breakpoints.contains_key(&line), "opening another script keeps the first one's breakpoints");
+
+        // `Init` shipped as `c4`: it pairs by code, and the game runs it as `c4`.
+        let init = p.catalog.iter().position(|e| e.path.starts_with("lua/resident/") && e.name == "Init").expect("Init is in the corpus");
+        apply(Act::Pick(init), &mut p, &mut d, &corpus);
+        let o = p.open.as_ref().expect("open");
+        let m = d.scripts[&o.entry.path].mapped.as_ref().unwrap_or_else(|e| panic!("Init maps: {e}"));
+        assert_eq!(m.module, "c4");
+
+        apply(Act::Compile, &mut p, &mut d, &corpus);
+        assert!(p.status.as_ref().is_some_and(|(ok, m)| !ok && m.contains("switch to Edit")), "{:?}", p.status);
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        frame(&ctx, &mut p, &mut d, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
     }
 
     /// The page opens a real contract, lays its canvas out and fits it, shows a node, compiles it,
@@ -2575,22 +3650,23 @@ mod tests {
         let corpus = crate::index::lua_corpus_at(&home).expect("the reference bundle's Lua corpus");
         let reference = Reference::build(&corpus).expect("the corpus indexes and lifts");
         let mut p = Panel::default();
+        let mut d = Debug::default();
         p.set_reference(reference, &corpus);
         let i = p.catalog.iter().position(|e| e.name == "pmccon016").expect("pmccon016 is a mission script");
-        apply(Act::Pick(i), &mut p, &corpus);
+        apply(Act::Pick(i), &mut p, &mut d, &corpus);
         assert!(p.status.is_none(), "{:?}", p.status);
 
         let ctx = egui::Context::default();
         theme::install(&ctx);
-        frame(&ctx, &mut p, &corpus);
-        frame(&ctx, &mut p, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
         // It opens on the script's first override.
         let o = p.open.as_ref().expect("open");
         assert_eq!(o.canvas().expect("canvas").nodes[ENTRY].category, Category::Lifecycle);
         let activated = o.chunk.nodes.iter().position(|n| n.title == "Activated").expect("Activated");
-        apply(Act::OpenCanvas(vec![activated]), &mut p, &corpus);
-        frame(&ctx, &mut p, &corpus);
-        frame(&ctx, &mut p, &corpus);
+        apply(Act::OpenCanvas(vec![activated]), &mut p, &mut d, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
         let o = p.open.as_ref().expect("open");
         let g = o.canvas().expect("canvas");
         assert_eq!(g.nodes[ENTRY].title, "On Activated");
@@ -2599,57 +3675,280 @@ mod tests {
         assert!(v.zoom >= MIN_ZOOM && v.zoom <= 1.0, "fitted, got {}", v.zoom);
 
         let music = g.nodes.iter().position(|n| n.title == "MrxMusic.PlaySpecialMusic").expect("music node");
-        apply(Act::Select(vec![music], false), &mut p, &corpus);
-        frame(&ctx, &mut p, &corpus);
+        apply(Act::Select(vec![music], false), &mut p, &mut d, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
 
-        apply(Act::Compile, &mut p, &corpus);
+        apply(Act::Compile, &mut p, &mut d, &corpus);
         assert!(matches!(p.open.as_ref().expect("open").check, Check::Compiled(_)));
 
         let before = p.open.as_ref().expect("open").canvas().expect("canvas").nodes.len();
         let entry = p.reference.as_ref().expect("reference").palette.flow[0].clone();
-        apply(Act::Add(entry), &mut p, &corpus);
-        frame(&ctx, &mut p, &corpus);
+        apply(Act::Add(entry), &mut p, &mut d, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
         let o = p.open.as_ref().expect("open");
         assert_eq!(o.canvas().expect("canvas").nodes.len(), before + 1);
         assert!(o.view().pos.contains_key(&before), "the new node is placed");
-        apply(Act::Undo, &mut p, &corpus);
-        frame(&ctx, &mut p, &corpus);
+        apply(Act::Undo, &mut p, &mut d, &corpus);
+        frame(&ctx, &mut p, &mut d, &corpus);
         assert_eq!(p.open.as_ref().expect("open").canvas().expect("canvas").nodes.len(), before);
     }
 
-    /// The layout puts every node somewhere, a chain left to right, and a block below its row.
+    /// The members' rows list what a script declares, as it declares it: mrxbriefing's constants with their
+    /// values and its 24 imports; dlccon001 (unluac's output) its 13 imports and its inherit, each by the
+    /// module its first argument names (not the `false`/`true` after it), and none of the globals it gives
+    /// a register local's value (`Activated = L0_1`), which are code.
     #[test]
-    fn layout_places_every_node_with_chains_rightward_and_blocks_below() {
-        let index = CorpusIndex::build([(
-            "lua/vz/x.lua",
-            "function F(self)\n  a()\n  if b then\n    c()\n  end\n  d()\nend\n",
-        )])
-        .expect("indexes");
-        let script = Script::parse("function F(self)\n  a()\n  if b then\n    c()\n  end\n  d()\nend\n").expect("parses");
-        let chunk = blueprint::lift(&script, &index.context("lua/vz/x.lua"));
-        let g = chunk.nodes[1].sub.as_deref().expect("canvas");
-        let sizes = vec![Vec2::new(150.0, 80.0); g.nodes.len()];
-        let pos = layout(g, &sizes, Vec2::new(1600.0, 900.0));
-        assert_eq!(pos.len(), g.nodes.len());
-        let at = |t: &str| pos[&g.nodes.iter().position(|n| n.title == t).expect(t)];
-        assert!(at("a").x < at("if").x && at("if").x < at("d").x);
-        assert_eq!(at("a").y, at("d").y);
-        assert!(at("c").y > at("if").y);
+    fn member_rows_list_what_a_script_declares_and_not_what_its_code_does() {
+        use blueprint::Member;
+        let home = crate::index::data_home().unwrap_or_else(|e| panic!("the members test reads the reference bundle's Lua: {e}"));
+        let corpus = crate::index::lua_corpus_at(&home).expect("the reference bundle's Lua corpus");
+        let reference = Reference::build(&corpus).expect("the corpus indexes and lifts");
+        let lift_of = |path: &str| {
+            let src = &corpus.iter().find(|(p, _, _)| p == path).unwrap_or_else(|| panic!("{path}")).1;
+            blueprint::lift(&Script::parse(src).expect("parses"), &reference.index.context(path))
+        };
+        let g = lift_of("lua/resident/mrxbriefing.lua");
+        let vars = member_rows(&g, Member::Variable);
+        let greeting = vars.iter().find(|r| r.name == "CHEAP_GREETING").expect("CHEAP_GREETING");
+        assert_eq!((greeting.note.as_str(), greeting.line), ("1", 25));
+        let imports = member_rows(&g, Member::Import);
+        assert_eq!(imports.len(), 24);
+        assert_eq!((imports[0].name.as_str(), imports[0].note.as_str(), imports[0].line), ("MrxCinematic", "import", 1));
+        assert_eq!((imports[23].name.as_str(), imports[23].line), ("MrxShop", 24));
+
+        let g = lift_of("dlc/dlc01/dlccon001.lua");
+        let imports = member_rows(&g, Member::Import);
+        let names: Vec<&str> = imports.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names.len(), 14, "{names:?}");
+        assert_eq!((names[0], imports[0].note.as_str()), ("MrxTaskContract", "inherit"));
+        assert!(names.contains(&"dlc_moonpatrol") && names.contains(&"SpeedTools"), "{names:?}");
+        assert!(!names.iter().any(|n| *n == "false" || *n == "true"), "{names:?}");
+        let vars = member_rows(&g, Member::Variable);
+        assert!(!vars.iter().any(|r| r.name == "Activated"), "a global given a local's value is code: {vars:?}");
+        assert!(member_rows(&g, Member::Data).iter().all(|r| !r.name.starts_with('L')), "a register local's table is code");
     }
 
-    /// A long flat function wraps into rows: the statements keep their reading order (row by row,
-    /// left to right), every row starts where the first does, no row starts a statement past the
-    /// wrap width, a block hangs under its own row and above the next, and the whole canvas comes
-    /// out near the canvas's shape — where one unwrapped row is a strip dozens of times as wide as
-    /// it is tall. A function that fits the canvas at 1:1 stays in one row (the test above).
+    /// A main chunk as the canvas draws it: without its hidden members ([`Graph::hidden`]), its exec wires
+    /// run through them, the rest renumbered.
+    fn drawn_chunk(g: &Graph) -> Graph {
+        let hidden = g.hidden();
+        let shown = g.shown(&hidden);
+        let keep: Vec<NodeId> = (0..shown.nodes.len()).filter(|&i| !hidden[i]).collect();
+        let to: HashMap<NodeId, NodeId> = keep.iter().enumerate().map(|(n, &o)| (o, n)).collect();
+        Graph {
+            nodes: keep.iter().map(|&i| shown.nodes[i].clone()).collect(),
+            exec: shown.exec.iter().map(|w| blueprint::ExecWire { from: (to[&w.from.0], w.from.1), to: to[&w.to] }).collect(),
+            data: shown.data.iter().map(|w| blueprint::DataWire { from: (to[&w.from.0], w.from.1), to: (to[&w.to.0], w.to.1) }).collect(),
+        }
+    }
+
+    /// Every canvas of every corpus script (each function's, and each chunk's as drawn), with its nodes
+    /// measured in the type scale.
+    fn corpus_canvases() -> Vec<(String, Graph, Vec<Vec2>)> {
+        fn walk(path: &str, g: &Graph, out: &mut Vec<(String, Graph)>) {
+            for n in &g.nodes {
+                if let Some(sub) = &n.sub {
+                    out.push((format!("{path} › {}", n.title), sub.as_ref().clone()));
+                    walk(&format!("{path} › {}", n.title), sub, out);
+                }
+            }
+        }
+        let home = crate::index::data_home().unwrap_or_else(|e| panic!("the layout gate reads the reference bundle's Lua: {e}"));
+        let corpus = crate::index::lua_corpus_at(&home).expect("the reference bundle's Lua corpus");
+        let reference = Reference::build(&corpus).expect("the corpus indexes and lifts");
+        let mut canvases = Vec::new();
+        for (path, src, _) in &corpus {
+            let script = Script::parse(src).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let chunk = blueprint::lift(&script, &reference.index.context(path));
+            canvases.push((path.clone(), drawn_chunk(&chunk)));
+            walk(path, &chunk, &mut canvases);
+        }
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut out = Vec::new();
+        crate::gui::run_headless(&ctx, egui::RawInput::default(), |ui| {
+            out = canvases.iter().map(|(p, g)| (p.clone(), g.clone(), g.nodes.iter().map(|n| measure(ui, n)).collect())).collect();
+        });
+        out
+    }
+
+    /// The layout over every canvas of the corpus: no two nodes overlap, and no exec wire or feeder wire
+    /// runs backward. The totals (wire length, vertical drift, backward wires, crossings) are printed so a
+    /// change to the rules is measured, not eyeballed.
     #[test]
-    fn a_long_chain_wraps_into_rows_of_the_canvas_shape() {
+    fn every_corpus_canvas_lays_out_with_no_overlap_and_no_backward_wire() {
+        let canvases = corpus_canvases();
+        let mut total = crate::missions_layout::Score::default();
+        let mut failures = Vec::new();
+        let mut scored = Vec::new();
+        for (path, g, sizes) in &canvases {
+            let pos = layout(g, sizes);
+            assert_eq!(pos.len(), g.nodes.len(), "{path}: every node placed");
+            let s = crate::missions_layout::score(g, sizes, &pos);
+            if s.overlaps > 0 || s.backward > 0 {
+                failures.push(format!("{path}: {} overlap(s), {} backward wire(s)", s.overlaps, s.backward));
+            }
+            total.add(&s);
+            scored.push((path, g.nodes.len(), s));
+        }
+        // What fit-to-view can frame at its farthest zoom in a 1600 x 900 canvas pane.
+        let frame = (Vec2::new(1600.0, 900.0) - Vec2::splat(FIT_MARGIN * 2.0)) / MIN_ZOOM;
+        let unframed = scored.iter().filter(|(_, _, s)| s.width > frame.x || s.height > frame.y).count();
+        eprintln!("  {unframed} canvas(es) larger than fit-to-view frames at zoom {MIN_ZOOM} ({:.0} x {:.0})", frame.x, frame.y);
+        for (name, (n, d)) in ["exec", "feeder", "local/param"].iter().zip(total.kinds) {
+            eprintln!("  {name} wires: {n}, drift {d:.0} ({:.1} per wire)", d / n.max(1) as f32);
+        }
+        scored.sort_by(|a, b| b.2.width.total_cmp(&a.2.width));
+        for (path, nodes, s) in scored.iter().take(5) {
+            eprintln!("  widest: {path}: {nodes} nodes, {:.0} x {:.0}, length {:.0}", s.width, s.height, s.length);
+        }
+        scored.sort_by(|a, b| b.2.length.total_cmp(&a.2.length));
+        for (path, nodes, s) in scored.iter().take(5) {
+            eprintln!("  longest wires: {path}: {nodes} nodes, {} wires, length {:.0}", s.wires, s.length);
+        }
+        eprintln!(
+            "{} canvases, {} wires: length {:.0}, drift {:.0} ({:.1} per wire), {} backward, {} crossings, {} overlaps; \
+             widest {:.0}, tallest {:.0}",
+            canvases.len(),
+            total.wires,
+            total.length,
+            total.drift,
+            total.drift / total.wires.max(1) as f32,
+            total.backward,
+            total.crossings,
+            total.overlaps,
+            total.width,
+            total.height
+        );
+        assert!(failures.is_empty(), "{} canvas(es):\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// `g` laid out by ELK Layered: pins at their fixed positions on each node, left to right, straight
+    /// edges favoured, statement order kept. A yardstick for [`layout`], not used by the page.
+    fn elk_layout(g: &Graph, sizes: &[Vec2]) -> HashMap<NodeId, Pos2> {
+        let pin = |id: NodeId, p: PinRef| {
+            let at = pin_at(&g.nodes[id], Pos2::ZERO, sizes[id], p);
+            serde_json::json!({ "id": format!("{p:?}"), "x": at.x, "y": at.y, "width": 0, "height": 0 })
+        };
+        let children: Vec<serde_json::Value> = g
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(id, n)| {
+                serde_json::json!({
+                    "id": format!("n{id}"),
+                    "width": sizes[id].x,
+                    "height": sizes[id].y,
+                    "ports": pins_of(id, n).into_iter().map(|p| pin(id, p)).collect::<Vec<_>>(),
+                    "layoutOptions": { "elk.portConstraints": "FIXED_POS" },
+                })
+            })
+            .collect();
+        let edges: Vec<serde_json::Value> = g
+            .exec
+            .iter()
+            .map(|w| (format!("{:?}", PinRef::ExecOut(w.from.0, w.from.1)), format!("{:?}", PinRef::ExecIn(w.to))))
+            .chain(g.data.iter().map(|w| (format!("{:?}", PinRef::Out(w.from.0, w.from.1)), format!("{:?}", PinRef::In(w.to.0, w.to.1)))))
+            .enumerate()
+            .map(|(i, (s, t))| serde_json::json!({ "id": format!("e{i}"), "sources": [s], "targets": [t] }))
+            .collect();
+        let graph = serde_json::json!({
+            "id": "root",
+            "layoutOptions": {
+                "elk.algorithm": "layered",
+                "elk.direction": "RIGHT",
+                "elk.edgeRouting": "SPLINES",
+                "elk.layered.nodePlacement.favorStraightEdges": "true",
+                "elk.layered.considerModelOrder.strategy": "NODES_AND_EDGES",
+                "elk.layered.spacing.nodeNodeBetweenLayers": 56,
+                "elk.spacing.nodeNode": 36,
+            },
+            "children": children,
+            "edges": edges,
+        });
+        let out = elk_layout::layout_json(&graph.to_string(), "{}").unwrap_or_else(|e| panic!("ELK: {e}"));
+        let v: serde_json::Value = serde_json::from_str(&out).expect("ELK answers JSON");
+        v["children"]
+            .as_array()
+            .expect("children")
+            .iter()
+            .map(|c| {
+                let id: NodeId = c["id"].as_str().and_then(|s| s.strip_prefix('n')).and_then(|s| s.parse().ok()).expect("node id");
+                (id, Pos2::new(c["x"].as_f64().expect("x") as f32, c["y"].as_f64().expect("y") as f32))
+            })
+            .collect()
+    }
+
+    /// The yardstick: every corpus canvas of up to 200 nodes laid out by ELK Layered and by [`layout`],
+    /// both scored the same way and printed side by side. ELK must place every node; the comparison is
+    /// read, not asserted, since ELK optimises crossings and balance rather than these rules.
+    #[test]
+    fn elk_lays_out_the_same_canvases_as_a_yardstick() {
+        let canvases = corpus_canvases();
+        let (mut ours, mut elk, mut n) =
+            (crate::missions_layout::Score::default(), crate::missions_layout::Score::default(), 0usize);
+        for (path, g, sizes) in canvases.iter().filter(|(_, g, _)| g.nodes.len() <= 200) {
+            let e = elk_layout(g, sizes);
+            assert_eq!(e.len(), g.nodes.len(), "{path}: ELK placed every node");
+            elk.add(&crate::missions_layout::score(g, sizes, &e));
+            ours.add(&crate::missions_layout::score(g, sizes, &layout(g, sizes)));
+            n += 1;
+        }
+        for (who, s) in [("ours", ours), ("ELK ", elk)] {
+            eprintln!(
+                "{who}: {n} canvases, {} wires: length {:.0}, drift {:.0} ({:.1} per wire), {} backward, {} crossings, {} overlaps",
+                s.wires,
+                s.length,
+                s.drift,
+                s.drift / s.wires.max(1) as f32,
+                s.backward,
+                s.crossings,
+                s.overlaps
+            );
+        }
+    }
+
+    /// The MedEvac shape (`mrxplayer.lua`): the chain runs left to right with each exec wire level; the
+    /// `if`'s `then` arm rises onto a row above, its `else` arm sits below that, and the code after the
+    /// `if` continues on a row below both, right of the `if`; a call's argument sits left of the call with
+    /// its wire level; nothing overlaps and no wire runs backward.
+    #[test]
+    fn a_branch_puts_then_above_else_below_and_the_rest_below_both() {
+        let src = "function MedEvac()\n  local o = M.Get()\n  if o then\n    o:A(true)\n    o:B()\n    S.Stop()\n  else\n    Sick()\n  end\n  P.Clear(P.Local())\n  K.Inc()\nend\n";
+        let index = CorpusIndex::build([("lua/vz/x.lua", src)]).expect("indexes");
+        let script = Script::parse(src).expect("parses");
+        let chunk = blueprint::lift(&script, &index.context("lua/vz/x.lua"));
+        let g = chunk.nodes[1].sub.as_deref().expect("canvas");
+        let sizes: Vec<Vec2> = g.nodes.iter().map(|n| Vec2::new(150.0, 60.0 + 26.0 * rows(n).0.max(rows(n).1) as f32)).collect();
+        let pos = layout(g, &sizes);
+        assert_eq!(pos.len(), g.nodes.len());
+        let id = |t: &str| g.nodes.iter().position(|n| n.title == t).unwrap_or_else(|| panic!("{t}"));
+        let at = |t: &str| pos[&id(t)];
+        let (get, iff, a, b, stop, sick, clear, local, inc) =
+            (at("M.Get"), at("if"), at("o:A"), at("o:B"), at("S.Stop"), at("Sick"), at("P.Clear"), at("P.Local"), at("K.Inc"));
+        assert_eq!(pos[&ENTRY].y, get.y, "the entry's body continues its row");
+        assert!(get.x < iff.x && (get.y - iff.y).abs() < 0.5, "the chain runs on: {get:?} {iff:?}");
+        assert!(a.y < iff.y && a.x > iff.x + sizes[id("if")].x, "then rises, right of the if: {a:?} {iff:?}");
+        assert!(a.y == b.y && b.y == stop.y && a.x < b.x && b.x < stop.x, "the then arm is a row");
+        assert!(sick.y > a.y && sick.x > iff.x, "else sits below then: {sick:?}");
+        assert!(clear.y > sick.y && clear.x > iff.x + sizes[id("if")].x, "the rest continues below the arms: {clear:?}");
+        assert_eq!(clear.y, inc.y, "and runs as a row");
+        let wire = |from: NodeId, out: usize, to: NodeId, input: usize| {
+            (pin_at(&g.nodes[from], pos[&from], sizes[from], PinRef::Out(from, out)), pin_at(&g.nodes[to], pos[&to], sizes[to], PinRef::In(to, input)))
+        };
+        let (o, i) = wire(id("P.Local"), 0, id("P.Clear"), 0);
+        assert!(o.x < i.x && (o.y - i.y).abs() < 0.5, "the argument sits left of the call, its wire level: {o:?} {i:?}");
+        assert!(local.x + sizes[id("P.Local")].x < clear.x);
+        let s = crate::missions_layout::score(g, &sizes, &pos);
+        assert_eq!((s.overlaps, s.backward), (0, 0), "{s:?}");
+    }
+
+    /// A long flat function is one row: nothing wraps (the canvas pans), and every exec wire is level.
+    #[test]
+    fn a_long_chain_stays_one_row() {
         let mut src = String::from("function F(self)\n");
         for i in 0..40 {
             src.push_str(&format!("  s{i}()\n"));
-            if i == 3 {
-                src.push_str("  if b then\n    c()\n  end\n");
-            }
         }
         src.push_str("end\n");
         let index = CorpusIndex::build([("lua/vz/x.lua", src.as_str())]).expect("indexes");
@@ -2657,38 +3956,13 @@ mod tests {
         let chunk = blueprint::lift(&script, &index.context("lua/vz/x.lua"));
         let g = chunk.nodes[1].sub.as_deref().expect("canvas");
         let sizes = vec![Vec2::new(150.0, 80.0); g.nodes.len()];
+        let pos = layout(g, &sizes);
         let id = |t: &str| g.nodes.iter().position(|n| n.title == t).expect(t);
-        let shape = |pos: &HashMap<NodeId, Pos2>| {
-            let b = (0..g.nodes.len())
-                .map(|i| Rect::from_min_size(pos[&i], sizes[i]))
-                .reduce(|a, b| a.union(b))
-                .expect("nodes");
-            b.width() / b.height()
-        };
-
-        let canvas = Vec2::new(1600.0, 900.0);
-        let pos = layout(g, &sizes, canvas);
-        assert_eq!(pos.len(), g.nodes.len());
-        let right = wrap_width(&sizes, canvas);
         let stmts: Vec<Pos2> = (0..40).map(|i| pos[&id(&format!("s{i}"))]).collect();
-        let rows: std::collections::BTreeSet<i64> = stmts.iter().map(|p| p.y as i64).collect();
-        assert!(rows.len() > 1, "the chain wraps");
         for w in stmts.windows(2) {
-            assert!(w[1].y > w[0].y || (w[1].y == w[0].y && w[1].x > w[0].x), "reading order: {w:?}");
+            assert!(w[1].y == w[0].y && w[1].x > w[0].x, "one row, in reading order: {w:?}");
         }
-        let start = stmts[0].x;
-        for p in &stmts {
-            assert!(p.x >= start && p.x <= right, "{p:?} starts past the wrap width {right}");
-        }
-        for y in &rows {
-            assert!(stmts.iter().any(|p| p.y as i64 == *y && p.x == start), "row {y} starts at the chain's start");
-        }
-        let (iff, c) = (pos[&id("if")], pos[&id("c")]);
-        let next_row = stmts.iter().map(|p| p.y).filter(|y| *y > iff.y).fold(f32::INFINITY, f32::min);
-        assert!(c.y > iff.y && c.y < next_row, "the block hangs under its own row: if {iff:?}, c {c:?}, next row {next_row}");
-        let wrapped = shape(&pos);
-        assert!((1.0..3.0).contains(&wrapped), "wrapped canvas aspect {wrapped}");
-        let strip = shape(&layout(g, &sizes, Vec2::new(100_000.0, 100.0)));
-        assert!(strip > 10.0, "unwrapped, the same function is a strip: {strip}");
+        let s = crate::missions_layout::score(g, &sizes, &pos);
+        assert_eq!((s.drift, s.backward, s.overlaps), (0.0, 0, 0), "{s:?}");
     }
 }

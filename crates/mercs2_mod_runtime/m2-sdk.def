@@ -42,5 +42,10 @@ EXPORTS
     m2_lua_push_bool
     m2_lua_push_number
     m2_lua_push_string
+    m2_lua_debug_set_sink
+    m2_lua_debug_on_paused
+    m2_lua_debug_paused
+    m2_lua_debug_request
+    m2_lua_debug_disconnected
     m2_render_tree_sites
     m2_render_last_error

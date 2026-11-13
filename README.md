@@ -418,6 +418,7 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `x360_dlc_prototypes_dir` | the directory of zipped Xbox 360 DLC prototype packages | the `mercs2_exemap` Lua corpus test |
 | `ps3_disc_iso` | the PS3 North American disc image, `Mercenaries 2 World in Flames [BLUS30056].iso` (sha256 `95ccff0f…`) | the `mercs2_exemap` Lua corpus test |
 | `ps3_dlc_biua_pkg` | the PS3 Blow It Up Again Pack package (`UP0006-BLUS30056_00-MERCS2WIFDLC01NA`, sha256 `d62081de…`) | the `mercs2_exemap` Lua corpus test |
+| `biua_shipment_dir` | the Blow It Up Again Shipment directory as `dlc_port --package` writes it (`shipments/blow-it-up-again`: `manifest.yaml` and the PC-form `src/level/` components) | the `mercs2_quartermaster` outfit-list test of the dlc01 level |
 | `ps3_jp_disc_dir` | the PS3 Japanese disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Japan) [BLJM60101]`) | the `mercs2_exemap` Lua corpus test |
 | `ps3_de_disc_dir` | the PS3 German disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Germany) (En,De) [BLES00328]`) | the `mercs2_exemap` Lua corpus test |
 | `ps3_eu_disc_dir` | the PS3 European disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Europe) (En,Fr,De,Es,It,Ru) [BLES00323]`) | the `mercs2_exemap` Lua corpus test |

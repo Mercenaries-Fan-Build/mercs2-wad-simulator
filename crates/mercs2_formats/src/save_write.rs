@@ -85,7 +85,7 @@ fn wr_u16(b: &mut [u8], off: usize, v: u16) {
 /// Re-stamp every grounded header field of `p` into `buf` at its known offset.
 ///
 /// `flags_0x4c` is written first (u32 `@0x4C`) so the hero byte `@0x4D` and the
-/// upgrade byte `@0x4F` overwrite it — preserving the read-side layering where
+/// upgrade byte `@0x4E` and the costume byte `@0x4F` overwrite it — preserving the read-side layering where
 /// `character_index` is byte +1 of the `flags_0x4c` dword.
 fn stamp_header(buf: &mut [u8], p: &Profile) {
     wr_u32(buf, save::OFF_VERSION, p.version);
@@ -108,6 +108,7 @@ fn stamp_header(buf: &mut [u8], p: &Profile) {
     wr_u32(buf, save::OFF_FLAGS_4C, p.flags_0x4c);
     buf[save::OFF_CHARACTER] = p.character_index;
     buf[save::OFF_UPGRADE] = p.upgrade_index;
+    buf[save::OFF_COSTUME] = p.costume_index;
     buf[save::OFF_UNLOCKED_COSTUMES] = p.unlocked_costumes;
     buf[save::OFF_UNK_24B] = p.unknown_0x24b;
     wr_u16(buf, save::OFF_FUEL_CAP, p.fuel_capacity);
@@ -261,6 +262,7 @@ mod tests {
             );
             assert_eq!(p2.save_name(), p.save_name(), "{name}: save_name");
             assert_eq!(p2.character_index, p.character_index, "{name}: hero");
+            assert_eq!(p2.costume_index, p.costume_index, "{name}: costume");
             assert_eq!(p2.upgrade_index, p.upgrade_index, "{name}: upgrade");
             assert_eq!(p2.fuel_capacity, p.fuel_capacity, "{name}: fuel_cap");
         }

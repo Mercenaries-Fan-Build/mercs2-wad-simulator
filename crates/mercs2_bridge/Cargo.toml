@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_bridge"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Live link to a running Mercenaries 2 via Wally's lua-bridge ASI: a rate-limited raw-TCP client for its <<<RUN>>>/<<<END>>> REPL protocol, consumed by the Workshop and Modkit."
 license.workspace = true
@@ -10,7 +10,12 @@ repository.workspace = true
 name = "mercs2_bridge"
 path = "src/lib.rs"
 
-# std-only on purpose: the transport is a loopback TCP socket, and a networking crate would be weight
-# for nothing. The perf discipline (rate-limit, poll-not-block, off the game's critical path) is a
-# property of THIS crate, not the caller.
+# No networking crate: the transport is a loopback TCP socket. The perf discipline (rate-limit,
+# poll-not-block, off the game's critical path) is a property of THIS crate, not the caller.
 [dependencies]
+# `debug`: the debug protocol's messages, the WebSocket handshake's Sec-WebSocket-Accept check, and the
+# bridge's `log`/`ws` feed frames.
+mercs2_formats = { workspace = true }
+sha1 = "0.10"
+base64 = "0.22"
+serde_json = "1"

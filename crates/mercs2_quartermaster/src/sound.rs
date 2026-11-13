@@ -47,7 +47,7 @@ use mercs2_formats::ucfx::{build_wrapped_entries, extract_data_chunk, WrappedEnt
 
 use crate::discover::LoadedShipment;
 use crate::game::GameStack;
-use crate::link::{Level, SoundBankRegistration};
+use crate::link::{Level, SoundBankRegistration, SoundLoad};
 use crate::manifest::{asset_hash, bare_hash, Contribution, Language, LoadSession, Manifest, SoundCue};
 
 /// The sounddb's ASET type id (`mercs2_formats::aset_type_ids`: `0xE5273C14 → 13`).
@@ -344,7 +344,7 @@ pub fn sound_registrations(manifest: &Manifest, carriers: &CarrierMap) -> Result
             Contribution::AddSound { bank, load_in, .. } => SoundBankRegistration {
                 shipment: shipment.clone(),
                 bank: bank.clone(),
-                soundbank: true,
+                load: SoundLoad::Shipped { soundbank: true },
                 sessions: load_in.iter().copied().collect(),
             },
             Contribution::ReplaceSoundBank { bank, language, .. } | Contribution::ReplaceSoundCue { bank, language, .. } => {
@@ -365,9 +365,31 @@ pub fn sound_registrations(manifest: &Manifest, carriers: &CarrierMap) -> Result
                 SoundBankRegistration {
                     shipment: shipment.clone(),
                     bank: override_wavebank_name(shipment, &entry),
-                    soundbank: false,
+                    load: SoundLoad::Shipped { soundbank: false },
                     sessions,
                 }
+            }
+            Contribution::LoadSound { soundbank, wavebank, stream, sessions } => {
+                let sessions: BTreeSet<LoadSession> = sessions.iter().copied().collect();
+                let mut regs = Vec::new();
+                if let Some(s) = stream {
+                    let level = stream_level(manifest, s).map_err(|e| format!("{shipment} contributions[{index}] (load_sound): {e}"))?;
+                    let folder = mercs2_formats::dlc_mount::mount_point(level);
+                    regs.push((s, SoundLoad::Stream { folder }));
+                }
+                if let Some(w) = wavebank {
+                    regs.push((w, SoundLoad::WaveBank));
+                }
+                if let Some(b) = soundbank {
+                    regs.push((b, SoundLoad::SoundBank));
+                }
+                for (bank, load) in regs {
+                    let reg = SoundBankRegistration { shipment: shipment.clone(), bank: bank.clone(), load, sessions: sessions.clone() };
+                    if !out.contains(&reg) {
+                        out.push(reg);
+                    }
+                }
+                continue;
             }
             _ => continue,
         };
@@ -376,6 +398,149 @@ pub fn sound_registrations(manifest: &Manifest, carriers: &CarrierMap) -> Result
         }
     }
     Ok(out)
+}
+
+/// What is wrong with each `load_sound` of `manifest` without the game (M0222), as `(contribution, why)`:
+/// it names no sound; a name is blank, has surrounding whitespace, or is a bare hash (`MrxSoundBanks`
+/// loads by name); `in` is empty or lists a session twice; its stream is not one of the Shipment's
+/// `add_level` streams ([`stream_level`]).
+pub fn load_sound_shape_problems(manifest: &Manifest) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let Contribution::LoadSound { soundbank, wavebank, stream, sessions } = c else { continue };
+        let names = [("soundbank", soundbank), ("wavebank", wavebank), ("stream", stream)];
+        if names.iter().all(|(_, n)| n.is_none()) {
+            out.push((index, "load_sound names no soundbank, wavebank or stream".to_string()));
+        }
+        for (field, name) in names {
+            let Some(name) = name else { continue };
+            if name.trim().is_empty() || name.trim() != name {
+                out.push((index, format!("{field} {name:?} is blank or has surrounding whitespace")));
+            } else if bare_hash(name).is_some() {
+                out.push((index, format!("{field} {name:?} is a hash, and the loader loads sound by name")));
+            }
+        }
+        if sessions.is_empty() {
+            out.push((index, "in is empty, so no session loads it".to_string()));
+        }
+        let unique: BTreeSet<&LoadSession> = sessions.iter().collect();
+        if unique.len() != sessions.len() {
+            out.push((index, "in lists a session twice".to_string()));
+        }
+        if let Some(s) = stream {
+            if let Err(e) = stream_level(manifest, s) {
+                out.push((index, e));
+            }
+        }
+    }
+    out
+}
+
+/// Each `load_sound` soundbank or wavebank of `manifest` that nothing holds (M0223), as
+/// `(contribution, why)`. A name resolves when the game (`game`'s WADs), the Shipment's own `level: vz`
+/// rows, or, for a `vo_` name, the language's WAD beside `vz.wad` holds its entry under that type. A
+/// `vo_` name is the entry `<name>.<language>` for every language whose WAD is installed, as
+/// `MrxSoundBanks` asks for the player's language; with no language WAD installed it is an error.
+pub fn load_sound_target_problems(manifest: &Manifest, game: &mut GameStack) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    let rows: Vec<(u32, u32)> = crate::level::assets_of(manifest, crate::level::VZ)
+        .iter()
+        .filter_map(|a| a.key().ok())
+        .collect();
+    let base = game.paths().first().map(|p| p.to_path_buf());
+    let mut languages: Option<Vec<(Language, GameStack)>> = None;
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let Contribution::LoadSound { soundbank, wavebank, .. } = c else { continue };
+        for (field, name, type_hash, type_id) in [
+            ("soundbank", soundbank, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK),
+            ("wavebank", wavebank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK),
+        ] {
+            let Some(name) = name else { continue };
+            let held_here = |entry: &str| rows.contains(&(asset_hash(entry), type_hash));
+            if !is_vo_bank(name) {
+                if !held_here(name) && !game.has_asset(asset_hash(name), type_id) {
+                    out.push((index, format!("{field} {name:?}: neither the game nor the Shipment's level: vz rows hold it")));
+                }
+                continue;
+            }
+            let installed = match (&mut languages, &base) {
+                (Some(l), _) => l,
+                (None, None) => {
+                    out.push((index, format!("{field} {name:?}: the game stack has no WAD, so no language is installed")));
+                    continue;
+                }
+                (slot @ None, Some(vz)) => {
+                    let mut found = Vec::new();
+                    for l in Language::ALL {
+                        let Ok(path) = sibling_wad(vz, &format!("{}.wad", l.token())) else { continue };
+                        match GameStack::open(&[path]) {
+                            Ok(stack) => found.push((l, stack)),
+                            Err(e) => out.push((index, format!("the {} WAD beside vz.wad does not open: {e}", l.token()))),
+                        }
+                    }
+                    slot.insert(found)
+                }
+            };
+            if installed.is_empty() {
+                out.push((index, format!("{field} {name:?} is a vo_ name, localized per language, and no language WAD is beside vz.wad")));
+            }
+            for (l, wad) in installed.iter_mut() {
+                let entry = entry_name(name, Some(*l));
+                let h = asset_hash(&entry);
+                if !held_here(&entry) && !game.has_asset(h, type_id) && !wad.has_asset(h, type_id) {
+                    out.push((index, format!("{field} {name:?}: no {entry:?} {field} in the game, the {} WAD or the Shipment's level: vz rows", l.token())));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The entry names of every stream a `load_sound` of `manifest` opens: the stream's name, or for a `vo_`
+/// stream `<name>.<language>` for every language, as `MrxSoundBanks` localizes it. A streamed wavebank of
+/// that entry name plays from it.
+pub fn opened_streams(manifest: &Manifest) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in &manifest.contributions {
+        let Contribution::LoadSound { stream: Some(s), .. } = c else { continue };
+        if is_vo_bank(s) {
+            out.extend(Language::ALL.iter().map(|l| entry_name(s, Some(*l))));
+        } else {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
+/// The `add_level` of `manifest` that installs the stream `stream` (a `load_sound` stream): the one
+/// level with a stream file named `<stream>.pws`, or, for a `vo_` stream, `<stream>.<language>.pws`,
+/// compared without case (the files install lowercased). None, or several levels, is an error.
+pub fn stream_level<'a>(manifest: &'a Manifest, stream: &str) -> Result<&'a str, String> {
+    // The `vo_` test is retail's, on the name as written (`mrxsoundbanks.lua:80-87` is case-sensitive);
+    // the file name compares without case.
+    let want = stream.to_ascii_lowercase();
+    let named = |file: &str| {
+        let f = file.to_ascii_lowercase();
+        f == format!("{want}.pws")
+            || (is_vo_bank(stream) && Language::ALL.iter().any(|l| f == format!("{want}.{}.pws", l.token())))
+    };
+    let levels: Vec<&str> = manifest
+        .contributions
+        .iter()
+        .filter_map(|c| match c {
+            Contribution::AddLevel { name, streams, .. }
+                if streams.iter().any(|s| s.file_name().and_then(|f| f.to_str()).is_some_and(named)) =>
+            {
+                Some(name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    match levels.as_slice() {
+        [one] => Ok(one),
+        [] => Err(format!("no add_level of the Shipment installs a stream {stream:?} ({want}.pws{})", if is_vo_bank(&want) { ", or one per language" } else { "" })),
+        many => Err(format!("stream {stream:?} is installed by {} add_levels ({}); name one stream of one level", many.len(), many.join(", "))),
+    }
 }
 
 /// Why an override of `entry`, which `carriers` carry, loads in no session: only `vz.wad` and
@@ -1282,7 +1447,7 @@ pub fn lower_overrides(
             let reg = SoundBankRegistration {
                 shipment: shipment.to_string(),
                 bank: override_wavebank_name(shipment, entry),
-                soundbank: false,
+                load: SoundLoad::Shipped { soundbank: false },
                 sessions,
             };
             if !out.registrations.contains(&reg) {
@@ -1651,6 +1816,46 @@ mod tests {
         .expect("parses")
     }
 
+    /// A level with the DLC's voice stream in two languages, and a `load_sound` of its banks.
+    const DLC_LEVEL: &str = "  - kind: add_level\n    name: dlc01\n    display: DLC\n    streams:\n\
+                             \x20     - src/level/Audios/vo_stream_dlctest.english.pws\n\
+                             \x20     - src/level/Audios/vo_stream_dlctest.french.pws\n";
+
+    #[test]
+    fn a_load_sound_registers_its_stream_from_its_level_and_each_bank_by_name() {
+        let m = manifest(&format!(
+            "{DLC_LEVEL}  - kind: load_sound\n    soundbank: vo_resident_DLCTest\n    wavebank: vo_stream_DLCTest\n\
+             \x20   stream: vo_stream_DLCTest\n    in: [gameplay]\n"
+        ));
+        let regs = sound_registrations(&m, &CarrierMap::new()).unwrap();
+        let got: Vec<(&str, &SoundLoad)> = regs.iter().map(|r| (r.bank.as_str(), &r.load)).collect();
+        assert_eq!(
+            got,
+            [
+                ("vo_stream_DLCTest", &SoundLoad::Stream { folder: "DLC\\dlc01".into() }),
+                ("vo_stream_DLCTest", &SoundLoad::WaveBank),
+                ("vo_resident_DLCTest", &SoundLoad::SoundBank),
+            ]
+        );
+        assert!(regs.iter().all(|r| r.sessions == [LoadSession::Gameplay].into()));
+        assert!(load_sound_shape_problems(&m).is_empty());
+    }
+
+    #[test]
+    fn a_load_sound_with_nothing_a_hash_no_session_or_a_stream_no_level_installs_is_m0222() {
+        let problems = |body: &str| load_sound_shape_problems(&manifest(&format!("{DLC_LEVEL}  - kind: load_sound\n{body}")));
+        assert!(problems("    in: [gameplay]\n")[0].1.contains("names no soundbank, wavebank or stream"));
+        assert!(problems("    soundbank: \"0x1084AE93\"\n    in: [gameplay]\n")[0].1.contains("is a hash"));
+        assert!(problems("    soundbank: \" x\"\n    in: [gameplay]\n")[0].1.contains("surrounding whitespace"));
+        assert!(problems("    soundbank: x\n    in: []\n")[0].1.contains("in is empty"));
+        assert!(problems("    soundbank: x\n    in: [gameplay, gameplay]\n")[0].1.contains("twice"));
+        let e = problems("    stream: vo_stream\n    in: [gameplay]\n");
+        assert!(e[0].1.contains("no add_level of the Shipment installs a stream \"vo_stream\""), "{e:?}");
+        assert!(problems("    stream: vo_STREAM_dlctest\n    in: [gameplay]\n").is_empty(), "a stream name matches its file in any case");
+        let e = problems("    stream: VO_stream_DLCTest\n    in: [gameplay]\n");
+        assert!(e[0].1.contains("no add_level"), "retail localizes only a lowercase vo_ prefix: {e:?}");
+    }
+
     fn cue(indent: &str, name: &str) -> String {
         format!(
             "{indent}name: {name}\n{indent}wave: src/a.wav\n{indent}group_gain_db: 0\n{indent}cue_gain_db: 0\n\
@@ -1692,7 +1897,11 @@ mod tests {
             ("vo_mattias.german", &[Carrier::Language(Language::German)]),
         ]);
         let regs: Vec<(String, bool, BTreeSet<LoadSession>)> =
-            sound_registrations(&m, &found).unwrap().into_iter().map(|r| (r.bank, r.soundbank, r.sessions)).collect();
+            sound_registrations(&m, &found)
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.bank, matches!(r.load, SoundLoad::Shipped { soundbank: true }), r.sessions))
+                .collect();
         let both = sessions(&LoadSession::ALL);
         assert_eq!(
             regs,

@@ -18,6 +18,10 @@ pub type LuaTickCb = unsafe extern "C" fn(l: *mut c_void, ud: *mut c_void);
 pub type LogListener = unsafe extern "C" fn(msg: *const c_char, ud: *mut c_void);
 pub type PhaseCb = unsafe extern "C" fn(reached_idx: c_int, ud: *mut c_void);
 pub type IniKv = unsafe extern "C" fn(ud: *mut c_void, key: *const c_char, value: *const c_char);
+/// `m2_lua_debug_sink`: deliver one debug frame to client `conn`; 0 when it cannot be delivered.
+pub type LuaDebugSink = unsafe extern "C" fn(conn: u32, json: *const c_char, len: c_int, ud: *mut c_void) -> c_int;
+/// `m2_lua_debug_paused_cb`: called on the game thread, over and over, while the debugger has it paused.
+pub type LuaDebugPausedCb = unsafe extern "C" fn(l: *mut c_void, ud: *mut c_void);
 
 /// `m2_lua_reg`: one namespace row; a table ends with a NULL name.
 #[repr(C)]
@@ -90,6 +94,33 @@ pub mod ffi {
         pub fn m2_lua_push_bool(l: *mut c_void, b: c_int);
         pub fn m2_lua_push_number(l: *mut c_void, n: f64);
         pub fn m2_lua_push_string(l: *mut c_void, s: *const c_char, len: c_int);
+        pub fn m2_lua_debug_set_sink(cb: Option<LuaDebugSink>, ud: *mut c_void) -> c_int;
+        pub fn m2_lua_debug_on_paused(cb: Option<LuaDebugPausedCb>, ud: *mut c_void) -> c_int;
+        pub fn m2_lua_debug_paused() -> c_int;
+        pub fn m2_lua_debug_request(conn: u32, json: *const c_char, len: c_int) -> c_int;
+        pub fn m2_lua_debug_disconnected(conn: u32);
+    }
+}
+
+/// The message an `m2_*_last_error` export hands out, kept per thread: a caller reads the failure of its own
+/// last call, and a failure on another thread never replaces (so never frees) the string a caller is
+/// reading. A pointer from [`LastError::get`] is valid until the same thread's next [`LastError::set`].
+pub struct LastError(&'static std::thread::LocalKey<core::cell::RefCell<Option<std::ffi::CString>>>);
+
+impl LastError {
+    /// Over a `thread_local!` slot of its own.
+    pub const fn new(slot: &'static std::thread::LocalKey<core::cell::RefCell<Option<std::ffi::CString>>>) -> LastError {
+        LastError(slot)
+    }
+
+    pub fn set(&self, msg: &str) {
+        let c = std::ffi::CString::new(msg.replace('\0', " ")).expect("NULs replaced");
+        self.0.with(|s| *s.borrow_mut() = Some(c));
+    }
+
+    /// This thread's last message, or NULL when it has recorded none.
+    pub fn get(&self) -> *const c_char {
+        self.0.with(|s| s.borrow().as_ref().map_or(core::ptr::null(), |c| c.as_ptr()))
     }
 }
 
@@ -98,22 +129,21 @@ pub fn version_num(major: i32, minor: i32, patch: i32) -> i32 {
     major * 10000 + minor * 100 + patch
 }
 
-/// Does the loaded DLL's `m2_version_num()` satisfy `^built` (`X.Y.Z`)? The caret rule of a Shipment's
-/// `load.requires`: the same major, and for major 0 the same minor; and no older than `built`.
+/// Does the loaded DLL's `m2_version_num()` satisfy a mod built against `built` (`X.Y.Z`)? The rule of
+/// `m2_abi_ok()` (`m2_version.h`): the same major, and no older than `built`. A newer minor or patch keeps
+/// every existing call (the SDK's semver), so it is accepted, at 0.x too.
 pub fn compatible(loaded: i32, built: &str) -> Result<(), String> {
     let parts: Vec<&str> = built.split('.').collect();
     let [ma, mi, pa] = parts[..] else { return Err(format!("m2-sdk version {built:?} is not X.Y.Z")) };
     let n = |s: &str| s.parse::<i32>().ok().filter(|v| (0..100).contains(v)).ok_or_else(|| format!("m2-sdk version {built:?} has a part outside 0-99"));
     let want = version_num(n(ma)?, n(mi)?, n(pa)?);
-    let (lmaj, lmin) = (loaded / 10000, loaded / 100 % 100);
-    let (wmaj, wmin) = (want / 10000, want / 100 % 100);
+    let (lmaj, wmaj) = (loaded / 10000, want / 10000);
     let show = |v: i32| format!("{}.{}.{}", v / 10000, v / 100 % 100, v % 100);
-    if lmaj != wmaj || (wmaj == 0 && lmin != wmin) || loaded < want {
+    if lmaj != wmaj || loaded < want {
         return Err(format!(
-            "m2-sdk.dll in the game folder is version {}, but this mod needs ^{} (built against {}); install the m2-sdk \
-             Shipment version it requires",
+            "m2-sdk.dll in the game folder is version {}, but this mod needs {} or newer within {wmaj}.x (the version \
+             it was built against); install an m2-sdk Shipment version it accepts",
             show(loaded),
-            if wmaj == 0 { format!("0.{wmin}") } else { wmaj.to_string() },
             show(want)
         ));
     }
@@ -229,6 +259,39 @@ mod safe {
     pub fn lua_in_exec() -> bool {
         let depth = unsafe { ffi::m2_lua_in_exec() };
         depth != 0
+    }
+
+    /// Register the debugger's sink (`m2/m2_lua_debug.h`); one per process.
+    ///
+    /// # Safety
+    /// `cb` may be called with `ud` on the game thread, with the debugger's lock held, for the life of the
+    /// process: it only queues the frame and never calls an `m2_lua_debug_*` function.
+    pub unsafe fn lua_debug_set_sink(cb: LuaDebugSink, ud: *mut c_void) -> Result<(), String> {
+        if unsafe { ffi::m2_lua_debug_set_sink(Some(cb), ud) } == 1 {
+            Ok(())
+        } else {
+            Err("m2_lua_debug_set_sink: another module registered the debugger's sink".into())
+        }
+    }
+
+    /// Add a callback the debugger calls on the game thread while it holds it paused.
+    ///
+    /// # Safety
+    /// `cb` may be called with `ud` on the game thread for the life of the process.
+    pub unsafe fn lua_debug_on_paused(cb: LuaDebugPausedCb, ud: *mut c_void) -> Result<(), String> {
+        if unsafe { ffi::m2_lua_debug_on_paused(Some(cb), ud) } == 1 { Ok(()) } else { Err("m2_lua_debug_on_paused failed".into()) }
+    }
+
+    /// Queue a debug request frame from client `conn` for the game thread. `false` when m2-sdk.dll does not
+    /// take it as a debug request.
+    pub fn lua_debug_request(conn: u32, frame: &[u8]) -> bool {
+        let Ok(len) = c_int::try_from(frame.len()) else { return false };
+        unsafe { ffi::m2_lua_debug_request(conn, frame.as_ptr().cast(), len) == 1 }
+    }
+
+    /// Client `conn`'s connection has ended.
+    pub fn lua_debug_disconnected(conn: u32) {
+        unsafe { ffi::m2_lua_debug_disconnected(conn) }
     }
 }
 
@@ -459,6 +522,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_last_error_belongs_to_the_thread_that_recorded_it() {
+        use core::cell::RefCell;
+        use std::ffi::{CStr, CString};
+        thread_local! { static SLOT: RefCell<Option<CString>> = const { RefCell::new(None) }; }
+        static LAST: LastError = LastError::new(&SLOT);
+        assert!(LAST.get().is_null());
+        LAST.set("first\0call");
+        let mine = LAST.get();
+        std::thread::spawn(|| {
+            assert!(LAST.get().is_null(), "another thread's failure is not this thread's");
+            for i in 0..1000 {
+                LAST.set(&format!("other {i}"));
+            }
+            assert_eq!(unsafe { CStr::from_ptr(LAST.get()) }, c"other 999");
+        })
+        .join()
+        .unwrap();
+        assert_eq!(LAST.get(), mine, "the string this thread is reading was not replaced");
+        assert_eq!(unsafe { CStr::from_ptr(mine) }, c"first call");
+    }
+
+    #[test]
     fn the_fake_stack_reads_arguments_and_records_pushes() {
         use super::lua::fake::{FakeLua, Val, s};
         use super::lua::{Lua, TNIL, TSTRING, type_name};
@@ -477,12 +562,14 @@ mod tests {
     }
 
     #[test]
-    fn the_caret_rule_matches_load_requires() {
+    fn a_dll_of_the_same_major_no_older_than_the_build_is_compatible() {
         assert_eq!(compatible(400, "0.4.0"), Ok(()));
         assert_eq!(compatible(409, "0.4.1"), Ok(()));
         assert!(compatible(401, "0.4.2").unwrap_err().contains("version 0.4.1"));
-        assert!(compatible(500, "0.4.0").is_err(), "0.5 is a breaking line under 0.x");
-        assert!(compatible(10000, "0.4.0").is_err());
+        assert_eq!(compatible(600, "0.5.0"), Ok(()), "a newer minor keeps every call, at 0.x too");
+        let e = compatible(500, "0.6.0").unwrap_err();
+        assert!(e.contains("version 0.5.0") && e.contains("needs 0.6.0 or newer within 0.x"), "{e}");
+        assert!(compatible(10000, "0.4.0").is_err(), "another major");
         assert_eq!(compatible(10203, "1.2.0"), Ok(()));
         assert!(compatible(20000, "1.2.0").is_err());
         assert!(compatible(400, "0.4").is_err());

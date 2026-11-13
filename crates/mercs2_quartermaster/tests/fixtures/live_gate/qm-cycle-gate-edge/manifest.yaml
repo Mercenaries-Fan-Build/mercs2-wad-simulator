@@ -1,0 +1,13 @@
+# The second half of the cycle gate (see qm-cycle-gate): one DEPS edge added between two retail scripts
+# already in retail's 84-script cycle cluster. wifpmcinterior does not list mrxshop in its retail DEPS,
+# and mrxshop reaches wifpmcinterior through mrxutil. Run once with qm-cycle-gate alone and once with
+# this beside it; the order of the "[qmcyc] body" markers shows whether the edge reorders retail.
+format: 2
+shipment:
+  name: qm-cycle-gate-edge
+  version: 0.1.0
+  target: retail
+contributions:
+  - kind: patch_lua
+    target: wifpmcinterior
+    append: src/edge.lua

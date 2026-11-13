@@ -26,11 +26,11 @@ directions, so a file can be neither added-but-unexercised nor deleted-but-liste
 | `auto_6A447BF8.profile` | Jen (3) | `PmcCon001` | 3 | the primary target file most single-file assertions use |
 | `auto_634304EA.profile` | Mattias (1) | `OilCon003` | 15 | mid-game |
 | `Mattias Nilsson_63430745.profile` | Mattias (1) | `OilCon001` | 15 | mid-game, named slot |
-| `Mattias Nilsson_6A0E523C.profile` | Mattias (1) | `PmcJob001` | 63 | endgame, upgrade tier 3 |
+| `Mattias Nilsson_6A0E523C.profile` | Mattias (1) | `PmcJob001` | 63 | endgame, costume 3 (the Jacket) |
 | `_______ ________48EFABFB.profile` | Mattias (1) | `PmcJob001` | 63 | endgame; **non-ASCII slot name**, which is why it is here — it exercises the UTF-16LE `save_name` path |
 
 "Flow" is the length of the `SaveState` flow chain (completed contracts). Together these span the
-whole progression, all three heroes, and upgrade tiers 0 and 3, which is what
+whole progression, all three heroes, and costumes 0 and 3, which is what
 `the_set_spans_the_progression_and_flow_chains_grow_with_it` and `every_hero_is_represented` assert.
 
 ### The Chris saves are the pre-open-world state

@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_probe"
-version = "4.0.0"
+version = "5.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — headless WAD diagnostic/export tool. Runs the carved-out diagnostics from mercs2_engine::diag as subcommands (no window)."
 readme = "README.md"
@@ -44,6 +44,9 @@ mercs2_exemap = { workspace = true }
 minidump = "0.27"
 # `splice-emulate` runs a SecuROM splice through the decrypted dump to see what its stolen code does.
 unicorn-engine = "2.1.5"
+# `qm_cycle_gate` links a live gate's Lua with qm's own link and WAD writer, reporting qm's import
+# findings instead of refusing on them; `template_form` prints templates as qm's template form.
+mercs2_quartermaster = { workspace = true }
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;

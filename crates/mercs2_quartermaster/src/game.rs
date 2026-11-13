@@ -449,6 +449,11 @@ impl GameStack {
         })
     }
 
+    /// Whether the BASE WAD alone — `vz.wad` — has a block at `path`, compared case-insensitively.
+    pub fn base_has_path(&self, path: &str) -> bool {
+        self.wads.first().is_some_and(|w| w.archive.paths.iter().any(|p| p.eq_ignore_ascii_case(path)))
+    }
+
     /// The stack as configured, base first. Shown in the UI so "which install was it reading" is
     /// never a mystery.
     pub fn paths(&self) -> Vec<&Path> {

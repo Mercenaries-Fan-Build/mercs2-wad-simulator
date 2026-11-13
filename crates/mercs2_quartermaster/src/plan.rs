@@ -1,7 +1,10 @@
 //! `load-request.json` in, `load-plan.json` out: the machine-readable contract between qm and the
 //! tool that drives it (Modkit).
 //!
-//! This module holds the types of both files and their I/O; [`crate::compat::plan`] fills a plan.
+//! The plan's types are `mercs2_formats::load_plan`'s, re-exported here, so a program that reads a
+//! plan parses the definition qm writes. This
+//! module holds the request's types, the lint and range reports, and the I/O; [`crate::compat::plan`]
+//! fills a plan and `qm link` adds its libraries.
 //!
 //! Two properties every reader relies on:
 //!
@@ -10,16 +13,18 @@
 //! * **Ids, not paths.** A request item is referred to by its `id` everywhere in the plan. No
 //!   request path and no absolute path appears in it, message text included.
 
-use crate::manifest::PlaceIn;
+pub use mercs2_formats::load_plan::{
+    CapabilityRow, ClaimClass, ClaimConflictRow, ClaimantEntry, ConflictRow, ConflictSource,
+    DeclaredConflictRow, DeclaredStatus, EdgeSource, Finding, FindingRef, FindingSeverity,
+    LibraryRow, LoadPlan, PlacedDestination, PlacedFileEntry, PlanEdge, PlanItem, PluginEntry,
+    Producer, RequirementKind, RequirementRow, RequirementStatus, RuntimeDllEntry, Section,
+    SupersededRow, GAME_FOLDER_RELATIVE, PLAN_FILE, PLAN_FORMAT,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// `load-request.json`'s own format number. Unrelated to the manifest format.
 pub const REQUEST_FORMAT: u32 = 1;
-/// `load-plan.json`'s own format number. Unrelated to the manifest format.
-pub const PLAN_FORMAT: u32 = 2;
-/// The plan's file name inside `--out`.
-pub const PLAN_FILE: &str = "load-plan.json";
 /// The longest request id, in UTF-8 bytes.
 pub const MAX_ID_BYTES: usize = 256;
 
@@ -154,317 +159,6 @@ fn check_ids(items: &[RequestItem]) -> Result<(), RequestError> {
     Ok(())
 }
 
-/// Which command wrote the plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Producer {
-    Preflight,
-    Link,
-}
-
-/// `load-plan.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LoadPlan {
-    pub format: u32,
-    pub producer: Producer,
-    /// The qm that wrote it (`CARGO_PKG_VERSION`).
-    pub quartermaster: String,
-    /// `true` exactly when no finding has severity `error`.
-    pub ok: bool,
-    /// Request ids in load order. `None` exactly when a `requires` cycle (M0174) exists.
-    pub order: Option<Vec<String>>,
-    pub items: Vec<PlanItem>,
-    pub edges: Vec<PlanEdge>,
-    pub requirements: Vec<RequirementRow>,
-    pub capabilities: Vec<CapabilityRow>,
-    pub conflicts: Vec<ConflictRow>,
-    pub supersedes: Vec<SupersededRow>,
-    /// The PTHS path of every block `qm link` re-emits: the `vz.wad` scripts blocks, the `shell.wad`
-    /// scripts block (`blocks\Shell\resident_P000_Q3.block`), then each merged string table's
-    /// block, then each merged sound bank's block, then — when any Shipment has an `add_fx` or a
-    /// `replace_fx` — the effects block. A deploy step drops the per-Shipment copies of exactly
-    /// these.
-    pub link_block_paths: Vec<String>,
-    /// Every game data file `qm link` emits for the set (`data/shader3.bin`, `data/shader3Low.bin`):
-    /// both stores when any Shipment has a shader kind. A deploy step drops the per-Shipment
-    /// `data_file` placements of exactly these and deploys link's.
-    pub link_file_paths: Vec<crate::shader::DataFile>,
-    pub findings: Vec<Finding>,
-}
-
-/// One request item, in request order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PlanItem {
-    pub id: String,
-    /// 0-based index in the request.
-    pub requested: usize,
-    /// Index in `order`; `None` exactly when `order` is.
-    pub resolved: Option<usize>,
-    /// Index into `edges` of the edge that last delayed this item, when an item with a larger
-    /// request index loaded before it.
-    pub held_back_by: Option<usize>,
-    pub name: String,
-    pub version: String,
-    pub manifest_format: u32,
-    pub quartermaster_range: Option<String>,
-    pub provides: Vec<String>,
-    pub plugins: Vec<PluginEntry>,
-    pub runtime_dlls: Vec<RuntimeDllEntry>,
-    pub placed_files: Vec<PlacedFileEntry>,
-    /// The game data files this Shipment's contributions edit: both shader stores when it has a
-    /// shader kind. Its build reads their originals from `--original-data`.
-    pub data_files: Vec<crate::shader::DataFile>,
-}
-
-/// One `native_hook` that ships a plugin.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PluginEntry {
-    pub contribution: usize,
-    pub file_name: String,
-    /// `src/`-relative, forward slashes.
-    pub source: String,
-    /// `scripts/<file_name>`.
-    pub relative: String,
-    /// Lowercase hex.
-    pub sha256: String,
-    /// The exe addresses this plugin patches (`0xHHHHHHHH`), carried from the manifest's `touches`
-    /// so a loader knows what it hooks without disassembling the plugin. Empty when none declared.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub touches: Vec<String>,
-    /// Expected prologue bytes per hooked address (`touches` address → space-separated hex), so the
-    /// plugin can verify the exe has not shifted under it before patching, and M0199 can check the
-    /// declaration against a known build. Empty when the author declared no guards.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub signature_guard: std::collections::BTreeMap<String, String>,
-}
-
-/// One runtime DLL placed in the game root.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RuntimeDllEntry {
-    pub contribution: usize,
-    pub file_name: String,
-    pub source: String,
-    pub relative: String,
-    pub sha256: String,
-}
-
-/// Where a placed file goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlacedDestination {
-    GameFolder,
-    DataWad,
-}
-
-/// One `place_file`, or one WAD of an `add_language` or `add_level`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PlacedFileEntry {
-    pub contribution: usize,
-    pub file_name: String,
-    /// `src/`-relative; `None` for `add_language` and `add_level`, which generate their WADs.
-    pub source: Option<String>,
-    pub destination: PlacedDestination,
-    /// `None` for `data_wad`.
-    pub dest: Option<PlaceIn>,
-    pub relative: String,
-}
-
-/// What produced an edge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EdgeSource {
-    Requires,
-    Capability,
-}
-
-/// One ordering edge: `first` (the provider) loads before `then` (the consumer, which declared it).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PlanEdge {
-    pub first: String,
-    pub then: String,
-    pub source: EdgeSource,
-    /// Index into `requirements`.
-    pub requirement: usize,
-}
-
-/// The kind of a `load.requires` entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequirementKind {
-    Shipment,
-    Capability,
-}
-
-/// How a requirement resolved against the set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RequirementStatus {
-    Satisfied,
-    Missing,
-    VersionUnsatisfied,
-    /// More than one item carries the name (M0203).
-    Ambiguous,
-}
-
-/// One `load.requires` entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RequirementRow {
-    pub consumer: String,
-    /// Position in the consumer's `load.requires`.
-    pub index: usize,
-    pub kind: RequirementKind,
-    /// A Shipment name or a capability token.
-    pub target: String,
-    /// `None` for a bare name and for a capability.
-    pub range: Option<String>,
-    pub providers: Vec<String>,
-    /// Set when a Shipment requirement has exactly one provider.
-    pub resolved_version: Option<String>,
-    pub status: RequirementStatus,
-}
-
-/// One capability token some item requires.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct CapabilityRow {
-    pub capability: String,
-    pub consumers: Vec<String>,
-    pub providers: Vec<String>,
-}
-
-/// Where a conflict row came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConflictSource {
-    Declared,
-    Claims,
-}
-
-/// A declared conflict's outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeclaredStatus {
-    Conflict,
-    OutsideRange,
-    NotInstalled,
-}
-
-/// The merge class of a claim-graph conflict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaimClass {
-    Exclusive,
-    KeyedSet,
-}
-
-/// One conflict row: a `load.conflicts` entry, or a claim-graph collision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
-pub enum ConflictRow {
-    Declared(DeclaredConflictRow),
-    Claims(ClaimConflictRow),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DeclaredConflictRow {
-    /// Always [`ConflictSource::Declared`].
-    pub source: ConflictSource,
-    pub declarer: String,
-    /// Position in the declarer's `load.conflicts`.
-    pub index: usize,
-    pub named: String,
-    pub range: Option<String>,
-    pub installed: Vec<String>,
-    pub status: DeclaredStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ClaimConflictRow {
-    /// Always [`ConflictSource::Claims`].
-    pub source: ConflictSource,
-    pub claim: String,
-    pub class: ClaimClass,
-    pub claimants: Vec<ClaimantEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ClaimantEntry {
-    pub item: String,
-    pub contribution: usize,
-    pub kind: String,
-}
-
-/// One top-level `supersedes` entry and whether the file is present.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SupersededRow {
-    pub declared_by: String,
-    pub index: usize,
-    pub dest: PlaceIn,
-    pub file: String,
-    pub relative: String,
-    pub present: bool,
-}
-
-/// A finding's severity.
-///
-/// A load plan and a range report use only `warning` and `error`. `lint-report.json` uses all four,
-/// because it carries lint's own levels ([`crate::lint::Severity`]); it is one finding shape, not
-/// three.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FindingSeverity {
-    Info,
-    Warning,
-    Error,
-    Hang,
-}
-
-impl FindingSeverity {
-    /// The wire spelling, for text output.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FindingSeverity::Info => "info",
-            FindingSeverity::Warning => "warning",
-            FindingSeverity::Error => "error",
-            FindingSeverity::Hang => "hang",
-        }
-    }
-}
-
-/// The section a finding points into. The first five are load-plan sections; `contributions` is the
-/// manifest's list (`lint-report.json` only) and `ranges` the command's arguments
-/// (`range-report.json` only).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Section {
-    Items,
-    Edges,
-    Requirements,
-    Conflicts,
-    Supersedes,
-    Contributions,
-    Ranges,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FindingRef {
-    pub section: Section,
-    pub index: usize,
-}
-
-/// The one list of problems.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Finding {
-    pub code: &'static str,
-    pub severity: FindingSeverity,
-    /// Never contains an absolute path.
-    pub message: String,
-    pub items: Vec<String>,
-    pub refs: Vec<FindingRef>,
-    /// Exact replacement text when the fix is mechanical. Only `lint` fills it; a plan and a range
-    /// report always write `null`.
-    pub fix: Option<String>,
-}
-
 /// The `format` of `lint-report.json` and `range-report.json`. Unrelated to the manifest format.
 pub const REPORT_FORMAT: u32 = 1;
 
@@ -498,7 +192,7 @@ pub struct RangeReport {
 /// index (`requested_of`), stable otherwise.
 pub fn sort_findings(findings: &mut [Finding], requested_of: impl Fn(&str) -> Option<usize>) {
     findings.sort_by(|a, b| {
-        a.code.cmp(b.code).then_with(|| {
+        a.code.cmp(&b.code).then_with(|| {
             let fa = a.items.first().and_then(|i| requested_of(i));
             let fb = b.items.first().and_then(|i| requested_of(i));
             fa.cmp(&fb)
@@ -506,10 +200,12 @@ pub fn sort_findings(findings: &mut [Finding], requested_of: impl Fn(&str) -> Op
     });
 }
 
-/// Delete `<out>/load-plan.json` if it exists, so a failed run never leaves a stale plan that reads
-/// as this run's.
+/// Delete `<out>/load-plan.json` and the game-folder copy `qm link` writes beside it
+/// (`<out>/scripts/load-plan.json`) if they exist, so a failed run never leaves a stale plan that
+/// reads as this run's.
 pub fn remove_stale(out: &Path) -> Result<(), String> {
-    remove_stale_file(&out.join(PLAN_FILE))
+    remove_stale_file(&out.join(PLAN_FILE))?;
+    remove_stale_file(&out.join(GAME_FOLDER_RELATIVE))
 }
 
 /// Delete `path` if it exists. Used before a report is produced, so a run that cannot write one
