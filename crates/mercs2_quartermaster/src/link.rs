@@ -835,7 +835,10 @@ fn sound_subscriptions(load: &str, unload: &str, regs: &[&SoundBankRegistration]
     for r in &streams {
         let SoundLoad::Stream { folder } = &r.load else { unreachable!("filtered on streams") };
         let key = lua_string(&format!("{}.pws", r.bank));
-        let calls = format!("    Sound.OpenStreamFile({}, {key})\n", stream_path(r, folder));
+        let calls = format!(
+            "    Sound.OpenStreamFile({path}, {key})\n    print(\"[qm] sound: stream \" .. {key} .. \" opened from \" .. {path})\n",
+            path = stream_path(r, folder)
+        );
         out.push_str(&subscribe(&load, &key, "not ", &calls, "true", &lua_string(&r.shipment)));
     }
     for r in &banks {
@@ -864,7 +867,10 @@ fn sound_subscriptions(load: &str, unload: &str, regs: &[&SoundBankRegistration]
     for r in &streams {
         let SoundLoad::Stream { folder } = &r.load else { unreachable!("filtered on streams") };
         let key = lua_string(&format!("{}.pws", r.bank));
-        let calls = format!("    Sound.CloseStreamFile({}, {key})\n", stream_path(r, folder));
+        let calls = format!(
+            "    Sound.CloseStreamFile({path}, {key})\n    print(\"[qm] sound: stream \" .. {key} .. \" closed\")\n",
+            path = stream_path(r, folder)
+        );
         out.push_str(&subscribe(&unload, &key, "", &calls, "nil", &lua_string(&r.shipment)));
     }
     out
