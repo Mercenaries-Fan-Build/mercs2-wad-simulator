@@ -763,13 +763,28 @@ pub struct SupportRegistration {
 pub struct SoundBankRegistration {
     /// Which Shipment asked for it — the tie-break for the deterministic bake order.
     pub shipment: String,
-    /// The bank name `MrxSoundBanks` is given.
+    /// The bank name `MrxSoundBanks` is given; for a stream, the stream's name without `.pws`.
     pub bank: String,
-    /// Whether the soundbank is loaded as well as the wavebank.
-    pub soundbank: bool,
+    /// What the loader loads under that name.
+    pub load: SoundLoad,
     /// The sessions whose loader loads it: the gameplay loader ([`qm_modloader_source`]) and the
     /// front end's ([`qm_shell_modloader_source`]).
     pub sessions: BTreeSet<crate::manifest::LoadSession>,
+}
+
+/// What a [`SoundBankRegistration`] has its loader load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SoundLoad {
+    /// A bank qm ships: its wavebank, and its soundbank as well when `soundbank` (an `add_sound` bank).
+    Shipped { soundbank: bool },
+    /// The soundbank of a bank qm does not ship: the game's, or a level asset's (`load_sound`).
+    SoundBank,
+    /// The wavebank of a bank qm does not ship (`load_sound`).
+    WaveBank,
+    /// A stream file (`load_sound`), opened before any bank of the session loads, as retail opens its
+    /// own (`mrxsoundbanks.lua:89-108`): `<folder>\<audio dir>\<localized name>.pws`, under the alias
+    /// `<name>.pws`, and closed after the session's banks unload.
+    Stream { folder: String },
 }
 
 /// The registrations of `regs` that `session`'s loader loads, in load `order`, then by bank name.
@@ -796,24 +811,61 @@ fn session_sounds<'a>(
 /// failure: `_FlagAssetOpComplete` takes no argument (`mrxsoundbanks.lua:141-152`) and the engine's
 /// callback carries no flag (`audio_code_map.md` §11.2), so a bank's presence is checked at build time
 /// ([`crate::sound::check_loader_banks`]).
+///
+/// A stream ([`SoundLoad::Stream`]) is opened before every bank and closed after every bank unloads, as
+/// retail opens its streams before it loads a bank (`mrxsoundbanks.lua:110-111`): its handlers are
+/// subscribed first for the load and last for the unload. The path is the one the DLC opens its own
+/// streams by (`dlctest01_soundbootstrap.lua:186-193`), with the folder in place of
+/// `Net.DLCGetMountPoint()`, the name localized by retail's `MrxSoundBanks._GetLocalizedName`.
 fn sound_subscriptions(load: &str, unload: &str, regs: &[&SoundBankRegistration]) -> String {
+    let (load, unload) = (lua_string(load), lua_string(unload));
+    let subscribe = |hook: &str, key: &str, test: &str, calls: &str, mark: &str, owner: &str| {
+        format!("QM.on({hook}, function()\n  if {test}QM.sounds[{key}] then\n{calls}    QM.sounds[{key}] = {mark}\n  end\nend, {owner})\n")
+    };
+    let streams: Vec<&&SoundBankRegistration> = regs.iter().filter(|r| matches!(r.load, SoundLoad::Stream { .. })).collect();
+    let banks: Vec<&&SoundBankRegistration> = regs.iter().filter(|r| !matches!(r.load, SoundLoad::Stream { .. })).collect();
+    let stream_path = |r: &SoundBankRegistration, folder: &str| {
+        format!(
+            "{} .. \"\\\\\" .. string.upper(Sound.GetAudioDir()) .. \"\\\\\" .. string.upper(MrxSoundBanks._GetLocalizedName({})) .. \".PWS\"",
+            lua_string(folder),
+            lua_string(&r.bank)
+        )
+    };
     let mut out = String::new();
-    for r in regs {
+    for r in &streams {
+        let SoundLoad::Stream { folder } = &r.load else { unreachable!("filtered on streams") };
+        let key = lua_string(&format!("{}.pws", r.bank));
+        let calls = format!("    Sound.OpenStreamFile({}, {key})\n", stream_path(r, folder));
+        out.push_str(&subscribe(&load, &key, "not ", &calls, "true", &lua_string(&r.shipment)));
+    }
+    for r in &banks {
         let n = lua_string(&r.bank);
-        let owner = lua_string(&r.shipment);
-        let (sb_load, sb_unload) = if r.soundbank {
-            (format!("    MrxSoundBanks.LoadSoundBank({n})\n"), format!("    MrxSoundBanks.UnloadSoundBank({n})\n"))
-        } else {
-            (String::new(), String::new())
+        let (key, on, off) = match &r.load {
+            SoundLoad::Shipped { soundbank } => {
+                let sb = |verb: &str| if *soundbank { format!("    MrxSoundBanks.{verb}SoundBank({n})\n") } else { String::new() };
+                (n.clone(), format!("    MrxSoundBanks.LoadWaveBank({n})\n{}", sb("Load")), format!("    MrxSoundBanks.UnloadWaveBank({n})\n{}", sb("Unload")))
+            }
+            SoundLoad::SoundBank => (
+                lua_string(&format!("soundbank {}", r.bank)),
+                format!("    MrxSoundBanks.LoadSoundBank({n})\n"),
+                format!("    MrxSoundBanks.UnloadSoundBank({n})\n"),
+            ),
+            SoundLoad::WaveBank => (
+                lua_string(&format!("wavebank {}", r.bank)),
+                format!("    MrxSoundBanks.LoadWaveBank({n})\n"),
+                format!("    MrxSoundBanks.UnloadWaveBank({n})\n"),
+            ),
+            SoundLoad::Stream { .. } => unreachable!("filtered out"),
         };
-        out.push_str(&format!(
-            "QM.on({load}, function()\n  if not QM.sounds[{n}] then\n    MrxSoundBanks.LoadWaveBank({n})\n{sb_load}    \
-             QM.sounds[{n}] = true\n  end\nend, {owner})\n\
-             QM.on({unload}, function()\n  if QM.sounds[{n}] then\n    MrxSoundBanks.UnloadWaveBank({n})\n{sb_unload}    \
-             QM.sounds[{n}] = nil\n  end\nend, {owner})\n",
-            load = lua_string(load),
-            unload = lua_string(unload),
-        ));
+        let owner = lua_string(&r.shipment);
+        out.push_str(&subscribe(&load, &key, "not ", &on, "true", &owner));
+        out.push_str(&subscribe(&unload, &key, "", &off, "nil", &owner));
+    }
+    for r in &streams {
+        let SoundLoad::Stream { folder } = &r.load else { unreachable!("filtered on streams") };
+        let key = lua_string(&format!("{}.pws", r.bank));
+        let calls = format!("    Sound.CloseStreamFile({}, {key})\n", stream_path(r, folder));
+        out.push_str(&subscribe(&unload, &key, "", &calls, "nil", &lua_string(&r.shipment)));
     }
     out
 }
@@ -1259,6 +1311,9 @@ fn link_outfits(
     };
     on_block(blocks, WARDROBE_SCRIPT, &tails.wardrobe)?;
     on_block(blocks, PLAYER_SCRIPT, &tails.player)?;
+    if let Some(briefing) = &tails.briefing {
+        on_block(blocks, crate::outfits::BRIEFING_SCRIPT, briefing)?;
+    }
     match master {
         Some(master) => {
             splice_tail(master, 0, &tails.master)?;
@@ -2097,7 +2152,7 @@ mod tests {
         SoundBankRegistration {
             shipment: shipment.into(),
             bank: bank.into(),
-            soundbank,
+            load: SoundLoad::Shipped { soundbank },
             sessions: sessions.iter().copied().collect(),
         }
     }
@@ -2107,6 +2162,38 @@ mod tests {
     }
 
     use crate::manifest::LoadSession;
+
+    /// A `load_sound`: the stream opens before any bank loads, from its level's folder by the DLC's own
+    /// path, and closes after every bank unloads; the soundbank and the wavebank load alone, each by its
+    /// own name, and unload with their mirrors.
+    #[test]
+    fn a_load_sound_opens_its_stream_first_and_closes_it_last() {
+        let load = |bank: &str, load: SoundLoad| SoundBankRegistration {
+            shipment: "biua".into(),
+            bank: bank.into(),
+            load,
+            sessions: [LoadSession::Gameplay].into(),
+        };
+        let regs = [
+            load("vo_resident_DLCTest", SoundLoad::SoundBank),
+            load("vo_stream_DLCTest", SoundLoad::WaveBank),
+            load("vo_stream_DLCTest", SoundLoad::Stream { folder: "DLC\\dlc01".into() }),
+            sound("a-mod", "a_sounds", true),
+        ];
+        let src = qm_modloader_source(&[], &[], &[], &regs, &names(&["biua", "a-mod"])).unwrap();
+        let at = |needle: &str| src.find(needle).unwrap_or_else(|| panic!("{needle} missing: {src}"));
+        let open = at("Sound.OpenStreamFile(\"DLC\\\\dlc01\" .. \"\\\\\" .. string.upper(Sound.GetAudioDir()) .. \"\\\\\" .. \
+                       string.upper(MrxSoundBanks._GetLocalizedName(\"vo_stream_DLCTest\")) .. \".PWS\", \"vo_stream_DLCTest.pws\")");
+        let close = at("Sound.CloseStreamFile(");
+        assert!(open < at("MrxSoundBanks.LoadWaveBank(\"vo_stream_DLCTest\")") && open < at("LoadWaveBank(\"a_sounds\")"), "{src}");
+        assert!(close > at("UnloadSoundBank(\"vo_resident_DLCTest\")") && close > at("UnloadWaveBank(\"a_sounds\")"), "{src}");
+        assert!(!src.contains("LoadSoundBank(\"vo_stream_DLCTest\")") && !src.contains("LoadWaveBank(\"vo_resident_DLCTest\")"), "{src}");
+        assert!(src.contains("QM.sounds[\"soundbank vo_resident_DLCTest\"]") && src.contains("QM.sounds[\"vo_stream_DLCTest.pws\"]"), "{src}");
+        assert_eq!((src.matches("OpenStreamFile(").count(), src.matches("CloseStreamFile(").count()), (1, 1));
+        if let Err(e) = mercs2_luac::compile(&src, "qm_modloader") {
+            panic!("the loader does not compile: {e}\n{src}");
+        }
+    }
 
     /// The gameplay loader loads each bank at `world.begin` as the retail load calls (the wavebank,
     /// then, for an added bank, its soundbank) in load order then bank name, whatever order the
