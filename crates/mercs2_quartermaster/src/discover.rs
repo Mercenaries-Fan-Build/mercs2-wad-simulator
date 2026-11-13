@@ -316,6 +316,8 @@ impl Contribution {
                 }
             }
             Contribution::ReplaceSoundCue { cue, .. } => out.push(("cue.wave", cue.wave.as_path())),
+            // Names of sound the game or an `add_level` of the Shipment ships: no file of its own.
+            Contribution::LoadSound { .. } => {}
             Contribution::ReplaceSoundWave { wave, .. } => out.push(("wave", wave.as_path())),
             Contribution::AddMovie { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::AddUi { movie, .. } => out.push(("movie", movie.as_path())),
