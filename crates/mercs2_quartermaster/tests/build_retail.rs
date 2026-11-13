@@ -1021,8 +1021,14 @@ fn a_universal_chatter_outfit_links_with_the_heroes_own_sets() {
         "  - kind: add_outfit\n    name: pmc_hum_obama\n    slug: Obama\n    display: Obama\n\
          \x20   wearer: [chris, jen, mattias]\n    chatter: Obama_Obama01\n",
     );
-    let ids = arg_ids(1);
-    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &root.join("out"), None).expect("links");
+    // The game does not register Human.SetChatterSet (M0264): a Shipment adds it.
+    let binding = common::build::named_shipment(
+        &root.join("b"),
+        "chatter-binding",
+        "  - kind: native_hook\n    target: retail\n    symbol: chatter\n    touches: [\"Human.SetChatterSet\"]\n",
+    );
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&binding, &s], &ids), &mut game, &corpus, &root.join("out"), None).expect("links");
     let bytes = std::fs::read(report.wad.expect("a link WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
     let chunk = |block: &str, script: &str| -> Vec<u8> {
@@ -1038,6 +1044,95 @@ fn a_universal_chatter_outfit_links_with_the_heroes_own_sets() {
     }
     let player = chunk("resident", "mrxplayer");
     assert!(has(&player, "Obama_Obama01") && has(&player, "[qm] outfit chatter: player "), "the join applies the set");
+}
+
+/// A `level: vz` row in a block `vz.wad` already has (the resident block) cannot ship in a block of its
+/// own: a standalone build leaves it to `qm link`, and the deploy link adds it to its own copy of that
+/// block, with a row shaped like the block's own rows of its type. The container is retail's
+/// `Mattias_Peter01` chatter set's bytes under the name `Obama_Obama01`, which vz.wad lacks.
+#[test]
+fn a_level_vz_row_in_the_resident_block_joins_the_link_s_copy() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("vz_join");
+    let (chatter_hash, chatter_id) = mercs2_formats::types::type_by_name("chatter").expect("the chatter type");
+    let bytes = game
+        .container_for_asset(mercs2_formats::hash::pandemic_hash_m2("Mattias_Peter01"), chatter_hash, chatter_id)
+        .expect("retail's Mattias_Peter01 chatter set");
+    let dir = root.join("s");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/chatter.ucfx"), &bytes).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: level_asset\n    level: vz\n    type: chatter\n    name: Obama_Obama01\n    rungs:\n\
+         \x20     - { block: resident_P000_Q3, file: src/chatter.ucfx }\n",
+    );
+    let obama = mercs2_formats::hash::pandemic_hash_m2("Obama_Obama01");
+
+    let solo = build::build(&s, Some(&mut game), None, Some(&root.join("solo")), Some(&corpus), None).expect("builds");
+    let log = solo.log.join("\n");
+    assert!(log.contains("Obama_Obama01 (chatter) in blocks\\VZ\\resident_P000_Q3.block is vz.wad's block, so it ships only through `qm link`"), "{log}");
+    if let Some(wad) = &solo.wad {
+        let contents = mercs2_formats::patch_wad::read_patch_wad(&std::fs::read(wad).unwrap()).unwrap();
+        assert!(!contents.blocks.iter().any(|b| b.aset_entries.iter().any(|e| e.asset_hash == obama)), "the standalone overlay carries no copy");
+    }
+
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &root.join("link"), None).expect("links");
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&std::fs::read(report.wad.expect("a link WAD")).unwrap()).unwrap();
+    let resident = contents.blocks.iter().find(|b| b.path_string.contains("resident_P000_Q3")).expect("the link's resident block");
+    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&mercs2_formats::sges::decompress_sges(&resident.compressed_data).unwrap()).unwrap();
+    let entry = parsed.entries.iter().find(|e| e.name_hash == obama).expect("the joined container");
+    assert_eq!((entry.type_hash, entry.bytes.as_slice()), (chatter_hash, bytes.as_slice()));
+    let rows: Vec<_> = resident.aset_entries.iter().filter(|e| e.asset_hash == obama).collect();
+    assert_eq!(rows.len(), 1, "one row for the joined container");
+    assert_eq!(rows[0].u32_3, chatter_id, "a chatter row");
+    let peter = resident.aset_entries.iter().find(|e| e.asset_hash == mercs2_formats::hash::pandemic_hash_m2("Mattias_Peter01")).expect("retail's row");
+    assert_eq!((rows[0].u32_1, rows[0].u32_2), (peter.u32_1, peter.u32_2), "shaped like the block's own chatter rows");
+}
+
+/// A `load_sound` bank resolves against the game: a `vo_` soundbank in every installed language's WAD
+/// (`vo_mattias.<language>`), a plain wavebank in `vz.wad` (`ui_hud`). Names nothing holds are M0223,
+/// a `vo_` one once per installed language.
+#[test]
+fn a_load_sound_bank_resolves_against_the_game_and_each_installed_language() {
+    let mut game = retail_game();
+    let root = scratch("load_sound_m0223");
+    let m0223 = |game: &mut mercs2_quartermaster::GameStack, s: &discover::LoadedShipment| -> Vec<String> {
+        mercs2_quartermaster::lint::game_checks(&s.manifest, game)
+            .into_iter()
+            .filter(|d| d.rule.code == "M0223")
+            .map(|d| d.message)
+            .collect()
+    };
+    let ok = shipment(&root.join("ok"), "  - kind: load_sound\n    soundbank: vo_mattias\n    wavebank: ui_hud\n    in: [gameplay]\n");
+    assert_eq!(m0223(&mut game, &ok), Vec::<String>::new());
+    let bad = shipment(&root.join("bad"), "  - kind: load_sound\n    soundbank: vo_qm_nothing\n    wavebank: qm_nothing\n    in: [gameplay]\n");
+    let found = m0223(&mut game, &bad);
+    assert!(found.iter().any(|m| m.contains("wavebank \"qm_nothing\": neither the game nor")), "{found:?}");
+    assert!(found.iter().any(|m| m.contains("no \"vo_qm_nothing.english\" soundbank")), "{found:?}");
+    let languages = found.iter().filter(|m| m.contains("vo_qm_nothing.")).count();
+    assert!(languages >= 1 && languages <= mercs2_quartermaster::manifest::Language::ALL.len(), "{found:?}");
+}
+
+/// A `level: vz` streamed wavebank plays only from its stream, so the build refuses one no `load_sound`
+/// of the Shipment opens a stream for. The wavebank is the DLC's English voice wavebank
+/// (`vo_stream_DLCTest.english`, from the BIUA Shipment), streamed from `vo_stream_dlctest.english.pws`.
+#[test]
+fn a_level_vz_streamed_wavebank_needs_a_load_sound_stream() {
+    let mut game = retail_game();
+    let biua = mercs2_formats::game_paths::local_config_biua_shipment_dir(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| panic!("{e}"));
+    let wave = std::fs::read(biua.join("src/level/wavebank/0xCBF5F673.0.ucfx")).expect("the BIUA Shipment's English voice wavebank");
+    let dir = scratch("vz_streamed").join("s");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/w.ucfx"), &wave).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: level_asset\n    level: vz\n    type: wavebank\n    name: vo_stream_DLCTest.english\n    rungs:\n\
+         \x20     - { block: qm_test_vo_stream_P000_Q3, file: src/w.ucfx }\n",
+    );
+    let e = build::build(&s, Some(&mut game), None, Some(&dir.join("_out")), None, None).unwrap_err().to_string();
+    assert!(e.contains("streamed wavebank 0xCBF5F673 plays from a stream, and no load_sound of the Shipment opens one for it"), "{e}");
 }
 
 /// The request order is the tie-break: with no `requires` between two Shipments, reversing the
