@@ -24,9 +24,8 @@
 //! Run `--list-blocks` to dump the block table without converting anything;
 //! `--start-block` / `--max-blocks` narrow the converted range while iterating.
 //!
-//! `--java <path>` and `--unluac <path>` (both required) name the java executable and the
-//! unluac jar that convert the DLC's Lua bytecode. `--x360-rar` also needs the RAR extractor
-//! named explicitly: exactly one of `--unrar <path>` or `--bsdtar <path>`.
+//! `--x360-rar` needs the RAR extractor named explicitly: exactly one of `--unrar <path>` or
+//! `--bsdtar <path>`.
 //!
 //! `--xbox-doh-oracle <path>` opts into the Xbox-DOH side-oracle resolution for
 //! PS3 blocks the UCFX descriptor walker refuses with the `PS3 compact decl
@@ -59,7 +58,6 @@ use mercs2_formats::be_to_le::audio::StreamTable;
 use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
 use ucfx_byteswap::convert::{convert_block, QUIET};
 use ucfx_byteswap::ecs::ComponentSchemas;
-use ucfx_byteswap::lua::LuaTools;
 
 use dlc_port::components;
 use dlc_port::xbox_doh_oracle::{is_ps3_compact_decl_rejection, primary_name_hash_be, XboxDohOracle};
@@ -77,12 +75,6 @@ struct Cli {
     /// bsdtar that extracts --x360-rar
     #[arg(long, value_name = "BSDTAR_PATH")]
     bsdtar: Option<PathBuf>,
-    /// java executable that runs unluac to convert the DLC's Lua bytecode
-    #[arg(long, value_name = "JAVA_PATH")]
-    java: PathBuf,
-    /// unluac jar that converts the DLC's Lua bytecode
-    #[arg(long, value_name = "UNLUAC_JAR")]
-    unluac: PathBuf,
     /// The player's PC vz.wad, whose `schm` chunks lay out the DLC's compact ECS containers
     #[arg(long, value_name = "VZ_WAD")]
     vz_wad: PathBuf,
@@ -150,7 +142,6 @@ enum BlockDecode {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    let lua_tools = LuaTools { java: cli.java.clone(), unluac: cli.unluac.clone() };
     println!("Reading class layouts from {}...", cli.vz_wad.display());
     let schemas = ComponentSchemas::from_vz_wad(&cli.vz_wad)?;
     println!("  {} classes", schemas.len());
@@ -188,7 +179,7 @@ fn run() -> Result<(), String> {
     let xbox_doh_oracle: Option<XboxDohOracle> = match &cli.xbox_doh_oracle {
         Some(p) if cli.shipment.is_none() => {
             println!("Step 1b: Loading Xbox-DOH side oracle from {}...", p.display());
-            Some(XboxDohOracle::load(p, &lua_tools, &schemas, &base_textures)?)
+            Some(XboxDohOracle::load(p, &schemas, &base_textures)?)
         }
         _ => None,
     };
@@ -225,7 +216,7 @@ fn run() -> Result<(), String> {
         let streams = StreamTable::read(num_blocks, |i| read_be_block(&doh, &indx[i]), &package_files)?;
         QUIET.store(true, Ordering::Relaxed);
         let source = components::Archive { doh: &doh, indx: &indx, paths: &pths, textures: &textures, streams: Some(&streams) };
-        let mut converted = components::convert(&source, &lua_tools, &schemas, |_, _| true)?;
+        let mut converted = components::convert(&source, &schemas, |_, _| true)?;
         println!("  {} chunks converted, {} assets refused", converted.chunks.len(), converted.refused.len());
         let mut kinds = std::collections::BTreeMap::new();
         for (_, ty) in &converted.refused {
@@ -244,7 +235,7 @@ fn run() -> Result<(), String> {
             let x_textures = TextureTable::from_doh(&xbox, &x_indx, &x_pths, &base_textures)?;
             let x = components::Archive { doh: &xbox, indx: &x_indx, paths: &x_pths, textures: &x_textures, streams: None };
             let refused = converted.refused.clone();
-            let donor = components::convert(&x, &lua_tools, &schemas, |n, t| refused.contains(&(n, t)))?;
+            let donor = components::convert(&x, &schemas, |n, t| refused.contains(&(n, t)))?;
             println!("  {} chunks of those assets from {}", donor.chunks.len(), second.display());
             components::substitute(&mut converted.chunks, &refused, donor.chunks)?;
         }
@@ -300,7 +291,7 @@ fn run() -> Result<(), String> {
         // fails the whole run — no silent fallback — so the output WAD is
         // either 100 % resolved or does not exist.
         let block_textures = BlockTables { textures: &textures, rung: rung_of_path(&path), streams: Some(&streams) };
-        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas), Some(block_textures)) {
+        let decode = match convert_block(&decompressed, false, None, Some(&schemas), Some(block_textures)) {
             Ok(s) => BlockDecode::Ps3Direct(s),
             Err(err) => {
                 if is_ps3_compact_decl_rejection(&err) {
@@ -343,8 +334,8 @@ fn run() -> Result<(), String> {
                         }
                     }
                 } else {
-                    // A non-PS3-compact-decl rejection (wavebank schema, unluac,
-                    // truncated UCFX…) is shared between PS3 and Xbox DOH inputs
+                    // A non-PS3-compact-decl rejection (wavebank schema, a Lua chunk
+                    // that does not decode, truncated UCFX…) is shared between PS3 and Xbox DOH inputs
                     // on the DLC01 corpus and is out of scope for the oracle.
                     // Keep the historical skip path for parity with pre-change.
                     skips.push(format!("[{blk_idx}] {path}: {err}"));
