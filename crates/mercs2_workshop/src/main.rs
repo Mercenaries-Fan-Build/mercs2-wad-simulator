@@ -46,7 +46,7 @@
 //! - [`app`]     — the window: winit loop over the engine `Scene`, the rail and its pages, the
 //!                 Retarget / Fit benches, the OBJ/PNG exporter.
 //! - [`bundle`]  — the lossless export bundle; nothing is discarded (raw rung bytes survive).
-//! - [`gui`]     — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
+//! - [`gui`]     — egui host: hand-rolled winit → egui bridge + the egui-wgpu paint path.
 //! - [`import`]  — foreign model import (`.obj`/`.gltf`/`.glb`) into the engine's `ModelData`.
 //! - [`fetch`]   — download + install the released reference bundle (`workshop_data`), automatically
 //!                 when none is found and from the Settings page on request.
