@@ -23,10 +23,11 @@ use mercs2_core::frame::{LayerStack, LayerTransition, LAYER_GAME};
 use mercs2_core::glam::Mat4;
 use mercs2_core::glam::Vec3;
 use mercs2_core::{Time, World};
-use winit::event::{DeviceEvent, ElementState, Event, KeyEvent, MouseButton, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::application::ApplicationHandler;
+use winit::event::{DeviceEvent, DeviceId, ElementState, Event, KeyEvent, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowBuilder};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::input::{Bindings, Gamepad, Input};
 use crate::render::LoadProgress;
@@ -208,11 +209,75 @@ impl FpsMeter {
     }
 }
 
+/// A winit [`ApplicationHandler`] over one event closure, for [`EventLoop::run_app`]. winit 0.30 opens
+/// windows only on the running loop, so `start` runs at the first `resumed`: it opens the window, builds
+/// everything that needs it, and returns the closure every later window event, device event and
+/// `AboutToWait` is handed to as an [`Event`]. Desktop platforms resume once, at launch; no window
+/// exists before it, so nothing reaches the closure before `start` has built it. Once the closure has
+/// called `exit`, nothing more reaches it: winit 0.30 still delivers the events already queued (on
+/// macOS a further `RedrawRequested`), and a frame run after the exit repeats work the exiting frame
+/// finished (`--shell-shot` captured and reported twice).
+pub struct LoopApp<S, H> {
+    start: Option<S>,
+    handler: Option<H>,
+}
+
+impl<S, H> LoopApp<S, H>
+where
+    S: FnOnce(&ActiveEventLoop) -> H,
+    H: FnMut(Event<()>, &ActiveEventLoop),
+{
+    pub fn new(start: S) -> Self {
+        LoopApp { start: Some(start), handler: None }
+    }
+
+    fn handle(&mut self, event: Event<()>, event_loop: &ActiveEventLoop) {
+        if event_loop.exiting() {
+            return;
+        }
+        if let Some(handler) = self.handler.as_mut() {
+            handler(event, event_loop);
+        }
+    }
+}
+
+impl<S, H> ApplicationHandler for LoopApp<S, H>
+where
+    S: FnOnce(&ActiveEventLoop) -> H,
+    H: FnMut(Event<()>, &ActiveEventLoop),
+{
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(start) = self.start.take() {
+            self.handler = Some(start(event_loop));
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        self.handle(Event::WindowEvent { window_id, event }, event_loop);
+    }
+
+    fn device_event(&mut self, event_loop: &ActiveEventLoop, device_id: DeviceId, event: DeviceEvent) {
+        self.handle(Event::DeviceEvent { device_id, event }, event_loop);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.handle(Event::AboutToWait, event_loop);
+    }
+}
+
 /// The single engine-owned event loop. Opens the window from `game.config()`, drives the background
 /// loader + loading screen, and once the world is realized runs the fixed-step frame spine, calling the
 /// game's hooks. This is the one home for the window/cursor/mouse/`LayerStack`/`Time`/render machinery
 /// that `run_game_world` and `run_scene_world_loading` each used to duplicate.
-pub async fn run<G: Game + 'static>(mut game: G) {
+pub async fn run<G: Game + 'static>(game: G) {
+    let event_loop = EventLoop::new().expect("event loop");
+    let mut app = LoopApp::new(move |event_loop: &ActiveEventLoop| open(game, event_loop));
+    event_loop.run_app(&mut app).expect("event loop run");
+}
+
+/// [`run`]'s start, on the running loop: opens the window, stands the scene and the loader up, and
+/// returns the frame handler.
+fn open<G: Game + 'static>(mut game: G, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &ActiveEventLoop) {
     fn grab_cursor(window: &Window) {
         if let Err(e) = window
             .set_cursor_grab(CursorGrabMode::Confined)
@@ -226,12 +291,13 @@ pub async fn run<G: Game + 'static>(mut game: G) {
     let cfg = game.config();
     let starts_at_menu = game.starts_at_menu();
 
-    let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
-        WindowBuilder::new()
-            .with_title(cfg.title.clone())
-            .with_inner_size(winit::dpi::LogicalSize::new(cfg.size.0, cfg.size.1))
-            .build(&event_loop)
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_title(cfg.title.clone())
+                    .with_inner_size(winit::dpi::LogicalSize::new(cfg.size.0, cfg.size.1)),
+            )
             .expect("window"),
     );
     // A menu boot keeps the cursor free/visible until a save is picked; grab happens on `StartLoad`.
@@ -239,7 +305,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
         grab_cursor(&window);
     }
 
-    let mut scene = Scene::new(window.clone()).await;
+    let mut scene = pollster::block_on(Scene::new(window.clone()));
     scene.set_fog(cfg.fog.0, cfg.fog.1, cfg.fog.2);
     if let Some((az, el)) = cfg.sun {
         scene.set_sun(az, el);
@@ -298,8 +364,8 @@ pub async fn run<G: Game + 'static>(mut game: G) {
     // The wheel's turns since the last frame: (up, down).
     let mut wheel = (false, false);
 
-    event_loop
-        .run(move |event, elwt| match event {
+    let frame =
+        move |event: Event<()>, elwt: &ActiveEventLoop| match event {
             Event::WindowEvent { window_id, event } if window_id == scene.window.id() => match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::KeyboardInput {
@@ -497,6 +563,6 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                 }
             }
             _ => {}
-        })
-        .expect("event loop run");
+        };
+    frame
 }
