@@ -101,7 +101,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin to the toolchain the repo declares in .tool-versions, the one ci.yml tests with, so a
+      # release is built by the compiler its code was checked on. `stable` moved to rustc 1.100.0,
+      # which rejects winit 0.29's objc2 0.4.1 and failed both macOS rows of v1.19.0.
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: ${{ matrix.target }}
 
