@@ -58,8 +58,8 @@ Every GUI action also has a headless flag, so the same code paths are scriptable
 line (catalog dumps, model load checks, texture PNG dumps, lossless export bundles, mod publish).
 
 The GUI is egui painted through the engine's `Scene` overlay hook (`render_with` /
-`render_menu_with`); the winit-0.29 → egui event bridge is hand-rolled in `gui.rs` because
-`egui-winit` 0.37 targets winit 0.30 while the engine is still on 0.29.
+`render_menu_with`); the winit → egui event bridge is hand-rolled in `gui.rs`, written while the
+engine was on winit 0.29 and `egui-winit` 0.37 targeted 0.30.
 
 ## Where it comes from
 
@@ -243,7 +243,7 @@ Binary crate — these are private modules, listed for orientation:
   Retarget / Fit benches, the OBJ/PNG exporter.
 - `bundle` — the lossless export bundle (`raw/*.ucfx` verbatim rungs + `model.gltf` + `textures/`
   + `manifest.json` reassembly map).
-- `gui` — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
+- `gui` — egui host: hand-rolled winit → egui bridge + the egui-wgpu paint path.
 - `import` — foreign model import (`.obj` / `.gltf` / `.glb`) into the engine's in-memory
   `ModelData`.
 - `index` — asset catalog, reference-bundle resolution, and name resolution
