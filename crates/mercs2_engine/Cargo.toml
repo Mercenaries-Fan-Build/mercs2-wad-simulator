@@ -15,7 +15,7 @@ name = "mercs2_engine"
 path = "src/lib.rs"
 
 [dependencies]
-winit = "0.29"
+winit = "0.30.13"
 wgpu = "30.0.1"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
