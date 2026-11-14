@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_game"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 description = "Mercenaries 2 — the game exe: boots the engine from the player's save (profile → SaveState → world). Game-specific config lives here, driving the asset-agnostic engine."
 readme = "README.md"
@@ -30,4 +30,4 @@ pollster = "0.3" # block_on the engine's async app::run entry point on the main 
 png = "0.17" # --shell-shot: write a captured front-end frame
 # Shared external dep (windowing) — used by the game's key enums, same as the engine; not part of the
 # mercs2_* graph the refactor inverted.
-winit = "0.29"
+winit = "0.30.13"

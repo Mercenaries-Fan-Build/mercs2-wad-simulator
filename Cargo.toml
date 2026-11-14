@@ -40,7 +40,7 @@ mercs2_ui = { path = "crates/mercs2_ui", version = "1.2.1" }
 mercs2_gfx = { path = "crates/mercs2_gfx", version = "0.1.1" }
 mercs2_bink = { path = "crates/mercs2_bink", version = "0.1.0" }
 mercs2_player = { path = "crates/mercs2_player", version = "1.1.4" }
-mercs2_engine = { path = "crates/mercs2_engine", version = "3.0.1" }
+mercs2_engine = { path = "crates/mercs2_engine", version = "3.0.2" }
 # The Shipment format, linter and builder. Registered here because neither the Workshop nor Modkit
 # owns the format — this crate does, and both are clients. Without an entry they cannot write
 # `mercs2_quartermaster = { workspace = true }` at all.

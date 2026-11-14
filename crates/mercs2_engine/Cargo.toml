@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_engine"
-version = "3.0.1"
+version = "3.0.2"
 edition = "2021"
 description = "Mercenaries 2 modernization — native 64-bit engine (Rust/wgpu): asset-agnostic WAD/mesh/render/stream machinery with a typed API."
 readme = "README.md"
@@ -15,7 +15,7 @@ name = "mercs2_engine"
 path = "src/lib.rs"
 
 [dependencies]
-winit = "0.29"
+winit = "0.30.13"
 wgpu = "30.0.1"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }

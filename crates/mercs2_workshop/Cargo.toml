@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-winit = "0.29"
+winit = "0.30.13"
 wgpu = "30.0.1"
 pollster = "0.3"
 glam = "0.27"
@@ -21,8 +21,8 @@ png = "0.17" # --tex-png headless dump (CPU BC1/BC3 decode -> PNG for visual ins
 # specular there instead of in metallicRoughness; without the feature those maps are invisible to us.
 gltf = { version = "1", features = ["KHR_materials_specular"] }
 # The inspector GUI (Unreal-style Details panel, mouse-driven): egui painted through the engine's
-# Scene overlay hook. egui 0.37 matches wgpu 30; the winit-0.29 event bridge is hand-rolled in
-# gui.rs (egui-winit 0.37 wants winit 0.30, which the engine is not on yet).
+# Scene overlay hook. egui 0.37 matches wgpu 30; the winit event bridge is hand-rolled in gui.rs
+# (written while the engine was on winit 0.29 and egui-winit 0.37 wanted 0.30).
 egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = "0.37"
 # OS clipboard for the context menus' copy actions — our hand-rolled bridge must handle egui's
