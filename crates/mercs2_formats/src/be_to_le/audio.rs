@@ -1575,7 +1575,7 @@ mod tests {
         let db = console_sounddb(0xAD2A_9B89, &[(0x34AA_F50C, 1), (0x480C_25F2, 0)]);
         let bank = console_soundbank(0xAD2A_9B89, 0xF53C_3969, 2, &[(0x480C_25F2, 0), (0x34AA_F50C, 1)]);
         let block = console_block(&[(0x1084_AE93, TYPE_HASH_SOUNDDB, &db), (0x1084_AE93, TYPE_HASH_SOUNDBANK, &bank)]);
-        let le = super::super::convert::convert_block(&block, false, None, None, None, None).unwrap();
+        let le = super::super::convert::convert_block(&block, false, None, None, None).unwrap();
         let bodies: Vec<Vec<u8>> = crate::ucfx::block_chunk_spans(&le)
             .unwrap()
             .into_iter()
