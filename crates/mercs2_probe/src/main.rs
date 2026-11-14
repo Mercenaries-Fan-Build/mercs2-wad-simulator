@@ -53,6 +53,7 @@ mod block_neuter;
 mod bone_census;
 mod c3_veg_forge;
 mod chunk_compare;
+mod lua_convert_check;
 mod dlc_census;
 mod pws_survey;
 mod tex_compare;
@@ -137,7 +138,8 @@ fn usage() -> ! {
          \x20 ecs-survey <big-endian archive> <out.tsv> [--raw <dir>]   (a console archive's ECS containers as stored; no --wad)\n\
          \x20 ecs-compare <archive a> <archive b> <out.tsv> --vz-wad <pc vz.wad> [--diffs <file>]   (two archives' ECS containers, converted, record by record; no --wad)\n\
          \x20 ecs-names <archive> <out.tsv> --vz-wad <pc vz.wad>   (every Name string of an archive's named containers; no --wad)\n\
-         \x20 chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> --java <java> --unluac <jar> [--only <type>]   (every chunk converted against its PC twin, row by row; no --wad)\n\
+         \x20 chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> [--only <type>]   (every chunk converted against its PC twin, row by row; no --wad)\n\
+         \x20 lua-convert-check <big-endian archive>   (every Lua chunk's conversion against unluac's round-trip; java_binary + unluac_jar from .mercs2-local.toml; no --wad)\n\
          \x20 model-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every model converted against PC over its whole chain; no --wad)\n\
          \x20 scrub-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every scrub converted against PC; no --wad)\n\
          \x20 phy2-diff <big-endian PHY2 body> <PC body or container>   (a collider converted, its differences by region; no --wad)\n\
@@ -716,23 +718,34 @@ fn main() {
         return;
     }
     if cmd == "chunk-compare" {
-        let (Some(archive), Some(out), Some(vz), Some(java), Some(unluac)) =
-            (args.first(), args.get(1), flag_val(&args, "--vz-wad"), flag_val(&args, "--java"), flag_val(&args, "--unluac"))
-        else {
-            eprintln!("chunk-compare: usage: mercs2_probe chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> --java <java> --unluac <jar> [--only <type>]");
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("chunk-compare: usage: mercs2_probe chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> [--only <type>]");
             std::process::exit(2);
         };
         let only = flag_val(&args, "--only");
         let inputs = chunk_compare::Inputs {
             archive: std::path::Path::new(archive),
             vz_wad: std::path::Path::new(&vz),
-            java: std::path::Path::new(&java),
-            unluac: std::path::Path::new(&unluac),
             only: only.as_deref(),
         };
         if let Err(e) = chunk_compare::chunk_compare(inputs, std::path::Path::new(out)) {
             eprintln!("chunk-compare failed: {e}");
             std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "lua-convert-check" {
+        let Some(archive) = args.first() else {
+            eprintln!("lua-convert-check: usage: mercs2_probe lua-convert-check <big-endian archive>");
+            std::process::exit(2);
+        };
+        match lua_convert_check::check(std::path::Path::new(archive)) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("lua-convert-check failed: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }
