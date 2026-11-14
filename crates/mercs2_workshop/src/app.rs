@@ -25,9 +25,9 @@ use mercs2_engine::render::{ClipAnim, TexMap};
 use mercs2_engine::scene::{Scene, SurfaceError};
 use mercs2_engine::{game_world, pose, wad};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::EventLoop;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::WindowBuilder;
+use winit::window::Window;
 
 use crate::index::{AssetIndex, Kind};
 
@@ -1856,15 +1856,24 @@ fn next_step(loaded_wad: Option<&std::path::Path>, loaded_data: Option<&std::pat
 }
 
 pub fn run(opts: Options) {
+    let event_loop = EventLoop::new().expect("event loop");
+    let mut app = mercs2_engine::app::LoopApp::new(move |event_loop: &ActiveEventLoop| open(opts, event_loop));
+    event_loop.run_app(&mut app).expect("event loop run");
+}
+
+/// [`run`]'s start, on the running loop: opens the window, stands the workshop up, and returns the
+/// frame handler.
+fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &ActiveEventLoop) {
     // The window comes FIRST. Nothing before it may set the platform's app object up (a native
     // picker here set the macOS app up ahead of winit's event loop, and winit then panicked), and a
     // chain with no answer opens on Settings instead of failing before there is a window.
-    let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Mercenaries 2 — workshop")
-            .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 810.0))
-            .build(&event_loop)
+        event_loop
+            .create_window(
+                Window::default_attributes()
+                    .with_title("Mercenaries 2 — workshop")
+                    .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 810.0)),
+            )
             .expect("window"),
     );
     let mut scene = pollster::block_on(Scene::new(window.clone()));
@@ -2204,8 +2213,8 @@ pub fn run(opts: Options) {
         v
     };
 
-    event_loop
-        .run(move |event, elwt| match event {
+    let frame =
+        move |event: Event<()>, elwt: &ActiveEventLoop| match event {
             Event::AboutToWait => scene.window.request_redraw(),
             Event::WindowEvent { window_id, event } if window_id == scene.window.id() => {
             // Feed the GUI first: when a panel captures the pointer/keyboard, the camera and the
@@ -9084,8 +9093,8 @@ pub fn run(opts: Options) {
             }
             }
             _ => {}
-        })
-        .expect("event loop run");
+        };
+    frame
 }
 
 /// Camera forward vector from yaw/pitch (the engine free-fly convention, LH +Y up).
