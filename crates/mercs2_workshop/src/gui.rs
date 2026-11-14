@@ -1,7 +1,7 @@
-//! egui host for the workshop: a hand-rolled winit-0.29 → egui event bridge plus the egui-wgpu
+//! egui host for the workshop: a hand-rolled winit → egui event bridge plus the egui-wgpu
 //! paint path, rendered through the engine's `Scene` overlay hook (`render_with` /
-//! `render_menu_with`). Hand-rolled because `egui-winit` 0.37 targets winit 0.30 while the
-//! engine is on 0.29 — the bridge below is the ~10% of it this tool needs.
+//! `render_menu_with`). Hand-rolled while the engine was on winit 0.29 and `egui-winit` 0.37
+//! targeted 0.30 — the bridge below is the ~10% of it this tool needs.
 
 use std::sync::Arc;
 
@@ -203,7 +203,7 @@ impl Gui {
         }
         if want != self.cursor {
             self.cursor = want;
-            self.window.set_cursor_icon(to_winit_cursor(want));
+            self.window.set_cursor(to_winit_cursor(want));
         }
         self.jobs = self.ctx.tessellate(out.shapes, out.pixels_per_point);
         // Kept until `paint`, which a hidden window's frames never reach.
