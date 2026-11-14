@@ -337,21 +337,27 @@ pub fn container_rows(container: &[u8]) -> Result<Vec<ChunkRow>, String> {
         .collect()
 }
 
-/// The chunks of type `ty` in a big-endian block, `(hash, chunk bytes)`.
-pub fn typed_chunks(block: &[u8], ty: u32) -> Result<Vec<(u32, &[u8])>, String> {
+/// One chunk of a block: `(hash, type hash, chunk bytes)`.
+pub type BlockChunk<'a> = (u32, u32, &'a [u8]);
+
+/// Every chunk of a big-endian block, in table order.
+pub fn block_chunks(block: &[u8]) -> Result<Vec<BlockChunk<'_>>, String> {
     let word = |o: usize| block.get(o..o + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]])).ok_or("block table is short");
     let n = word(0)? as usize;
-    let (mut off, mut out) = (4 + n * 16, Vec::new());
+    let (mut off, mut out) = (4 + n * 16, Vec::with_capacity(n));
     for i in 0..n {
         let r = 4 + i * 16;
         let size = word(r + 12)? as usize;
         let chunk = block.get(off..off + size).ok_or_else(|| format!("chunk {i} runs past the block"))?;
-        if word(r + 4)? == ty {
-            out.push((word(r)?, chunk));
-        }
+        out.push((word(r)?, word(r + 4)?, chunk));
         off += size;
     }
     Ok(out)
+}
+
+/// The chunks of type `ty` in a big-endian block, `(hash, chunk bytes)`.
+pub fn typed_chunks(block: &[u8], ty: u32) -> Result<Vec<(u32, &[u8])>, String> {
+    Ok(block_chunks(block)?.into_iter().filter(|&(_, t, _)| t == ty).map(|(h, _, c)| (h, c)).collect())
 }
 
 /// The texture chunks of a big-endian block, `(hash, chunk bytes)`.

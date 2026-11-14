@@ -7,8 +7,8 @@
 //! table + descriptor tables are re-emitted LE, ECS component bodies (Layer / WorldEntityData /
 //! GuidMap) are swapped at schema-declared field widths, and several embedded payloads are
 //! re-encoded rather than swapped — Havok packfiles (section-aware), GPU-tiled DXT textures
-//! (untile + rebuilt INFO), wavebanks (Xbox-ADPCM / XMA → PC IMA), Lua BINN bytecode (unluac
-//! round-trip), mesh vertex declarations (Xbox 12-byte → 8-byte D3DVERTEXELEMENT9), and
+//! (untile + rebuilt INFO), wavebanks (Xbox-ADPCM / XMA → PC IMA), Lua BINN bytecode (decoded
+//! whole and encoded little-endian), mesh vertex declarations (Xbox 12-byte → 8-byte D3DVERTEXELEMENT9), and
 //! terrainmesh (widen + de-strip). Sizes and CSUM trailers are recomputed on the way out.
 
 pub mod aset;

@@ -13,7 +13,6 @@ use std::sync::atomic::Ordering;
 
 use mercs2_formats::be_to_le::convert::{convert_block, QUIET};
 use mercs2_formats::be_to_le::ecs::ComponentSchemas;
-use mercs2_formats::be_to_le::lua::LuaTools;
 use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
 use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
@@ -47,16 +46,13 @@ fn walk<'a>(nodes: &'a [UcfxNode], prefix: &str, out: &mut BTreeMap<String, Vec<
 pub struct Inputs<'a> {
     pub archive: &'a Path,
     pub vz_wad: &'a Path,
-    pub java: &'a Path,
-    pub unluac: &'a Path,
     pub only: Option<&'a str>,
 }
 
 pub fn chunk_compare(i: Inputs, out: &Path) -> Result<(), String> {
-    let Inputs { archive, vz_wad, java, unluac, only } = i;
+    let Inputs { archive, vz_wad, only } = i;
     QUIET.store(true, Ordering::Relaxed);
     let schemas = ComponentSchemas::from_vz_wad(vz_wad)?;
-    let lua = LuaTools { java: java.to_path_buf(), unluac: unluac.to_path_buf() };
     let mut f = File::open(vz_wad).map_err(|e| format!("{}: {e}", vz_wad.display()))?;
     let size = f.metadata().map_err(|e| e.to_string())?.len();
     let pc = load_ffcs_archive(&mut f, size).map_err(|e| format!("{}: {e}", vz_wad.display()))?;
@@ -95,7 +91,7 @@ pub fn chunk_compare(i: Inputs, out: &Path) -> Result<(), String> {
             other => other,
         };
         let block_textures = BlockTables { textures: &textures, rung: rung_of_path(path), streams: None };
-        let le = match be.and_then(|b| convert_block(&b, false, None, Some(&lua), Some(&schemas), Some(block_textures))) {
+        let le = match be.and_then(|b| convert_block(&b, false, None, Some(&schemas), Some(block_textures))) {
             Ok(le) => le,
             Err(err) => {
                 let class: String = err.chars().take(60).collect();

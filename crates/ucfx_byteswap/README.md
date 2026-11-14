@@ -26,7 +26,7 @@ Special cases that resize or rewrite a body rather than swap it:
 | Havok packfile (`ANIM`, `PHY2`) | Section-aware convert. A wholesale u32 swap scrambles the ASCII `__classnames__` strings, the loader then fails to find the class by name (`STATUS_OBJECT_NAME_NOT_FOUND` → AV). `havok.rs` swaps the header / section headers / classname signatures as u32, leaves the classname strings and `__types__` raw, and converts `__data__` with per-class field widths (u32 pointers/floats/enums, u16 refcounts/indices, u8 QuantizationFormat bytes and compressed bitstreams). |
 | Texture `BODY` | GPU-tiled DXT → linear untile, plus a rebuilt 34-byte PC `INFO`. Shrinks the body, so the container is reframed. |
 | Wavebank | Codec transcode. Each embedded clip is decoded to interleaved LE PCM16 and written as PC format 0x02: PCM (0x00) is a BE→LE byte swap; XMA (0x01), XMA2 (0x05, Xbox) and MP3 (0x0C, PS3) are decoded via `ffmpeg`. Streamed records carry their `.pws` offset forward. |
-| Lua bytecode (`BINN`) | Not a swap. unluac disassemble → flip `.endianness BIG`→`LITTLE` → reassemble. May resize. |
+| Lua bytecode (`BINN`) | Not a swap in place. The chunk is decoded whole (`mercs2_formats::luachunk`), set little-endian and encoded again. May resize. |
 | Mesh vertex declaration | Xbox 12-byte element records → the 8-byte PC `D3DVERTEXELEMENT9` array. |
 | Terrainmesh (0x7C569307) / low-res terrain (0x1602815C) | A genuine re-encode: `STRM` vertices widen, indices are de-stripped, the whole data area is rebuilt and reframed. |
 
@@ -94,10 +94,7 @@ ucfx_byteswap::convert::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
 ### CLI
 
 ```bash
-# convert one decompressed BE block (--java/--unluac are required when it holds Lua bytecode)
-ucfx_byteswap block_be.bin --output block_le.bin --java /path/to/java --unluac /path/to/unluac.jar
-
-# convert one decompressed BE block that holds no Lua bytecode
+# convert one decompressed BE block
 ucfx_byteswap block_be.bin --output block_le.bin
 
 # pipe mode
@@ -135,15 +132,15 @@ ucfx_byteswap --stdin --aset-recompute < aset_protocol.bin > updated_u32_2.bin
 | `validate` | Post-conversion checks on an LE block; returns `Vec<ValidationError>`. |
 | `havok` | Havok 5.5.0-r1 (HK550) packfile conversion: `convert_havok_be_to_le`, `convert_phy2_be_to_le`, `validate_phy2`. |
 | `audio` | Console wavebank → PC PCM16 wavebank: `convert_wavebank_data`, `normalize_embedded_wavebank_clip`, `transcode_xma_to_pcm16`, `transcode_xma2_raw_to_pcm16`, `transcode_mp3_raw_to_pcm16`, `find_ffmpeg`; plus the Xbox-ADPCM → PC IMA `transcode_pws_xbox_to_pc`. |
-| `lua` | Lua 5.1 `BINN` bytecode BE→LE via the unluac disassemble/reassemble round-trip: `convert_binn_be_to_le`, run with the caller's `LuaTools` (java + unluac paths). |
+| `lua` | Lua 5.1 `BINN` bytecode BE→LE: `convert_binn_be_to_le` swaps the BINN metadata and converts the chunk with `luaq_be_to_le` (decoded whole, encoded little-endian); `luaq_offset` finds the chunk in a body. |
 | `aset` | ASET `packed_block_ref` sub-entry computation: `recompute_block_aset_subs`, `strip_xbox_sub_entry`, `AsetEntry`, `RecomputeCounts`. |
 | `report` | `SchemaCoverageReport` — per-component schema field coverage, unknown type codes, fallback/`needs-investigation` tags. |
 
 ## Notes / gotchas
 
 - **Input must already be decompressed.** The crate takes raw UCFX block bytes; WAD-level decompression is somebody else's job.
-- **External toolchain.** `lua.rs` runs the `java` executable and unluac jar named by the caller's `LuaTools` (the CLI's `--java` / `--unluac`); `convert_block` errors on a block holding `BINN` when it gets no `LuaTools`. `audio.rs` needs `ffmpeg` for the XMA / XMA2 / MP3 clips only (`find_ffmpeg`: `MERCS2_FFMPEG`, then a `tools/ffmpeg/bin/` bundle found walking up from the exe or the cwd, then `PATH`; errors if none resolves); the PCM and ADPCM/IMA paths are pure Rust.
-- **Decompile-to-source is deliberately not used for Lua.** unluac emits Lua 5.2+ `goto`/labels on complex control flow, which the 5.1 compiler rejects. The bytecode-level disassemble/assemble avoids that.
+- **External toolchain.** `audio.rs` needs `ffmpeg` for the XMA / XMA2 / MP3 clips only (`find_ffmpeg`: `MERCS2_FFMPEG`, then a `tools/ffmpeg/bin/` bundle found walking up from the exe or the cwd, then `PATH`; errors if none resolves); the PCM and ADPCM/IMA paths are pure Rust.
+- **Lua is converted at the bytecode level, never through source.** Decompiled source does not recompile (unluac emits Lua 5.2+ `goto`/labels the 5.1 compiler rejects). The chunk is decoded and encoded structurally; the conversion once round-tripped through unluac's disassembler and assembler, which `mercs2_probe lua-convert-check` keeps as the oracle it is compared against.
 - **ASET field order is inverted between platforms.** PC/LE packs `{ block_index : hi16, sub : lo16 }`; the Xbox/BE source is `{ sub : hi16, block : lo16 }`. The Python pipeline mislabels these, which is the root of the recurring sub-field bugs — `aset.rs` keeps the distinction explicit.
 - **`aset.rs` fixes a Python bug.** In the Python the faithful BE sub is not preserved — primaries got the physical index, then body-less stubs were forced to `0xFFFF`, clobbering real sub-offsets. `recompute_block_aset_subs` keeps primaries and in-base hashes at `0xFFFF` (resolve by hash), keeps a DLC-new stub's BE sub, and gives a DLC-new entry with a real body its physical sub-entry index.
 - **The coverage report is the honest-signal channel.** `--report-schema-coverage` lists unknown schema type codes, `schm` parse failures, components with no schema, non-ECS bodies that hit the catch-all u32 sweep, and registered-but-unvalidated tags flagged "REQUIRES DEEPER INVESTIGATION". A body that took a fallback path may well be converted *wrong*; it is surfaced loudly rather than swapped silently.
@@ -154,7 +151,7 @@ ucfx_byteswap --stdin --aset-recompute < aset_protocol.bin > updated_u32_2.bin
 
 - `mercs2_formats` — chunk tags, type hashes, schema parsing, Mercs2 CRC32, texture size math.
 - `clap 4.5` — CLI parsing.
-- Runtime (external, not cargo deps): `ffmpeg` (XMA / XMA2 / MP3 wavebank clips only), a JRE + unluac (Lua `BINN` only).
+- Runtime (external, not cargo deps): `ffmpeg` (XMA / XMA2 / MP3 wavebank clips only).
 
 ## License
 

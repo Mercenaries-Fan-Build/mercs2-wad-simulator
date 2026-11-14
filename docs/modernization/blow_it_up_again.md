@@ -145,7 +145,7 @@ but for 2 padding bytes after an odd vertex pool, which differ between platforms
 
 ## The converter worklist
 
-`mercs2_probe chunk-compare <xbox-vz.wad> <out.tsv> --vz-wad <vz.wad> --java … --unluac …` converts every
+`mercs2_probe chunk-compare <xbox-vz.wad> <out.tsv> --vz-wad <vz.wad>` converts every
 Xbox retail chunk and compares each row with its PC twin, joined by name and type. `--only <type>`
 limits a re-run. A difference is either a converter gap or a real difference between the bakes, and
 each row below has to be read to say which. Of 11,087 blocks `wpn_sniperrifle` is refused, whose

@@ -12,7 +12,7 @@
 //!   - Texture untiling (DXT GPU-tiled → linear)
 //!   - Wavebank audio transcode (PCM / XMA / XMA2 / MP3 → PC PCM16)
 //!   - Mesh vertex format translation (Xbox 12-byte → PC 8-byte D3DVERTEXELEMENT9)
-//!   - Lua bytecode (unluac round-trip)
+//!   - Lua bytecode (decoded whole and encoded little-endian, `lua.rs`)
 //!   - Terrainmesh re-encoding (vertex expansion + index destrip)
 //!
 //! Optionally collects schema field coverage stats via [`SchemaCoverageReport`].
@@ -22,7 +22,7 @@
 //! # use mercs2_formats::be_to_le::convert;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let be_block: Vec<u8> = vec![/* raw big-endian UCFX bytes */];
-//! let le_block = convert::convert_block(&be_block, false, None, None, None, None)?;
+//! let le_block = convert::convert_block(&be_block, false, None, None, None)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -80,8 +80,7 @@ pub(super) struct Descriptor {
 
 /// Convert a decompressed BE block to LE format.
 /// When `report` is `Some`, collects schema field coverage stats.
-/// `lua_tools` is the java + unluac pair that converts `BINN` (Lua bytecode) chunks; a block
-/// holding a `BINN` chunk errors when it is `None`.
+/// `BINN` (Lua bytecode) chunks convert with [`lua::convert_binn_be_to_le`].
 /// `schemas` is the PC bake's class layouts ([`ComponentSchemas::from_vz_wad`]); a block holding a
 /// compact ECS container errors when it is `None`.
 /// `tables` is the archive's [`TextureTable`], this block's rung and its streamed banks; a block
@@ -90,7 +89,6 @@ pub fn convert_block(
     be_data: &[u8],
     dry_run: bool,
     mut report: Option<&mut SchemaCoverageReport>,
-    lua_tools: Option<&lua::LuaTools>,
     schemas: Option<&ComponentSchemas>,
     tables: Option<BlockTables>,
 ) -> Result<Vec<u8>, String> {
@@ -195,7 +193,7 @@ pub fn convert_block(
                 .and_then(|t| t.textures.material_flags(entry.name_hash))
                 .ok_or_else(|| format!("Entry {ei} 0x{:08x}: a PS3 model needs its materials from the archive", entry.name_hash))?;
             let converted = super::ps3_model::convert(container, flags, |rest| {
-                convert_container(rest, false, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas, None)
+                convert_container(rest, false, ei, entry.type_hash, report.as_deref_mut(), schemas, None)
             })
             .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
             converted_containers.push(converted);
@@ -228,7 +226,7 @@ pub fn convert_block(
             || entry.type_hash == TYPE_HASH_WORLD_ENTITY
             || entry.type_hash == TYPE_HASH_GUIDMAP;
         let stream = tables.and_then(|t| t.streams).and_then(|s| s.get(entry.name_hash));
-        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas, stream)
+        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), schemas, stream)
             .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
         converted_containers.push(converted);
         kept.push(entry);
@@ -278,7 +276,7 @@ pub fn convert_ecs_container(
     type_hash: u32,
     schemas: Option<&ComponentSchemas>,
 ) -> Result<Vec<u8>, String> {
-    let mut out = convert_container(strip_csum_trailer(container), true, 0, type_hash, None, None, schemas, None)?;
+    let mut out = convert_container(strip_csum_trailer(container), true, 0, type_hash, None, schemas, None)?;
     let crc = crc32_mercs2(&out);
     out.extend_from_slice(b"CSUM");
     out.extend_from_slice(&crc.to_le_bytes());
@@ -291,7 +289,6 @@ fn convert_container(
     entry_idx: usize,
     type_hash: u32,
     report: Option<&mut SchemaCoverageReport>,
-    lua_tools: Option<&lua::LuaTools>,
     schemas: Option<&ComponentSchemas>,
     stream: Option<&super::audio::PcStream>,
 ) -> Result<Vec<u8>, String> {
@@ -431,11 +428,11 @@ fn convert_container(
         apply_strm_vertex_fix(&mut out, &descriptors, data_area_off, desc_table_end);
     }
 
-    // Xbox 360 Lua bytecode: convert each `BINN` chunk BE→PC LE via the unluac
-    // disassemble→flip-endianness→reassemble round-trip (NOT a byte-swap; see
-    // lua.rs). The generic pass left BINN raw BE. No-op when there is no BINN.
+    // Console Lua bytecode: convert each `BINN` chunk BE→PC LE by decoding the chunk whole and
+    // encoding it little-endian (NOT a byte-swap in place; see lua.rs). The generic pass left BINN
+    // raw BE. No-op when there is no BINN.
     if is_be {
-        apply_binn_transcode(&mut out, &descriptors, data_area_off, desc_table_end, lua_tools)?;
+        apply_binn_transcode(&mut out, &descriptors, data_area_off, desc_table_end)?;
     }
 
     // Xbox 360 terrainmesh (0x7C569307): a genuine re-encode (vertices widen to the
@@ -465,17 +462,15 @@ fn convert_container(
     Ok(out)
 }
 
-/// Convert every `BINN` (Lua bytecode) chunk in `out` via the unluac round-trip
-/// (`lua::convert_binn_be_to_le`) and reframe the container if a body resizes.
+/// Convert every `BINN` (Lua bytecode) chunk in `out` with `lua::convert_binn_be_to_le` and
+/// reframe the container if a body resizes.
 /// Mirrors `apply_wavebank_transcode`, generalized to multiple BINN chunks:
 /// offsets/sizes are re-read from the (possibly already-shifted) `out` table.
-/// Errors when the container holds a `BINN` chunk and `lua_tools` is `None`.
 fn apply_binn_transcode(
     out: &mut Vec<u8>,
     descriptors: &[Descriptor],
     data_area_off: usize,
     desc_table_end: usize,
-    lua_tools: Option<&lua::LuaTools>,
 ) -> Result<(), String> {
     let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
     let binn_idxs: Vec<usize> = descriptors
@@ -491,9 +486,6 @@ fn apply_binn_transcode(
     if binn_idxs.is_empty() {
         return Ok(());
     }
-    let tools = lua_tools.ok_or(
-        "block holds BINN (Lua bytecode) chunks; converting them needs java and unluac (LuaTools)",
-    )?;
     for idx in binn_idxs {
         let row_field = 20 + idx * 20 + 4;
         let size_field = 20 + idx * 20 + 8;
@@ -507,7 +499,7 @@ fn apply_binn_transcode(
             return Err(format!("BINN body [{abs}..{old_end}] exceeds container ({})", out.len()));
         }
         let be_body = out[abs..old_end].to_vec();
-        let new_body = lua::convert_binn_be_to_le(&be_body, tools)?;
+        let new_body = lua::convert_binn_be_to_le(&be_body)?;
 
         out[size_field..size_field + 4].copy_from_slice(&(new_body.len() as u32).to_le_bytes());
         let tail = out[old_end..].to_vec();
@@ -1053,8 +1045,8 @@ fn convert_generic_bodies(
                     // to hold u16 data (not f32) against the validator/retail.
                     ChunkTag::Binn => {
                         // Lua bytecode: leave RAW BE here; converted afterward by
-                        // apply_binn_transcode (unluac disassemble→flip-endianness→
-                        // reassemble — NOT a byte-swap; the body may resize). Mirrors
+                        // apply_binn_transcode (the chunk decoded whole and encoded
+                        // little-endian — NOT a byte-swap in place; the body may resize). Mirrors
                         // the wavebank `data` no-op + apply_wavebank_transcode reframe.
                     }
                     ChunkTag::Minf => {
@@ -3391,7 +3383,7 @@ mod tests {
         block.extend_from_slice(&be32(chunk_size));
         block.extend_from_slice(&container);
 
-        let out = convert_block(&block, false, None, None, None, None).expect("convert_block must succeed");
+        let out = convert_block(&block, false, None, None, None).expect("convert_block must succeed");
 
         // LE entry table row 0: [0..4]=count, [4..8]=name, [8..12]=type, [12..16]=field_c.
         assert_eq!(
@@ -3406,7 +3398,7 @@ mod tests {
         // Also confirm base-game blocks (field_c == 0) stay 0 — swapping 0 is a no-op.
         let mut block0 = block.clone();
         block0[12..16].copy_from_slice(&be32(0)); // field_c = 0
-        let out0 = convert_block(&block0, false, None, None, None, None).expect("convert_block must succeed");
+        let out0 = convert_block(&block0, false, None, None, None).expect("convert_block must succeed");
         assert_eq!(
             u32::from_le_bytes([out0[12], out0[13], out0[14], out0[15]]),
             0,
@@ -3587,7 +3579,7 @@ mod tests {
             c.extend_from_slice(&v.to_be_bytes());
         }
         c.extend_from_slice(&be_body);
-        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None, None, None).expect("convert");
+        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None, None).expect("convert");
         assert_eq!(&out[20..24], b"EFCT");
         let mut want = be_body;
         convert_efct_header_inplace(&mut want);
@@ -3615,11 +3607,11 @@ mod tests {
     #[test]
     fn an_emitter_geom_is_two_u16s() {
         let e = crate::types::TYPE_HASH_EFFECT;
-        let out = convert_container(&effect_geom(&[0, 1, 0, 2]), false, 0, e, None, None, None, None).expect("convert");
+        let out = convert_container(&effect_geom(&[0, 1, 0, 2]), false, 0, e, None, None, None).expect("convert");
         assert_eq!(&out[40..44], &[1, 0, 2, 0]);
         let mut shapes = 1u32.to_be_bytes().to_vec();
         shapes.extend_from_slice(&[0x3F, 0x80, 0, 0].repeat(13));
-        let out = convert_container(&effect_geom(&shapes), false, 0, e, None, None, None, None).expect("convert");
+        let out = convert_container(&effect_geom(&shapes), false, 0, e, None, None, None).expect("convert");
         assert_eq!(&out[40..48], &[1, 0, 0, 0, 0, 0, 0x80, 0x3F]);
     }
 
