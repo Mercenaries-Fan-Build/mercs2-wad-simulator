@@ -6,6 +6,7 @@ use crate::rt_log;
 use mercs2_formats::exe_image::{Image, parse_headers};
 use mercs2_formats::lua_sites::{LuaSites, resolve};
 use mercs2_formats::shader_sites::{self, ShaderSites};
+use mercs2_formats::display_mode_sites::{self, DisplayModeSites};
 use mercs2_formats::tree_sites::{self, TreeSites};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ static SITES: OnceLock<LuaSites> = OnceLock::new();
 static DEBUG: OnceLock<Result<mercs2_formats::lua_sites::DebugSites, String>> = OnceLock::new();
 static SHADERS: OnceLock<ShaderSites> = OnceLock::new();
 static TREES: OnceLock<TreeSites> = OnceLock::new();
+static MODES: OnceLock<DisplayModeSites> = OnceLock::new();
 
 pub(crate) fn mapped() -> Result<Image<'static>, String> {
     let base = unsafe { GetModuleHandleA(core::ptr::null()) } as *const u8;
@@ -102,6 +104,37 @@ pub(crate) fn trees_wait() -> Result<&'static TreeSites, String> {
             Err(_) => std::thread::sleep(RETRY),
         }
     }
+}
+
+/// The display-mode sites (`mercs2_formats::display_mode_sites`), retrying until they resolve or [`WAIT`]
+/// runs out. Never call it under the loader lock.
+pub(crate) fn modes_wait() -> Result<&'static DisplayModeSites, String> {
+    if let Some(m) = MODES.get() {
+        return Ok(m);
+    }
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match mapped().and_then(|img| display_mode_sites::resolve(&img).map_err(|e| e.to_string())) {
+            Ok(m) => {
+                let m = MODES.get_or_init(|| m);
+                rt_log::line(&format!(
+                    "display-mode sites: refresh test {:#x}, skip {:#x}, keep {:#x}, index {:?}, search {:#x}, first search {:#x}, fallback {:#x}, SetMode {:#x}, pending state {:#x}, settings {:#x}/{:#x}/{:#x}/{:#x}, list +{:#x}, count +{:#x}, adapter +{:#x}",
+                    m.refresh_cmp, m.skip, m.keep, m.index, m.find_mode, m.first_search_call, m.fallback_call, m.set_mode, m.pending_state,
+                    m.settings.width, m.settings.height, m.settings.bpp_index, m.settings.refresh, m.list_offset, m.count_offset, m.adapter_offset
+                ));
+                return Ok(m);
+            }
+            Err(e) if Instant::now() >= deadline => {
+                return Err(format!("the game's display-mode sites did not resolve within {}s: {e}", WAIT.as_secs()));
+            }
+            Err(_) => std::thread::sleep(RETRY),
+        }
+    }
+}
+
+/// The display-mode sites if they have resolved; never waits.
+pub(crate) fn modes_resolved() -> Option<&'static DisplayModeSites> {
+    MODES.get()
 }
 
 /// The sites, retrying until they resolve or [`WAIT`] runs out. Never call it under the loader lock.
