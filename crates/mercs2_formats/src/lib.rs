@@ -91,6 +91,9 @@
 //!   game image by signature and structure.
 //! - [`tree_sites`] — the billboard-tree render loops the BUG-014 fix detours and repeats, found in the game
 //!   image by signature and checked against the frame stores.
+//! - [`display_mode_sites`], [`display_mode`] — the render state's mode-list filter, `ApplySettings`' two mode
+//!   searches and the mode list's records, for the BUG-016 fix (keep every listed mode; replace the 640×480 at
+//!   60 Hz fallback with the ini or desktop resolution at the refresh rate closest to 60 Hz).
 //! - [`chatter_sites`] — the `ChatterSet` component's container and its lookup, add and mask functions, for a
 //!   `Human.SetChatterSet` binding (PS3 v1.03 only).
 //! - [`mod_runtime`] — bindings a Rust mod calls the loaded `m2-sdk.dll` through (`raw-dylib`, 32-bit
@@ -199,6 +202,8 @@ pub mod texture;
 pub mod texture_encode;
 pub mod tiny_model;
 pub mod tree_sites;
+pub mod display_mode;
+pub mod display_mode_sites;
 pub mod chatter_sites;
 pub mod be_to_le;
 pub mod lua_scan;
