@@ -3101,7 +3101,7 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
             if e.type_hash == TYPE_HASH_CFX_PACK {
                 let label = format!("block {bi} cfx_pack 0x{:08X}", e.name_hash);
                 let movie = mercs2_formats::gfx::cfx_pack_movie(&dec[pos..end], &label)?;
-                mercs2_formats::gfx::GfxMovie::parse(&movie).map_err(|m| format!("{label}: {m}"))?;
+                mercs2_formats::gfx_stream::TagStream::parse(&movie).map_err(|m| format!("{label}: {m}"))?;
                 hashes.insert(e.name_hash);
                 found.push((bi, e.name_hash, movie));
             }
