@@ -44,36 +44,6 @@ jobs:
           cat "$RUNNER_TEMP/vulkaninfo.txt"
           grep -E "driverName *= llvmpipe" "$RUNNER_TEMP/vulkaninfo.txt" || { echo "::error::no lavapipe Vulkan device"; exit 1; }
 
-      # mercs2_formats' be_to_le converter decodes Xbox XMA/XMA2 and PS3 MP3 sound with
-      # ffmpeg (be_to_le/audio.rs) and round-trips console Lua bytecode with Java + unluac
-      # (be_to_le/lua.rs). Its tests resolve ffmpeg on PATH; Java and unluac are named by the
-      # `java_binary` and `unluac_jar` keys of the .mercs2-local.toml written below.
-      # The JDK is Temurin 21.
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Install ffmpeg
-        run: |
-          set -euo pipefail
-          sudo apt-get install -y ffmpeg
-          ffmpeg -hide_banner -decoders > "$RUNNER_TEMP/ffmpeg-decoders.txt"
-          for d in xma1 xma2 mp3; do
-            grep -E " $d " "$RUNNER_TEMP/ffmpeg-decoders.txt" || { echo "::error::ffmpeg has no $d decoder"; exit 1; }
-          done
-
-      - name: Download unluac (pinned)
-        env:
-          UNLUAC_URL: https://sourceforge.net/projects/unluac/files/Unstable/unluac_2025_12_23.jar/download
-          UNLUAC_SHA256: 98be0fa84ac73ca66dce2842a2e4512226f4c611b6500dc96415571fc5538fcc
-        run: |
-          set -euo pipefail
-          mkdir -p tools/external/unluac
-          curl -fsSL -o tools/external/unluac/unluac.jar "$UNLUAC_URL"
-          echo "$UNLUAC_SHA256  tools/external/unluac/unluac.jar" | sha256sum -c -
-          "$JAVA_HOME/bin/java" -jar tools/external/unluac/unluac.jar --help
-
       # mercs2_luac's vendor-integrity test compares the vendored Lua against pristine upstream
       # Lua 5.1.5 `src/`.
       - name: Download Lua 5.1.5 source (pinned)
@@ -110,8 +80,6 @@ jobs:
         run: |
           set -euo pipefail
           cat > .mercs2-local.toml <<EOF
-          java_binary = "$JAVA_HOME/bin/java"
-          unluac_jar = "$GITHUB_WORKSPACE/tools/external/unluac/unluac.jar"
           lua51_src_dir = "$RUNNER_TEMP/lua-5.1.5/src"
           EOF
           cat .mercs2-local.toml
