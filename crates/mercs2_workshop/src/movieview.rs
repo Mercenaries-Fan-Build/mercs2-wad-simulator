@@ -713,6 +713,138 @@ mod retail_tests {
         }
     }
 
+    /// Every timeline of every movie reads as instances, and each placement and removal belongs to
+    /// exactly one.
+    #[test]
+    fn every_timeline_reads_as_tracks() {
+        use mercs2_formats::gfx_edit::{timeline, tracks, Line};
+        use mercs2_formats::gfx_stream::{TagBody, TagStream};
+        let vz = crate::app::retail_vz_wad();
+        let mut w = WadStack::open(&vz, &crate::app::overlays_for(&vz, true, &[])).expect("open retail vz.wad");
+        let index = AssetIndex::build(&w.wads, &w.side, crate::index::load_all_names().expect("names"));
+        let rows: Vec<_> = index.rows(Kind::UiGfx).to_vec();
+        let (mut lines, mut instances, mut failed) = (0, 0, Vec::new());
+        for row in &rows {
+            let label = row.label();
+            let result = (|| -> Result<(), String> {
+                let stream = TagStream::parse(&movie_bytes(&mut w, row.src, row.hash, &label)?)?;
+                let sprites = stream.tags.iter().filter_map(|t| match t.body {
+                    TagBody::Sprite { id, .. } => Some(Line::Sprite(id)),
+                    TagBody::Raw(_) => None,
+                });
+                for line in std::iter::once(Line::Root).chain(sprites) {
+                    let tags = timeline(&stream, line)?;
+                    let found = tracks(tags).map_err(|e| format!("{line:?}: {e}"))?;
+                    let mut owned: Vec<usize> = found.iter().flat_map(|t| t.tags.iter().copied()).collect();
+                    owned.sort_unstable();
+                    let display: Vec<usize> = tags.iter().enumerate().filter(|(_, t)| matches!(t.code, 26 | 70 | 28)).map(|(i, _)| i).collect();
+                    if owned != display {
+                        return Err(format!("{line:?}: the tracks hold {} tags, the timeline has {} placements and removals", owned.len(), display.len()));
+                    }
+                    lines += 1;
+                    instances += found.len();
+                }
+                Ok(())
+            })();
+            if let Err(e) = result {
+                failed.push(format!("{label} (0x{:08X}): {e}", row.hash));
+            }
+        }
+        println!("{} movies, {lines} timelines, {instances} instances, {} failed", rows.len(), failed.len());
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
+    /// The items of `items` that draw no text.
+    fn shapes(items: &[mercs2_engine::gfx::stage::Item]) -> Vec<mercs2_engine::gfx::stage::Item> {
+        use mercs2_engine::gfx::stage::Item;
+        use mercs2_engine::gfx::tess::Paint;
+        items.iter().filter(|i| !matches!(i, Item::Draw(d) if d.parts.iter().any(|p| matches!(p.paint, Paint::Glyphs { .. })))).cloned().collect()
+    }
+
+    /// The Draw matrices of `b` are those of `a` moved by one nonzero vector.
+    fn moved_by(a: &[mercs2_engine::gfx::stage::Item], b: &[mercs2_engine::gfx::stage::Item]) -> Result<[f32; 2], String> {
+        use mercs2_engine::gfx::stage::Item;
+        let draws = |items: &[Item]| items.iter().filter_map(|i| if let Item::Draw(d) = i { Some(d.matrix) } else { None }).collect::<Vec<_>>();
+        let (a, b) = (draws(a), draws(b));
+        if a.is_empty() || a.len() != b.len() {
+            return Err(format!("{} draws, then {}", a.len(), b.len()));
+        }
+        let d = [b[0].tx - a[0].tx, b[0].ty - a[0].ty];
+        for (x, y) in a.iter().zip(&b) {
+            let same = (x.a, x.b, x.c, x.d) == (y.a, y.b, y.c, y.d) && ((y.tx - x.tx) - d[0]).abs() < 1e-3 && ((y.ty - x.ty) - d[1]).abs() < 1e-3;
+            if !same {
+                return Err(format!("not one shift: {x:?} → {y:?}, first moved by {d:?}"));
+            }
+        }
+        if d == [0.0, 0.0] {
+            return Err("nothing moved".into());
+        }
+        Ok(d)
+    }
+
+    /// A pause-menu button moved over its lifetime draws where it did, shifted; a copy of it, a new
+    /// instance under its own name at a free depth, draws beside it while the original stays put.
+    #[test]
+    fn a_pause_menu_button_moves_and_copies() {
+        use mercs2_formats::gfx_edit::{copy, offset, timeline, tracks, Line};
+        use mercs2_formats::gfx_stream::TagStream;
+        let vz = crate::app::retail_vz_wad();
+        let mut w = WadStack::open(&vz, &[]).expect("open retail vz.wad");
+        let shared = Shared::read(&mut w, &[]).expect("fonts and strings");
+        let index = AssetIndex::build(&w.wads, &w.side, crate::index::load_all_names().expect("names"));
+        let hash = pandemic_hash_m2("pause_menu");
+        let row = index.rows(Kind::UiGfx).iter().find(|r| r.hash == hash).cloned().expect("pause_menu is a UI row");
+        let stream = TagStream::parse(&movie_bytes(&mut w, row.src, hash, "pause_menu").expect("bytes")).expect("parse");
+        let play = |s: &TagStream| -> (Player, Vec<(usize, String)>) {
+            let def = Rc::new(MovieDef::read(&s.file().expect("write")).expect("decode"));
+            let mut p = new_player(&def, &shared.fonts, &shared.strings).expect("player");
+            for _ in 0..10 {
+                p.advance(1000.0 / def.frame_rate as f64).expect("advance");
+            }
+            let named = p.named_clips().expect("clips");
+            (p, named)
+        };
+        let draw = |p: &mut Player, named: &[(usize, String)], suffix: &str| -> Vec<mercs2_engine::gfx::stage::Item> {
+            let id = named.iter().find(|(_, path)| path.ends_with(suffix)).unwrap_or_else(|| panic!("no clip {suffix}")).0;
+            p.movie.draw_only(id).expect("draw")
+        };
+        let holder = tracks(timeline(&stream, Line::Root).expect("root")).expect("tracks").into_iter().find(|t| t.name.as_deref() == Some("buttonHolder_mc")).expect("buttonHolder_mc");
+        let line = Line::Sprite(holder.character);
+        let inner = tracks(timeline(&stream, line).expect("holder")).expect("tracks");
+        let (mut before, named) = play(&stream);
+        let (button, items) = inner
+            .iter()
+            .filter_map(|t| {
+                let suffix = format!(".buttonHolder_mc.{}", t.name.as_deref()?);
+                let items = named.iter().any(|(_, p)| p.ends_with(&suffix)).then(|| draw(&mut before, &named, &suffix))?;
+                (!items.is_empty()).then_some((t.clone(), items))
+            })
+            .next()
+            .expect("a button of buttonHolder_mc draws");
+        let name = button.name.clone().expect("named");
+        let suffix = format!(".buttonHolder_mc.{name}");
+
+        let mut moved = stream.clone();
+        offset(&mut moved, line, button.depth, button.first, 400, 0).expect("offset");
+        let (mut p, named) = play(&moved);
+        let d = moved_by(&items, &draw(&mut p, &named, &suffix)).expect("the moved button");
+        assert!(d[0] > 0.0 && d[1] == 0.0, "moved right only: {d:?}");
+
+        let mut copied = stream.clone();
+        let depth = inner.iter().map(|t| t.depth).max().expect("depths") + 1;
+        copy(&mut copied, line, button.depth, button.first, depth, Some("buttonCopy_mc"), 0, 600).expect("copy");
+        let (mut p, named) = play(&copied);
+        // The labels are the script's: the holder's first frame sets each `buttonN_mc.text_mc.text_txt`
+        // by name from `PauseTextArray`, so the copy's label stays empty and only its shapes draw.
+        let label = |suffix: &str| p.text_fields().expect("fields").into_iter().find(|f| f.path.ends_with(&format!("{suffix}.text_mc.text_txt"))).map(|f| f.text);
+        assert!(label(&suffix).is_some_and(|t| !t.is_empty()), "the original's label is set");
+        assert_eq!(label(".buttonHolder_mc.buttonCopy_mc").as_deref(), Some(""), "nothing names the copy's label");
+        let d = moved_by(&shapes(&items), &shapes(&draw(&mut p, &named, ".buttonHolder_mc.buttonCopy_mc"))).expect("the copy");
+        assert!(d[0] == 0.0 && d[1] > 0.0, "the copy sits below: {d:?}");
+        assert!(moved_by(&items, &draw(&mut p, &named, &suffix)).is_err_and(|e| e == "nothing moved"), "the original stays put");
+        println!("{name} at depth {}: moved by {d:?}; copied to depth {depth}", button.depth);
+    }
+
     /// Retail's movies are written as `gfx_tags`' exporter rules say: rewriting every typed tag with
     /// those widths and header forms gives each movie of the archive back byte for byte. Over the
     /// default stack, whose `vz-patch.wad` movies came from another writer, the rewrite keeps what each
