@@ -119,7 +119,7 @@ impl Kind {
             Kind::Animation => Preview::View("plays on the hero, the model you choose for clips"),
             Kind::Effect => Preview::View("plays on the pedestal, in the game's own particle sim"),
             Kind::Audio => Preview::None("playback is not wired into the Library yet"),
-            Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
+            Kind::UiGfx => Preview::View("plays in the viewport"),
             Kind::FaceFx => Preview::View("an actor shows its face poses; a set plays on the character it belongs to"),
             Kind::Text => Preview::View("a string table opens every table side by side; a font, its pages and glyphs"),
             Kind::Layer => Preview::View("every entity of the layer, where the layer places it"),
@@ -291,12 +291,84 @@ pub fn name_group(name: Option<&str>) -> NameGroup {
     NameGroup { header: GROUP_OTHER.into(), sub: None, short: name.to_string() }
 }
 
+/// What opens each Scaleform movie, from `data/ui_movies.tsv`: lower-cased name → (group, parent).
+fn ui_movies() -> &'static HashMap<String, (String, Option<String>)> {
+    static TABLE: std::sync::OnceLock<HashMap<String, (String, Option<String>)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        include_str!("../data/ui_movies.tsv")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .skip(1)
+            .map(|l| {
+                let c: Vec<&str> = l.split('\t').collect();
+                let parent = c.get(2).filter(|p| !p.is_empty()).map(|p| p.to_string());
+                (c[0].to_ascii_lowercase(), (c[1].to_string(), parent))
+            })
+            .collect()
+    })
+}
+
+/// The group of a UI movie: what opens it in the game (`data/ui_movies.tsv`), a movie another one
+/// loads into itself in its parent's sub-group, so the PDA's tabs sit under `topbar`. A named movie the
+/// table does not hold is under [`GROUP_OTHER`]; no name, [`GROUP_UNNAMED`].
+pub fn ui_group(name: Option<&str>) -> NameGroup {
+    let Some(name) = name else {
+        return NameGroup { header: GROUP_UNNAMED.into(), sub: None, short: String::new() };
+    };
+    match ui_movies().get(&name.to_ascii_lowercase()) {
+        Some((group, parent)) => NameGroup { header: group.clone(), sub: parent.clone(), short: name.to_string() },
+        None => NameGroup { header: GROUP_OTHER.into(), sub: None, short: name.to_string() },
+    }
+}
+
+/// The group a row of `kind` lists under, for the tabs whose lists group by name
+/// ([`name_group`] for Anims and FaceFX, [`ui_group`] for UI).
+pub fn row_group(kind: Kind, name: Option<&str>) -> NameGroup {
+    match kind {
+        Kind::UiGfx => ui_group(name),
+        _ => name_group(name),
+    }
+}
+
 /// The order [`name_group`] headers list in: by name, then [`GROUP_OTHER`], then [`GROUP_UNNAMED`].
 pub fn name_group_rank(header: &str) -> (u8, &str) {
     match header {
         GROUP_OTHER => (1, header),
         GROUP_UNNAMED => (2, header),
         _ => (0, header),
+    }
+}
+
+#[cfg(test)]
+mod ui_group_tests {
+    use super::{ui_group, ui_movies, GROUP_OTHER, GROUP_UNNAMED};
+
+    /// A PDA tab sits under `topbar`, which loads it; `topbar` heads its own group; a movie nothing is
+    /// known to open is OTHER, a hash-only row UNNAMED; names match ignoring case.
+    #[test]
+    fn a_movie_lists_under_what_opens_it() {
+        let g = ui_group(Some("Database"));
+        assert_eq!((g.header.as_str(), g.sub.as_deref(), g.short.as_str()), ("PDA", Some("topbar"), "Database"));
+        let g = ui_group(Some("TOPBAR"));
+        assert_eq!((g.header.as_str(), g.sub.as_deref()), ("PDA", None));
+        assert_eq!(ui_group(Some("snatch_moment")).header, GROUP_OTHER);
+        assert_eq!(ui_group(None).header, GROUP_UNNAMED);
+    }
+
+    /// Every row of `data/ui_movies.tsv` names a group and its evidence, and a parent is a movie the
+    /// table lists in the same group.
+    #[test]
+    fn the_table_is_whole() {
+        let body = include_str!("../data/ui_movies.tsv");
+        for line in body.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).skip(1) {
+            let c: Vec<&str> = line.split('\t').collect();
+            assert_eq!(c.len(), 4, "{line}");
+            assert!(!c[1].is_empty() && !c[3].is_empty(), "{line}");
+            if !c[2].is_empty() {
+                let parent = ui_movies().get(&c[2].to_ascii_lowercase()).unwrap_or_else(|| panic!("{line}: parent not listed"));
+                assert_eq!(parent.0, c[1], "{line}: parent in another group");
+            }
+        }
     }
 }
 
