@@ -713,6 +713,48 @@ mod retail_tests {
         }
     }
 
+    /// Retail's movies are written as `gfx_tags`' exporter rules say: rewriting every typed tag with
+    /// those widths and header forms gives each movie of the archive back byte for byte. Over the
+    /// default stack, whose `vz-patch.wad` movies came from another writer, the rewrite keeps what each
+    /// movie defines.
+    #[test]
+    fn retail_movies_follow_the_exporter_rules() {
+        use mercs2_formats::gfx_stream::TagStream;
+        use mercs2_formats::gfx_tags::write_as_exported;
+        let vz = crate::app::retail_vz_wad();
+        for (overlays, byte_exact) in [(Vec::new(), true), (crate::app::overlays_for(&vz, true, &[]), false)] {
+            let mut w = WadStack::open(&vz, &overlays).expect("open retail vz.wad");
+            let index = AssetIndex::build(&w.wads, &w.side, crate::index::load_all_names().expect("names"));
+            let rows: Vec<_> = index.rows(Kind::UiGfx).to_vec();
+            assert!(!rows.is_empty(), "the UI tab lists no rows");
+            let (mut failed, mut other_bytes) = (Vec::new(), Vec::new());
+            for row in &rows {
+                let label = row.label();
+                let result = (|| -> Result<bool, String> {
+                    let file = movie_bytes(&mut w, row.src, row.hash, &label)?;
+                    let read = TagStream::parse(&file)?;
+                    let mut rewritten = read.clone();
+                    write_as_exported(&mut rewritten.tags)?;
+                    let same_bytes = rewritten.body() == read.body() && rewritten.file()?[..8] == file[..8];
+                    if byte_exact && !same_bytes {
+                        return Err("the rewrite changed its bytes".into());
+                    }
+                    if MovieDef::decode(&rewritten)? != MovieDef::decode(&read)? {
+                        return Err("the rewrite changed what it defines".into());
+                    }
+                    Ok(same_bytes)
+                })();
+                match result {
+                    Ok(true) => {}
+                    Ok(false) => other_bytes.push(label),
+                    Err(e) => failed.push(format!("{label} (0x{:08X}, {}): {e}", row.hash, w.source_path(row.src))),
+                }
+            }
+            println!("{overlays:?}: {} movies, {} failed, {} written in other bytes {other_bytes:?}", rows.len(), failed.len(), other_bytes.len());
+            assert!(failed.is_empty(), "{} of {} movies failed:\n{}", failed.len(), rows.len(), failed.join("\n"));
+        }
+    }
+
     /// Every tag [`mercs2_formats::gfx_tags`] types, in `tags` and every sprite's timeline, reads and
     /// writes back to its bytes; counted by code, with the strings that are not UTF-8.
     fn typed_tags_write_back(tags: &[mercs2_formats::gfx_stream::Tag], checked: &mut BTreeMap<u16, usize>, not_utf8: &mut usize) -> Result<(), String> {
