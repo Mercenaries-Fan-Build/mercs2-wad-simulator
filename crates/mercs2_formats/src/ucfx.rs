@@ -377,7 +377,7 @@ pub fn extract_data_chunk_safe(container: &SafeSlice) -> AccessResult<SafeSlice>
 /// ```
 ///
 /// The payload is copied VERBATIM. Nothing here inspects it — validate before calling, the way
-/// `GfxMovie::parse` gates the movie path, because a container whose `data` leaf is not what its
+/// `gfx_stream::TagStream::parse` gates the movie path, because a container whose `data` leaf is not what its
 /// type claims still checksums, still walks and still resolves; the loader is the first thing that
 /// finds out, and it does not say which asset.
 ///
