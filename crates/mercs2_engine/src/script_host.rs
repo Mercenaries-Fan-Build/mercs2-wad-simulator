@@ -2632,6 +2632,27 @@ mod tests {
         assert!(marker.pulsing);
     }
 
+    /// `SetWidgetLocation` as `FUN_005B4FA0` sets it: a coordinate that is not a number keeps its value,
+    /// and `x1, y1` alone moves the widget whole, keeping its size.
+    #[test]
+    fn set_widget_location_keeps_what_it_is_not_given() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+        let at = |lua: &str| -> (f32, f32, f32, f32) {
+            sh.exec(lua, "@loc").unwrap();
+            sh.eval("return _GuiInternal.GetWidgetLocation(w)").unwrap()
+        };
+        assert_eq!(at("w = _GuiInternal.CreateImageWidget() _GuiInternal.SetWidgetLocation(w, 10, 20, 110, 70)"), (10.0, 20.0, 110.0, 70.0));
+        // `MrxGuiHudFactionGauge`'s `SetLocation(nX2, nil, nX2, nil)`: the y edges stay.
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, 90, nil, 90, nil, true)"), (90.0, 20.0, 90.0, 70.0));
+        // Two numbers move the rect, far corner with it (vtbl `+0x14`).
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, 100, 200, 340, 264)"), (100.0, 200.0, 340.0, 264.0));
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, 128, 68)"), (128.0, 68.0, 368.0, 132.0));
+        // A numeric string is a number to `lua_isnumber`.
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, '0', '0', nil, 1)"), (0.0, 0.0, 368.0, 1.0));
+    }
+
     /// The presentation namespaces drive the real `mercs2_core::RenderSettings`: the atmosphere generic
     /// value/color store + bloom/graphics/fade params round-trip through Lua (were no-op stubs).
     #[test]
