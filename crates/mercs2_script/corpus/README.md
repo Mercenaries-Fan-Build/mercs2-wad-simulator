@@ -37,7 +37,7 @@ Carried forward from the corpus's own README so the origin is not lost in the co
 |---|---|
 | Source WAD | `game-files/vz.wad` — **byte-identical** to the game's deployed `data/vz.wad` (size `2565537792`, qsha256 head+tail `502e290f…863696f`) |
 | Verified | Loads cleanly to 100% (`loadprobe` REACHED-WORLD). **Base game, no DLC** — no `dlccon*`/blitz/arena; base contracts (pmccon/gurcon/chicon) all present |
-| Blocks | `blocks\VZ\resident_P000_Q3.block` (idx 3185), `scripts_vz_P000_Q3.block` (idx 3197), `shell.wad` block 17 |
+| Blocks | `blocks\VZ\resident_P000_Q3.block` (idx 3185), `scripts_vz_P000_Q3.block` (idx 3197), `shell.wad` block 17; `vz_guilayouts/` from `blocks\VZ\guilayouts_P000_Q3.block` |
 | Decompiler | `unluac` on `lua51-mercs2` float bytecode |
 | Coverage | **370 / 382**. The 12 failures are the empty `all_*` stubs (`all_weapons`, `all_vehicles`, …) plus 2 goto-heavy scripts — no content lost |
 
@@ -46,6 +46,9 @@ Carried forward from the corpus's own README so the origin is not lost in the co
 - `mercs2-luacd/src/resident/` (228) — `Mrx*` engine/library modules + world-entity scripts
 - `mercs2-luacd/src/vz/` (114) — contracts, jobs, tutorials, WIF data tables
 - `mercs2-luacd/src/shell/` (28) — front-end menu / shell GUI
+- `mercs2-luacd/src/vz_guilayouts/` (4) — the HUD, binoculars, satellite and PDA layouts
+  `MrxGuiManager.CreateGui` imports; copied from the research repo's `docs/mercs2-luacd/src/vz_guilayouts/`
+  (sha256 equal)
 - `stubs/` — **ours, not the game's.** Stand-ins for shipped modules the 370/382 decompile lacks. This
   root is searched *after* the corpus, so a module that later decompiles automatically shadows its
   stand-in. Each file documents why it exists and what removes it.
