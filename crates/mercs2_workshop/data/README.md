@@ -21,6 +21,13 @@ only through `mercs2_formats::hash::is_identifier_shaped` and `rejected_names.js
 to an asset can be collision debris), `bone_name_candidates.txt`, `live_registry_hashes.csv`; and the
 parent repo's `tools/rainbow_table.json`.
 
+## UI movies
+
+`ui_movies.tsv` groups the Inspect UI tab's list (`index::ui_group`): each Scaleform movie under what
+opens it in the game, a movie another one loads into its `_level1` under that parent, every row with its
+evidence (the shipped-Lua line, the parent's `getURL`, the movie's content, or the sibling name
+convention when nothing names it). Edited by hand; `index::ui_group_tests` checks every row.
+
 ## Regenerate `production_names.json` (after new names land)
 1. Fold verified names into `aset_discovered_names.json` here (and `tools/rainbow_table.json` in the
    parent repo).
