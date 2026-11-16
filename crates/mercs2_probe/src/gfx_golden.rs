@@ -90,25 +90,29 @@ pub fn gfx_run(dir: &Path, frames: u32) -> Result<(), String> {
     let mut failed = 0;
     let mut commands: BTreeMap<String, usize> = BTreeMap::new();
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+    let mut on_undefined: BTreeMap<String, usize> = BTreeMap::new();
     for path in &files {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let def = std::rc::Rc::new(GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?);
         let frame_ms = 1000.0 / def.frame_rate.max(1.0) as f64;
-        let run = (|| -> Result<(Vec<(String, String)>, Vec<String>), String> {
+        let run = (|| -> Result<(Vec<(String, String)>, Vec<String>, Vec<String>), String> {
             let mut player = Player::new(Movie::new(def.clone())?)?;
             for _ in 1..frames {
                 player.advance(frame_ms)?;
             }
             player.movie.draw()?;
-            Ok((player.fscommands.clone(), player.missing.iter().cloned().collect()))
+            Ok((player.fscommands.clone(), player.missing.iter().cloned().collect(), player.on_undefined.iter().cloned().collect()))
         })();
         match run {
-            Ok((fs, gaps)) => {
+            Ok((fs, gaps, unresolved)) => {
                 for (c, _) in fs {
                     *commands.entry(c).or_default() += 1;
                 }
                 for g in gaps {
                     *missing.entry(g).or_default() += 1;
+                }
+                for u in unresolved {
+                    *on_undefined.entry(u).or_default() += 1;
                 }
             }
             Err(e) => {
@@ -121,6 +125,9 @@ pub fn gfx_run(dir: &Path, frames: u32) -> Result<(), String> {
     println!("fscommands {commands:?}");
     for (name, count) in &missing {
         println!("missing in {count:>3}: {name}");
+    }
+    for (name, count) in &on_undefined {
+        println!("called on undefined in {count:>3}: {name}");
     }
     if failed != 0 {
         return Err(format!("{failed} movies failed"));
@@ -157,6 +164,7 @@ pub fn gfx_render(movie: &Path, frames: u32, png_path: &Path, wads: &[String], f
     println!("traces {:?}", player.traces);
     println!("fscommands {:?}", player.fscommands);
     println!("missing {:?}", player.missing);
+    println!("on undefined {:?}", player.on_undefined);
     let items = player.movie.draw()?;
     for item in &items {
         if let mercs2_engine::gfx::stage::Item::Draw(d) = item {
