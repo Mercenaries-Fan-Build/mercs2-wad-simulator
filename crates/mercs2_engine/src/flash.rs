@@ -9,7 +9,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use mercs2_formats::gfx::GfxMovie;
 use mercs2_formats::gfx_def::MovieDef;
 use mercs2_gfx::avm::{FsCommandHook, Player, Value};
 use mercs2_gfx::stage::{Item, Movie};
@@ -442,7 +441,7 @@ impl FlashStage {
 
 fn read_movie(assets: &mut WadImages, stem: &str) -> Result<MovieDef, String> {
     let bytes = assets.movie(stem)?;
-    MovieDef::decode(&GfxMovie::parse(&bytes).map_err(|e| format!("{stem}: {e}"))?).map_err(|e| format!("{stem}: {e}"))
+    MovieDef::read(&bytes).map_err(|e| format!("{stem}: {e}"))
 }
 
 #[cfg(test)]
