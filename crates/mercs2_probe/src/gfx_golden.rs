@@ -51,7 +51,7 @@ pub fn gfx_decode(dir: &Path) -> Result<(), String> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for path in &files {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        match GfxMovie::parse(&bytes).and_then(|movie| MovieDef::decode(&movie)) {
+        match MovieDef::read(&bytes) {
             Ok(def) => {
                 for c in def.characters.values() {
                     let kind = match c {
@@ -93,7 +93,7 @@ pub fn gfx_run(dir: &Path, frames: u32) -> Result<(), String> {
     let mut on_undefined: BTreeMap<String, usize> = BTreeMap::new();
     for path in &files {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let def = std::rc::Rc::new(GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?);
+        let def = std::rc::Rc::new(MovieDef::read(&bytes)?);
         let frame_ms = 1000.0 / def.frame_rate.max(1.0) as f64;
         let run = (|| -> Result<(Vec<(String, String)>, Vec<String>, Vec<String>), String> {
             let mut player = Player::new(Movie::new(def.clone())?)?;
@@ -144,7 +144,7 @@ pub fn gfx_render(movie: &Path, frames: u32, png_path: &Path, wads: &[String], f
 
     let load = |path: &Path| -> Result<MovieDef, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))
+        MovieDef::read(&bytes)
     };
     let def = std::rc::Rc::new(load(movie)?);
     let mut images = WadImages::open(wads)?;
@@ -322,7 +322,7 @@ fn print_actions(code: &[u8], out: &mut String) {
 /// Write every action block of a movie as text, each headed by where it lives.
 pub fn gfx_actions(movie: &Path, out_path: &Path) -> Result<(), String> {
     let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
-    let def = GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?;
+    let def = MovieDef::read(&bytes)?;
     let mut out = String::new();
     let mut timeline = |name: String, t: &mercs2_formats::gfx_def::Timeline| {
         for (index, frame) in t.frames.iter().enumerate() {
@@ -359,7 +359,7 @@ pub fn gfx_actions(movie: &Path, out_path: &Path) -> Result<(), String> {
 pub fn gfx_tags(movie: &Path, out_path: &Path) -> Result<(), String> {
     use mercs2_formats::gfx_def::{Control, Timeline};
     let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
-    let def = GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?;
+    let def = MovieDef::read(&bytes)?;
     let mut out = String::new();
     let mut timeline = |name: String, t: &Timeline| {
         out.push_str(&format!("== {name}: {} frames (declares {})\n", t.frames.len(), t.declared_frames));
