@@ -9,41 +9,15 @@
 //! `gfxforge`) can byte-validate a new emitter against a movie the game actually loads.
 //!
 //! A `.gfx` is a SWF tag stream with a GFx header: magic `GFX`/`CFX` (`C` = zlib-compressed, the
-//! form retail ships) — the SWF cousins `FWS`/`CWS` are also accepted. After the 8-byte header
-//! (magic[3] + `u8 version` + `u32 file_length`) comes the (optionally zlib-inflated) body:
-//! a frame-size `RECT`, `u16` frame-rate, `u16` frame-count, then the tag records.
+//! form retail ships) — the SWF cousins `FWS`/`CWS` are also accepted. The stream itself is read by
+//! [`crate::gfx_stream::TagStream`]; [`features`] counts what its top-level tags exercise.
 //!
-//! Scope: the container + the top-level tag stream are parsed exactly; shape bodies are parsed only
-//! as far as the **fill-style array** (all that's needed to flag gradient/bitmap fills). The tag
-//! bodies a player needs are decoded by [`crate::gfx_def`].
+//! Scope: shape bodies are parsed only as far as the **fill-style array** (all that's needed to flag
+//! gradient/bitmap fills). The tag bodies a player needs are decoded by [`crate::gfx_def`].
 
 use std::collections::BTreeMap;
-use std::io::Read;
 
-/// A parsed `.gfx`/SWF movie: container header + the flat top-level tag list.
-#[derive(Debug, Clone)]
-pub struct GfxMovie {
-    /// 3-byte magic as ASCII (`GFX`/`CFX`/`FWS`/`CWS`).
-    pub magic: [u8; 3],
-    /// Header version byte (retail GFx = `8`).
-    pub version: u8,
-    /// Whether the body was zlib-compressed (`CFX`/`CWS`).
-    pub compressed: bool,
-    /// Declared uncompressed file length (header `u32`).
-    pub file_length: u32,
-    /// Frame size in twips: `[x_min, x_max, y_min, y_max]` (÷20 = pixels).
-    pub frame_size: [i32; 4],
-    /// Frame rate (8.8 fixed → f32).
-    pub frame_rate: f32,
-    /// Frame count.
-    pub frame_count: u16,
-    /// Every tag in stream order: `(code, body_length)`.
-    pub tags: Vec<(u16, usize)>,
-    /// The decompressed body (header stripped) — kept so `features()` can re-read tag bodies.
-    body: Vec<u8>,
-    /// Byte offset in `body` of each tag's *body* (parallel to `tags`).
-    tag_body_offsets: Vec<usize>,
-}
+use crate::gfx_stream::{TagBody, TagStream};
 
 /// Feature inventory of a movie — the golden-set signal. Every field is a count of the tags /
 /// shapes that exercise that feature.
@@ -254,142 +228,52 @@ pub fn tag_name(code: u16) -> &'static str {
     }
 }
 
-impl GfxMovie {
-    /// Parse the container + top-level tag stream. Zlib-inflates a `CFX`/`CWS` body.
-    pub fn parse(data: &[u8]) -> Result<GfxMovie, String> {
-        if data.len() < 8 {
-            return Err("too small for header".into());
-        }
-        let magic = [data[0], data[1], data[2]];
-        let compressed = matches!(&magic, b"CFX" | b"CWS");
-        let is_gfx = matches!(&magic, b"GFX" | b"CFX");
-        if !is_gfx && !matches!(&magic, b"FWS" | b"CWS") {
-            return Err(format!(
-                "bad magic {:?} (want GFX/CFX/FWS/CWS)",
-                String::from_utf8_lossy(&magic)
-            ));
-        }
-        let version = data[3];
-        let file_length = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-
-        let body: Vec<u8> = if compressed {
-            let mut out = Vec::with_capacity(file_length.saturating_sub(8) as usize);
-            flate2::read::ZlibDecoder::new(&data[8..])
-                .read_to_end(&mut out)
-                .map_err(|e| format!("zlib inflate: {e}"))?;
-            out
-        } else {
-            data[8..].to_vec()
+/// The feature inventory of a movie's top-level tags (shape bodies read as far as their fills).
+pub fn features(movie: &TagStream) -> Features {
+    let mut f = Features::default();
+    for t in &movie.tags {
+        let code = t.code;
+        *f.tag_counts.entry(code).or_insert(0) += 1;
+        let tag: &[u8] = match &t.body {
+            TagBody::Raw(b) => b,
+            TagBody::Sprite { .. } => &[],
         };
-
-        let mut cur = Cursor::new(&body, 0);
-        let frame_size = cur.read_rect()?;
-        let frame_rate = cur.u16()? as f32 / 256.0;
-        let frame_count = cur.u16()?;
-
-        // Tag stream: u16 {code<<6 | len}; len==0x3F → u32 long length.
-        let mut tags = Vec::new();
-        let mut tag_body_offsets = Vec::new();
-        let mut off = cur.pos;
-        while off + 2 <= body.len() {
-            let rh = u16::from_le_bytes([body[off], body[off + 1]]) as usize;
-            off += 2;
-            let code = (rh >> 6) as u16;
-            let mut len = rh & 0x3F;
-            if len == 0x3F {
-                if off + 4 > body.len() {
-                    return Err("truncated long-tag length".into());
-                }
-                len = u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]])
-                    as usize;
-                off += 4;
-            }
-            if off + len > body.len() {
-                return Err(format!(
-                    "tag {code} body overruns ({} > {})",
-                    off + len,
-                    body.len()
-                ));
-            }
-            tags.push((code, len));
-            tag_body_offsets.push(off);
-            off += len;
-            if code == 0 {
-                break; // End
-            }
-        }
-
-        Ok(GfxMovie {
-            magic,
-            version,
-            compressed,
-            file_length,
-            frame_size,
-            frame_rate,
-            frame_count,
-            tags,
-            body,
-            tag_body_offsets,
-        })
-    }
-
-    /// Every tag in stream order with its body.
-    pub fn tag_bodies(&self) -> impl Iterator<Item = (u16, &[u8])> {
-        self.tags.iter().zip(&self.tag_body_offsets).map(|(&(code, len), &off)| (code, &self.body[off..off + len]))
-    }
-
-    /// Frame size in pixels `[w, h]` (twips ÷ 20).
-    pub fn stage_px(&self) -> [f32; 2] {
-        [
-            (self.frame_size[1] - self.frame_size[0]) as f32 / 20.0,
-            (self.frame_size[3] - self.frame_size[2]) as f32 / 20.0,
-        ]
-    }
-
-    /// Compute the feature inventory (deeper per-tag parse for shape fills).
-    pub fn features(&self) -> Features {
-        let mut f = Features::default();
-        for (i, &(code, len)) in self.tags.iter().enumerate() {
-            *f.tag_counts.entry(code).or_insert(0) += 1;
-            let body_off = self.tag_body_offsets[i];
-            let tag = &self.body[body_off..body_off + len];
-            match code {
-                2 | 22 | 32 | 83 => {
-                    f.shapes += 1;
-                    let has_alpha = code == 32 || code == 83; // DefineShape3/4 = RGBA
-                    let extended_count = code != 2; // DefineShape2+ allow 0xFF-extended counts
-                    match scan_shape_fills(tag, has_alpha, extended_count) {
-                        Ok(fills) => {
-                            if fills.gradient {
-                                f.shapes_with_gradient += 1;
-                            }
-                            if fills.bitmap {
-                                f.shapes_with_bitmap += 1;
-                            }
-                            if fills.focal {
-                                f.shapes_with_focal_gradient += 1;
-                            }
+        match code {
+            2 | 22 | 32 | 83 => {
+                f.shapes += 1;
+                let has_alpha = code == 32 || code == 83; // DefineShape3/4 = RGBA
+                let extended_count = code != 2; // DefineShape2+ allow 0xFF-extended counts
+                match scan_shape_fills(tag, has_alpha, extended_count) {
+                    Ok(fills) => {
+                        if fills.gradient {
+                            f.shapes_with_gradient += 1;
                         }
-                        Err(_) => f.shapes_parse_incomplete += 1,
+                        if fills.bitmap {
+                            f.shapes_with_bitmap += 1;
+                        }
+                        if fills.focal {
+                            f.shapes_with_focal_gradient += 1;
+                        }
                     }
+                    Err(_) => f.shapes_parse_incomplete += 1,
                 }
-                10 | 48 | 75 => f.embedded_fonts += 1,
-                57 | 71 => f.imports += 1,
-                56 => f.exports += 1,
-                37 => f.edit_texts += 1,
-                6 | 20 | 21 | 35 | 36 => f.embedded_bitmaps += 1,
-                39 => f.sprites += 1,
-                7 | 34 => f.buttons += 1,
-                46 | 84 => f.morph_shapes += 1,
-                60 => f.videos += 1,
-                12 | 59 => f.do_action += 1,
-                82 => f.do_abc += 1,
-                c if c >= 1000 => f.gfx_ext_tags += 1,
-                _ => {}
             }
+            10 | 48 | 75 => f.embedded_fonts += 1,
+            57 | 71 => f.imports += 1,
+            56 => f.exports += 1,
+            37 => f.edit_texts += 1,
+            6 | 20 | 21 | 35 | 36 => f.embedded_bitmaps += 1,
+            39 => f.sprites += 1,
+            7 | 34 => f.buttons += 1,
+            46 | 84 => f.morph_shapes += 1,
+            60 => f.videos += 1,
+            12 | 59 => f.do_action += 1,
+            82 => f.do_abc += 1,
+            c if c >= 1000 => f.gfx_ext_tags += 1,
+            _ => {}
         }
-        f
     }
+    f
 }
 
 /// Result of scanning a shape's fill-style array.
@@ -482,7 +366,7 @@ fn scan_shape_fills(
 /// **The movie is copied verbatim.** No recompression, in either direction. Retail `vz.wad` ships 61
 /// zlib `CFX` movies and 3 uncompressed `GFX` ones, so the loader demonstrably takes both, and re-encoding
 /// would replace bytes the author verified with bytes nobody has. Validate the movie with
-/// [`GfxMovie::parse`] *before* calling this — it is the check that the thing being wrapped is a
+/// [`TagStream::parse`] *before* calling this — it is the check that the thing being wrapped is a
 /// movie at all.
 pub fn build_cfx_pack_block(name_hash: u32, movie: &[u8]) -> Vec<u8> {
     // Delegates to the generic wrapper. The layout below was measured for `cfx_pack` first; the
@@ -553,11 +437,11 @@ mod tests {
         file.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
         file.extend_from_slice(&body);
 
-        let m = GfxMovie::parse(&file).expect("parse");
+        let m = TagStream::parse(&file).expect("parse");
         assert_eq!(&m.magic, b"GFX");
-        assert!(!m.compressed);
-        assert_eq!(m.frame_rate, 30.0);
-        let f = m.features();
+        assert!(!m.compressed());
+        assert_eq!(m.frame_rate, 30 << 8);
+        let f = features(&m);
         assert_eq!(f.shapes, 1);
         assert_eq!(f.shapes_with_gradient, 1);
         assert_eq!(f.shapes_with_bitmap, 0);
@@ -565,7 +449,7 @@ mod tests {
         assert_eq!(*f.tag_counts.get(&32).unwrap(), 1);
     }
 
-    /// The smallest thing [`GfxMovie::parse`] accepts: header, stage, and a lone `End` tag.
+    /// The smallest thing [`TagStream::parse`] accepts: header, stage, and a lone `End` tag.
     fn tiny_movie() -> Vec<u8> {
         let mut body = Vec::new();
         body.push(0); // frame RECT: nbits = 0 in the top 5 bits, so the bounds are empty
@@ -612,7 +496,7 @@ mod tests {
         let data = crate::ucfx::extract_chunk_body(container, b"data").expect("a `data` leaf");
         assert_eq!(data, movie, "the movie must be carried verbatim");
         // And it is still a movie after the round trip, not merely the same length.
-        assert_eq!(&GfxMovie::parse(&data).expect("re-parse").magic, b"GFX");
+        assert_eq!(&TagStream::parse(&data).expect("re-parse").magic, b"GFX");
         // The extractor-side inverse gives back exactly the movie: no CSUM trailer appended.
         assert_eq!(cfx_pack_movie(container, "cfx test").expect("movie"), movie);
     }
