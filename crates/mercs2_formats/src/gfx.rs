@@ -110,6 +110,17 @@ impl<'a> Cursor<'a> {
             self.pos += 1;
         }
     }
+    /// Byte-align, failing when a skipped bit is set: the writer cannot recompute such padding.
+    pub(crate) fn align_zero(&mut self) -> Result<(), String> {
+        if self.bit != 0 {
+            let rest = 8 - self.bit as u32;
+            let pad = self.ubits(rest)?;
+            if pad != 0 {
+                return Err(format!("{rest} padding bits before byte {} are 0b{pad:0w$b}, not zero", self.pos, w = rest as usize));
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn u8(&mut self) -> Result<u8, String> {
         self.align();
         let b = *self.data.get(self.pos).ok_or("eof:u8")?;
