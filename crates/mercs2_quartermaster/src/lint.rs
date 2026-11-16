@@ -2043,10 +2043,10 @@ fn movie_checks(index: usize, name: &str, root: &Path, movie: &Path) -> Vec<Diag
         // M0110 already reports a missing source; an unreadable one is not this rule's business.
         return Vec::new();
     };
-    let Ok(parsed) = mercs2_formats::gfx::GfxMovie::parse(&bytes) else {
+    let Ok(parsed) = mercs2_formats::gfx_stream::TagStream::parse(&bytes) else {
         return Vec::new();
     };
-    let features = parsed.features();
+    let features = mercs2_formats::gfx::features(&parsed);
     if features.do_abc == 0 {
         return Vec::new();
     }
