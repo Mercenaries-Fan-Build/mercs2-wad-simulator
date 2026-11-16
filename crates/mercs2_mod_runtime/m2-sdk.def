@@ -48,4 +48,7 @@ EXPORTS
     m2_lua_debug_request
     m2_lua_debug_disconnected
     m2_render_tree_sites
+    m2_render_display_mode_sites
+    m2_render_display_mode_filter
+    m2_render_pick_display_mode
     m2_render_last_error

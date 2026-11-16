@@ -283,6 +283,52 @@ fn chatter_sites_resolve_in_every_reference_build() {
 }
 
 #[test]
+fn display_mode_sites_resolve_in_every_reference_build() {
+    use mercs2_formats::display_mode_sites::{resolve as resolve_modes, DisplayModeSites, ModeIndex, Settings};
+    for (id, v11, bytes) in images() {
+        let s = resolve_modes(&Image::from_file(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap_or_else(|e| panic!("{id}: {e}"));
+        // Read with capstone from both dumps: the constructor loop's refresh test, skip label and keep path,
+        // ApplySettings' two search calls (`FUN_0074c7ac` v1.0), the search stub, SetMode, the pending state
+        // global and the settings globals; the list and count offsets from the search body and its moved
+        // forwarder (v1.0 0x4BC356, v1.1 0x40A271).
+        let want = if v11 {
+            DisplayModeSites {
+                refresh_cmp: 0x754e07,
+                skip: 0x754f24,
+                keep: 0x754e7b,
+                index: ModeIndex::Ebx,
+                find_mode: 0x7556f0,
+                first_search_call: 0x74cccb,
+                fallback_call: 0x74cd2e,
+                set_mode: 0x755570,
+                pending_state: 0x117528c,
+                settings: Settings { width: 0xdfb328, height: 0xdfb32c, bpp_index: 0xdfb330, refresh: 0xdfb334 },
+                list_offset: 0x5d4,
+                count_offset: 0x5d8,
+                adapter_offset: 0,
+            }
+        } else {
+            DisplayModeSites {
+                refresh_cmp: 0x754c0d,
+                skip: 0x754d2b,
+                keep: 0x754c80,
+                index: ModeIndex::Stack(0x14),
+                find_mode: 0x755500,
+                first_search_call: 0x74cabb,
+                fallback_call: 0x74cb1e,
+                set_mode: 0x755380,
+                pending_state: 0x117628c,
+                settings: Settings { width: 0xdfc328, height: 0xdfc32c, bpp_index: 0xdfc330, refresh: 0xdfc334 },
+                list_offset: 0x5d4,
+                count_offset: 0x5d8,
+                adapter_offset: 0,
+            }
+        };
+        assert_eq!(s, want, "{id} display-mode sites");
+    }
+}
+
+#[test]
 fn tree_sites_resolve_in_every_reference_build() {
     use mercs2_formats::tree_sites::{resolve as resolve_trees, TreeSites};
     for (id, v11, bytes) in images() {
