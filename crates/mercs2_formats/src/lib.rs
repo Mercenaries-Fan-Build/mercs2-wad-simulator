@@ -61,8 +61,12 @@
 //!   encode.
 //! - [`facefx`] — the `facefxactor` / `facefxanimationset` FaceFX SDK archives: face bones, the
 //!   face graph and its bone poses, anim curves.
-//! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
-//!   dictionaries; the `Graphics.Atmosphere.*` sky/HDR parameter model; Scaleform GFx/SWF.
+//! - [`orchestrator`], [`fxdict`], [`atmosphere`] — destruction state machines; FX dictionaries; the
+//!   `Graphics.Atmosphere.*` sky/HDR parameter model.
+//! - [`gfx`], [`gfx_stream`], [`gfx_tags`], [`gfx_def`] — Scaleform GFx/SWF movies: the feature
+//!   inventory and `cfx_pack` container; the tag stream read and written byte for byte; the layout
+//!   tags (placements, frames, labels, edit text, exports, imports) as stored values that write back
+//!   to their bytes; the definitions the player draws, read through those.
 //! - [`save`], [`save_write`] — the PC `.profile` save (13,404 bytes, zlib Lua payload at `0x468`).
 //! - [`shader3`], [`sm3asm`] — the PC shader stores (parse, record ids, retail-layout writer) and the
 //!   Shader Model 3 assembler/exact disassembler.
