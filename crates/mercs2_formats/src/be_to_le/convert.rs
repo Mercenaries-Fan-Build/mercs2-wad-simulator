@@ -408,8 +408,8 @@ fn convert_container(
         fix_embedded_havok_layoutrules(container, &mut out);
     }
 
-    // Xbox 360 wavebanks: transcode embedded audio clips (PCM byte swap / XMA, XMA2
-    // and MP3 via ffmpeg → PC PCM16) and reframe the container (the audio body resizes).
+    // Console wavebanks: transcode embedded audio clips (PCM byte swap / MP3 decoded →
+    // PC PCM16; XMA and XMA2 are refused) and reframe the container (the audio body resizes).
     // The generic pass left the `data` chunk raw BE for this.
     if is_be && type_hash == types::TYPE_HASH_WAVEBANK {
         apply_wavebank_transcode(&mut out, &descriptors, data_area_off, desc_table_end, stream)?;
@@ -1116,8 +1116,8 @@ fn convert_generic_bodies(
                     }
                     ChunkTag::Data if type_hash == types::TYPE_HASH_WAVEBANK => {
                         // Wavebank `data` is the audio body. Leave it RAW BE here; it
-                        // is transcoded (PCM byte swap / XMA, XMA2 and MP3 via ffmpeg →
-                        // PC PCM16) and the container reframed by apply_wavebank_transcode
+                        // is transcoded (PCM byte swap / MP3 decoded → PC PCM16; XMA and
+                        // XMA2 refused) and the container reframed by apply_wavebank_transcode
                         // afterward — the body resizes, so it can't be an in-place swap
                         // (mirrors the texture BODY path left raw for apply_texture_untile).
                     }
