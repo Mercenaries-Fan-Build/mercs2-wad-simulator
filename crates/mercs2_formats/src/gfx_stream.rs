@@ -54,6 +54,20 @@ pub enum TagBody {
     Sprite { id: u16, frame_count: u16, tags: Vec<Tag>, trailing: Vec<u8> },
 }
 
+impl Tag {
+    /// The body's length as [`write_tags`] writes it.
+    pub fn body_len(&self) -> usize {
+        match &self.body {
+            TagBody::Raw(b) => b.len(),
+            TagBody::Sprite { tags, trailing, .. } => {
+                let mut b = Vec::new();
+                write_tags(tags, &mut b);
+                4 + b.len() + trailing.len()
+            }
+        }
+    }
+}
+
 /// A `.gfx` file's body after its eight-byte header, inflated when the magic says it is deflated.
 pub fn inflate(file: &[u8]) -> Result<Vec<u8>, String> {
     if file.len() < 8 {
