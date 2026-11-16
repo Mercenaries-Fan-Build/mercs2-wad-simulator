@@ -9,10 +9,17 @@
 //! set, or when a bit no field models is set; writing fails when a value does not fit its width.
 //! [`crate::gfx_def`] turns these into what the player draws. Checked over every instance in every
 //! movie of the archive and of the default stack by the workshop's `every_movie_writes_back_as_it_was_read`.
+//!
+//! An edited tag is written as retail's exporter writes one: [`exporter_width`] gives every bit
+//! field's width and [`exporter_long_header`] the header form, which [`write_as_exported`] applies.
+//! Rewriting every movie of the archive with them gives each back byte for byte (the workshop's
+//! `retail_movies_follow_the_exporter_rules`).
 
 use crate::gfx::Cursor;
 
 pub const SHOW_FRAME: u16 = 1;
+/// `DoAction`, kept as its bytecode.
+pub const DO_ACTION: u16 = 12;
 pub const PLACE_OBJECT2: u16 = 26;
 pub const REMOVE_OBJECT2: u16 = 28;
 pub const DEFINE_EDIT_TEXT: u16 = 37;
@@ -234,6 +241,120 @@ impl Typed {
         }
         Ok(w.out)
     }
+}
+
+/// The width retail's exporter writes a signed bit field in: the bit length of the largest magnitude
+/// plus a sign bit; `when_zero` when every value is 0.
+pub fn exporter_width(values: &[i32], when_zero: u8) -> u8 {
+    match values.iter().map(|v| 32 - v.unsigned_abs().leading_zeros()).max().unwrap_or(0) as u8 {
+        0 => when_zero,
+        magnitude => magnitude + 1,
+    }
+}
+
+impl Bits {
+    /// Two values in the width [`exporter_width`] gives them.
+    pub fn exported(values: [i32; 2], when_zero: u8) -> Bits {
+        Bits { nbits: exporter_width(&values, when_zero), values }
+    }
+}
+
+impl MatrixBits {
+    /// A `MATRIX` of these values written as retail's exporter writes one: an all-zero translation in
+    /// 0 bits, an all-zero scale in 1. No retail matrix carries an all-zero rotate-skew pair, so one is
+    /// refused rather than given a width nothing shows.
+    pub fn exported(scale: Option<[i32; 2]>, rotate: Option<[i32; 2]>, translate: [i32; 2]) -> Result<MatrixBits, String> {
+        if rotate == Some([0, 0]) {
+            return Err("an all-zero rotate-skew pair, which no retail matrix writes; leave the pair out".into());
+        }
+        Ok(MatrixBits { scale: scale.map(|v| Bits::exported(v, 1)), rotate: rotate.map(|v| Bits::exported(v, 1)), translate: Bits::exported(translate, 0) })
+    }
+}
+
+impl CxformBits {
+    /// A colour transform written as retail's exporter writes one: all terms in one width, 1 bit when
+    /// every term is 0.
+    pub fn exported(mul: Option<[i32; 4]>, add: Option<[i32; 4]>) -> CxformBits {
+        let all: Vec<i32> = mul.iter().chain(add.iter()).flatten().copied().collect();
+        CxformBits { nbits: exporter_width(&all, 1), mul, add }
+    }
+}
+
+impl RectBits {
+    /// A `RECT` written as retail's exporter writes one. No retail edit-text box is all zero, so one is
+    /// refused rather than given a width nothing shows.
+    pub fn exported(values: [i32; 4]) -> Result<RectBits, String> {
+        match exporter_width(&values, 0) {
+            0 => Err("an all-zero RECT, which no retail edit-text box has".into()),
+            nbits => Ok(RectBits { nbits, values }),
+        }
+    }
+}
+
+impl Typed {
+    /// The same tag with every bit field in the width retail's exporter gives its values.
+    pub fn exported(&self) -> Result<Typed, String> {
+        Ok(match self {
+            Typed::Place(p) => {
+                let mut p = p.clone();
+                if let Some(m) = p.matrix {
+                    p.matrix = Some(MatrixBits::exported(m.scale.map(|b| b.values), m.rotate.map(|b| b.values), m.translate.values)?);
+                }
+                if let Some(c) = p.cxform {
+                    p.cxform = Some(CxformBits::exported(c.mul, c.add));
+                }
+                Typed::Place(p)
+            }
+            Typed::EditText(t) => {
+                let mut t = t.clone();
+                t.bounds = RectBits::exported(t.bounds.values)?;
+                Typed::EditText(t)
+            }
+            other => other.clone(),
+        })
+    }
+}
+
+/// Whether retail's exporter gives tag `code` the six-byte header even when its body is shorter than
+/// `0x3F` bytes: `DoAction`, `DefineEditText`, `DefineSprite`, `FrameLabel`, `ExportAssets` and
+/// `ImportAssets2` always, a placement exactly when it names its instance, `End`, `ShowFrame` and
+/// `RemoveObject2` never. `None` for a code whose form differs between retail tags of that code (the
+/// shape definitions), or that is not checked: a tag of such a code keeps the form it was read in.
+pub fn exporter_long_header(code: u16, typed: Option<&Typed>) -> Option<bool> {
+    match (code, typed) {
+        (DO_ACTION | DEFINE_EDIT_TEXT | crate::gfx_stream::DEFINE_SPRITE | FRAME_LABEL | EXPORT_ASSETS | IMPORT_ASSETS2, _) => Some(true),
+        (PLACE_OBJECT2 | PLACE_OBJECT3, Some(Typed::Place(p))) => Some(p.name.is_some()),
+        (crate::gfx_stream::END | SHOW_FRAME | REMOVE_OBJECT2, _) => Some(false),
+        _ => None,
+    }
+}
+
+/// Rewrite every typed tag in `tags` (and in every sprite's timeline) as retail's exporter writes it:
+/// bit fields in [`exporter_width`]s, headers in [`exporter_long_header`]'s form. A tag whose form
+/// that does not decide keeps the one it was read in.
+pub fn write_as_exported(tags: &mut [crate::gfx_stream::Tag]) -> Result<(), String> {
+    use crate::gfx_stream::TagBody;
+    for tag in tags {
+        let typed = match &mut tag.body {
+            TagBody::Sprite { tags, .. } => {
+                write_as_exported(tags)?;
+                None
+            }
+            TagBody::Raw(body) => match decode(tag.code, body)? {
+                Some(t) => {
+                    let t = t.exported()?;
+                    *body = t.encode()?;
+                    Some(t)
+                }
+                None => None,
+            },
+        };
+        if let Some(long) = exporter_long_header(tag.code, typed.as_ref()) {
+            // A body of 0x3F or more is long whatever the rule says; `long` records only a choice.
+            tag.long = long && tag.body_len() < 0x3F;
+        }
+    }
+    Ok(())
 }
 
 /// A string's bytes up to its terminating zero.
@@ -715,6 +836,35 @@ mod tests {
         again(EXPORT_ASSETS, b"\x02\x00\x05\x00flag\0\x09\x00b\0");
         again(IMPORT_ASSETS2, b"gfxfontlib.swf\0\x01\x00\x01\x00\x03\x00$Font\0");
         assert!(decode(REMOVE_OBJECT2, &[1, 0, 0]).is_err(), "a body read short of its end");
+    }
+
+    /// -4 fits 3 signed bits, but the exporter counts its magnitude's 3 bits and a sign bit.
+    #[test]
+    fn the_exporter_width_is_the_magnitude_and_a_sign() {
+        assert_eq!(exporter_width(&[-4, 3], 0), 4);
+        assert_eq!(exporter_width(&[65536, 65536], 1), 18);
+        assert_eq!(exporter_width(&[0, 0], 0), 0, "an all-zero translation");
+        assert_eq!(MatrixBits::exported(Some([0, 0]), None, [0, 0]).expect("matrix").scale.map(|b| b.nbits), Some(1), "an all-zero scale");
+        assert_eq!(CxformBits::exported(None, Some([0; 4])).nbits, 1);
+        assert!(MatrixBits::exported(None, Some([0, 0]), [0, 0]).is_err());
+        assert!(RectBits::exported([0; 4]).is_err());
+    }
+
+    #[test]
+    fn a_named_placement_gets_the_long_header() {
+        use crate::gfx_stream::{parse_tags, write_tags, Tag, TagBody};
+        let named = PlaceTag { depth: 1, character: Some(2), name: Some(b"a".to_vec()), ..PlaceTag::default() };
+        let plain = PlaceTag { depth: 2, character: Some(2), ..PlaceTag::default() };
+        let mut tags: Vec<Tag> = [named, plain]
+            .into_iter()
+            .map(|p| Tag { code: PLACE_OBJECT2, long: false, body: TagBody::Raw(Typed::Place(p).encode().expect("encode")) })
+            .collect();
+        tags.push(Tag { code: crate::gfx_stream::END, long: true, body: TagBody::Raw(Vec::new()) });
+        write_as_exported(&mut tags).expect("rewrite");
+        assert_eq!(tags.iter().map(|t| t.long).collect::<Vec<_>>(), [true, false, false]);
+        let mut bytes = Vec::new();
+        write_tags(&tags, &mut bytes);
+        assert_eq!(parse_tags(&bytes).expect("parse").0, tags);
     }
 
     #[test]
