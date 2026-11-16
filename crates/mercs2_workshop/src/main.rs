@@ -68,6 +68,7 @@ mod audioexport; // VO clips out as WAV + captions.csv
 mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
 mod layerview; // Inspect's LAYERS tab: every entity of a layer in 3D, where the layer places it
 mod textpage; // Inspect's TEXT tab: every string table side by side by key
+mod movieview; // Inspect's UI tab: a Scaleform movie playing in the viewport, on the engine's player
 mod vfxview; // Inspect's VFX tab: an effect playing on the pedestal, run by the retail sim
 mod heroidx; // every model's skeleton, for ranking the hero clips and faces play on
 mod levelaudio; // A level's wavebanks as the Audio page's lines
