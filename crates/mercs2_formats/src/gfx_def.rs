@@ -841,7 +841,7 @@ fn sprite(id: u16, frame_count: u16, tags: &[Tag]) -> Result<Timeline, String> {
 impl MovieDef {
     pub fn decode(stream: &TagStream) -> Result<MovieDef, String> {
         let mut out = MovieDef {
-            stage: Cursor::new(&stream.frame_rect, 0).read_rect()?,
+            stage: stream.stage()?,
             frame_rate: stream.frame_rate as f32 / 256.0,
             timeline: Timeline { declared_frames: stream.frame_count, ..Timeline::default() },
             ..MovieDef::default()
