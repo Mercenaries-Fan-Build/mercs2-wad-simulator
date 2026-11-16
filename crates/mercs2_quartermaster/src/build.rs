@@ -1640,7 +1640,7 @@ fn lower_movie(
         message: format!("reading {}: {e}", path.display()),
     })?;
 
-    let parsed = mercs2_formats::gfx::GfxMovie::parse(&bytes).map_err(|m| BuildError::Lower {
+    let parsed = mercs2_formats::gfx_stream::TagStream::parse(&bytes).map_err(|m| BuildError::Lower {
         index,
         kind,
         message: format!(
@@ -1658,8 +1658,8 @@ fn lower_movie(
     // The tag census is logged rather than merely counted: an emitter that silently dropped the
     // movie's content still produces a valid header, and "0 tags" in the log is the only place that
     // would show.
-    let features = parsed.features();
-    let [w, h] = parsed.stage_px();
+    let features = mercs2_formats::gfx::features(&parsed);
+    let [w, h] = parsed.stage_px().map_err(|m| BuildError::Lower { index, kind, message: format!("{}: {m}", path.display()) })?;
     log.push(format!(
         "contributions[{index}] {kind} {name} 0x{hash:08X} ← {} \
          {} v{} {}x{} px, {} tag(s): {} shape(s), {} sprite(s), {} button(s), \
@@ -3481,7 +3481,7 @@ fn lower(
         // container holds the whole asset and nothing is conformed to anything. So this builds in
         // template CI, where the retail WADs will never exist.
         //
-        // The movie is validated and then copied VERBATIM. `GfxMovie::parse` is the check that the
+        // The movie is validated and then copied VERBATIM. `TagStream::parse` is the check that the
         // bytes are a movie at all; it is deliberately not followed by a re-encode, because retail
         // ships both compressed `CFX` (61 assets) and uncompressed `GFX` (3), so there is no
         // encoding to normalise TO, and swapping an author's verified bytes for ones nobody has run
