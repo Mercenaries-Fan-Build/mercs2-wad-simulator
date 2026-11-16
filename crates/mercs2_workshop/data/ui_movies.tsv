@@ -1,0 +1,73 @@
+# The UI tab's groups: each Scaleform movie under what opens it in the game (`index::ui_group`).
+# `parent` is the movie that loads this one into its own `_level1` (shown nested under it); empty for a
+# movie a script or the exe opens. `evidence` is where that is read: a shipped-Lua line (paths under
+# crates/mercs2_script/corpus/mercs2-luacd/src), the parent's ActionScript, the movie's own content, or
+# the name convention its siblings follow when nothing names it. A named movie not listed here is OTHER.
+movie	group	parent	evidence
+AllCon001_briefing	BRIEFINGS		vz/wifbriefingdata.lua:209 sFile
+AllCon002_briefing	BRIEFINGS		vz/wifbriefingdata.lua:1163 sFile
+AllCon004_briefing	BRIEFINGS		vz/wifbriefingdata.lua:2955 sFile
+ChiCon001_briefing	BRIEFINGS		vz/wifbriefingdata.lua:3881 sFile
+ChiCon002_briefing	BRIEFINGS		vz/wifbriefingdata.lua:5373 sFile
+ChiCon004_briefing	BRIEFINGS		vz/wifbriefingdata.lua:6298 sFile
+GurCon001_briefing	BRIEFINGS		vz/wifbriefingdata.lua:6867 sFile
+GurCon002_briefing	BRIEFINGS		vz/wifbriefingdata.lua:7477 sFile
+JetCon001_briefing	BRIEFINGS		vz/wifbriefingdata.lua:12542 sFile
+MecCon001_briefing	BRIEFINGS		vz/wifbriefingdata.lua:14850 sFile
+OilCon001_briefing	BRIEFINGS		vz/wifbriefingdata.lua:8633 sFile
+OilCon002_briefing	BRIEFINGS		vz/wifbriefingdata.lua:9558 sFile
+PmcCon002_briefing	BRIEFINGS		vz/wifbriefingdata.lua:11282 sFile
+PmcCon003_briefing	BRIEFINGS		vz/wifbriefingdata.lua:12061 sFile
+POI_ANCH_Introduction	INTRODUCTIONS		vz/wifbriefingdata.lua:83 sFlashFile
+POI_GR_Introduction	INTRODUCTIONS		vz/wifbriefingdata.lua:16 sFlashFile
+POI_PR_Introduction	INTRODUCTIONS		vz/wifbriefingdata.lua:53 sFlashFile
+POI_UP_Introduction	INTRODUCTIONS		name convention POI_*_Introduction; no shipped Lua names it
+Credits	CREDITS		vz/wifmissionflow.lua:492 SetSwfFile("credits")
+topbar	PDA		resident/mrxguipda.lua:1437 sFile
+Database	PDA	topbar	topbar: getURL("database.swf", "_level1") after FSCommand loadArray Database
+Map	PDA	topbar	topbar: getURL("map.swf", "_level1")
+SUPPORT	PDA	topbar	topbar: getURL("support.swf", "_level1") after FSCommand loadArray Support
+Statistics	PDA	topbar	topbar: getURL("statistics.swf", "_level1") after FSCommand loadArray Statistics
+landingzones	PDA		resident/mrxguipda.lua:812 SetSwfFile("landingzones")
+pause_menu	PAUSE MENU		resident/mrxguipausescreen.lua:357 sFile
+controller_map	PAUSE MENU	pause_menu	pause_menu: getURL("controller_map.swf", "_level1")
+store	SHOPS		resident/mrxguisupportshop.lua:7 sFlashFile
+Garage	SHOPS		resident/mrxguigarage.lua:7 sFlashFile
+MINIMAP	HUD		resident/mrxguihudradar.lua:69 SetSwfFile("minimap.gfx")
+text_effect	HUD		resident/mrxguihudmessage.lua:1075 SetSwfFile("text_effect")
+fanfare_contract	FANFARES		resident/mrxguihudmessage.lua:22 sFile
+fanfare_wager	FANFARES		resident/mrxguihudmessage.lua:27 sFile
+fanfare_mission	FANFARES		resident/mrxguihudmessage.lua:25 sFile
+fanfare_support_unlocked	FANFARES		resident/mrxguihudmessage.lua:29 sFile
+fanfare_new_contact	FANFARES		resident/mrxguihudmessage.lua:32 sFile
+fanfare_new_contact_an_businesscard	FANFARES		resident/mrxguihudmessage.lua:37 "fanfare_new_contact_" .. sFaction .. "_businesscard"
+fanfare_new_contact_ch_businesscard	FANFARES		resident/mrxguihudmessage.lua:37 "fanfare_new_contact_" .. sFaction .. "_businesscard"
+fanfare_new_contact_gr_businesscard	FANFARES		resident/mrxguihudmessage.lua:37 "fanfare_new_contact_" .. sFaction .. "_businesscard"
+fanfare_new_contact_oc_businesscard	FANFARES		resident/mrxguihudmessage.lua:37 "fanfare_new_contact_" .. sFaction .. "_businesscard"
+fanfare_new_contact_pr_businesscard	FANFARES		resident/mrxguihudmessage.lua:37 "fanfare_new_contact_" .. sFaction .. "_businesscard"
+loadingscreen	LOADING		resident/mrxguiloadscreen.lua:3 _gLoadFlashFile
+loadingscreen_standalone	LOADING		resident/mrxgui.lua:106 SetSwfFile("loadingscreen_standalone")
+loadingscreen_new	LOADING		name convention loadingscreen*; no shipped Lua names it
+dialog_box	DIALOGS		resident/mrxguidialogbox.lua:862 SetSwfFile("dialog_box")
+SHELL	FRONT END		resident/mrxguishell.lua:198 "shell.gfx"
+LTI_precache	FRONT END		resident/mrxguiltiprecache.lua:73 sFile
+GFxFontLib	FONTS		imported as gfxfontlib.swf by 20 movies (pause_menu, SHELL, topbar, store, …)
+fonts_enext	FONTS		the font movie every language but Russian reads (FUN_0060E9C0)
+fonts_ru	FONTS		the font movie Russian reads (FUN_0060E9C0)
+_normal_font	FONTS		imported as _normal_Font.swf (dialog_box, text_effect, Statistics, …)
+_bold_font	FONTS		imported as _bold_Font.swf (Statistics, fanfare_new_contact_an_businesscard)
+_oc_font	FONTS		imported as _OC_Font.swf (the an/ch/oc business cards)
+_oc_bold_font	FONTS		imported as _OC_bold_Font.swf (the ch/oc business cards)
+_gr_font	FONTS		imported as _GR_Font.swf (fanfare_new_contact_gr_businesscard)
+_pr_font	FONTS		imported as _PR_Font.swf (fanfare_new_contact_pr_businesscard)
+_pr_header_font	FONTS		imported as _PR_header_Font.swf (fanfare_new_contact_pr_businesscard)
+_italic_font	FONTS		holds one font and its sample text field only
+_bold_italic_font	FONTS		holds one font and its sample text field only
+_shell_normal_font	FONTS		holds one font and its sample text field only
+_shell_bold_font	FONTS		holds one font and its sample text field only
+_shell_bold_italic_font	FONTS		holds one font and its sample text field only
+_shell_font_glyphs	FONTS		holds 4 fonts, their sample text fields and one sprite only
+Font_glyphs	FONTS		holds 4 fonts, their sample text fields and one sprite only
+font_gr_glyphs	FONTS		holds one font, its sample text field and one sprite only
+font_oc_glyphs	FONTS		holds 2 fonts, their sample text fields and one sprite only
+font_pr_glyphs	FONTS		holds 2 fonts, their sample text fields and one sprite only
