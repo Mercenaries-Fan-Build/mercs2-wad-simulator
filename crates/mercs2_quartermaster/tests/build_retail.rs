@@ -1931,7 +1931,7 @@ fn add_movie_builds_end_to_end() {
     // an injector that mangled the payload would still produce a WAD that loads and a container
     // that checksums, and the only symptom would be `GFxLoader read failed` in-game.
     assert_eq!(carried, movie, "the movie must be carried byte for byte");
-    let reparsed = mercs2_formats::gfx::GfxMovie::parse(&carried).expect("still a movie");
+    let reparsed = mercs2_formats::gfx_stream::TagStream::parse(&carried).expect("still a movie");
     assert_eq!(&reparsed.magic, b"GFX");
     assert_eq!(reparsed.version, 8, "retail movies are all version 8");
 
