@@ -140,6 +140,7 @@ pub mod game_paths;
 pub mod gfx;
 pub mod gfx_actions;
 pub mod gfx_def;
+pub mod gfx_stream;
 pub mod hash;
 pub mod havok;
 pub mod havok_write;
