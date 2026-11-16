@@ -263,7 +263,7 @@ fn run() -> Result<(), String> {
     println!("Re-encoding the {} streams...", package_files.len());
     let streams = StreamTable::read(num_blocks, |i| read_be_block(&doh, &indx[i]), &package_files)?;
     let fitted: u64 = streams.streams().iter().map(|(_, s)| s.fitted_frames).sum();
-    println!("  {} streams, ffmpeg's decode off the records' frame counts by {fitted} frames in all", streams.streams().len());
+    println!("  {} streams, the MP3 decode off the records' frame counts by {fitted} frames in all", streams.streams().len());
 
     // ── Step 3: per-block convert + recompress ──
     QUIET.store(true, Ordering::Relaxed); // silence convert_block's per-block diagnostics
