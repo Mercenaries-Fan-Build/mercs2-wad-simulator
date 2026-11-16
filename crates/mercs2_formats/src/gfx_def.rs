@@ -14,10 +14,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::gfx::Cursor;
 use crate::gfx_stream::{Tag, TagBody, TagStream, END};
-use crate::gfx_tags::{self, CxformBits, EditTextTag, MatrixBits, PlaceTag, Typed};
-
-/// `DoAction`.
-const DO_ACTION: u16 = 12;
+use crate::gfx_tags::{self, CxformBits, EditTextTag, MatrixBits, PlaceTag, Typed, DO_ACTION};
 
 pub type Rgba = [u8; 4];
 
