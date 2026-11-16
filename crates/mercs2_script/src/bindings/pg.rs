@@ -16,7 +16,7 @@ use crate::attribution::LuaFnExt;
 use crate::{Guid, SharedHost, SpawnArgs, SpawnTemplate};
 
 /// `lua_isnumber` + `lua_tonumber` (Lua 5.1: a numeric string converts).
-fn lua_number(v: Option<&Value>) -> Option<f32> {
+pub(super) fn lua_number(v: Option<&Value>) -> Option<f32> {
     match v? {
         Value::Number(n) => Some(*n),
         Value::String(s) => String::from_utf8(s.as_bytes()).ok()?.trim().parse().ok(),
