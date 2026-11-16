@@ -278,7 +278,7 @@ pub fn scrub_compare(archive: &Path, pc: &Path, out: &Path) -> Result<(), String
         one.extend_from_slice(&0u32.to_be_bytes());
         one.extend_from_slice(&(c.body.len() as u32).to_be_bytes());
         one.extend_from_slice(&c.body);
-        let le = convert_block(&one, false, None, None, None, None).map_err(|e| format!("0x{:08X}: {e}", c.name))?;
+        let le = convert_block(&one, false, None, None, None).map_err(|e| format!("0x{:08X}: {e}", c.name))?;
         let (_, range) = mercs2_formats::ucfx::block_chunk_spans(&le)?.into_iter().next().ok_or("no chunk")?;
         let ours = ScrubPack::decode(&le[range])?;
         let twin = twins.get(&(c.name, TYPE_HASH)).and_then(|v| v.first()).ok_or_else(|| format!("0x{:08X} has no PC twin", c.name))?;
@@ -437,7 +437,7 @@ pub fn model_compare(archive: &Path, pc: &Path, out: &Path) -> Result<(), String
         one.extend_from_slice(&(c.body.len() as u32).to_be_bytes());
         one.extend_from_slice(&c.body);
         let view = ours.entry(c.name).or_default();
-        let done = convert_block(&one, false, None, None, None, Some(tables)).and_then(|le| {
+        let done = convert_block(&one, false, None, None, Some(tables)).and_then(|le| {
             let (_, range) = mercs2_formats::ucfx::block_chunk_spans(&le)?.into_iter().next().ok_or("no chunk")?;
             view_nodes(&parse_ucfx_tree(&le[range])?, view)
         });
@@ -1451,7 +1451,7 @@ pub fn vs_compare(archive: &Path, pc: &Path, out: &Path) -> Result<(), String> {
         }
         one.extend_from_slice(&c.body);
         let list = ours.entry(c.name).or_default();
-        let done = convert_block(&one, false, None, None, None, Some(tables)).and_then(|le| {
+        let done = convert_block(&one, false, None, None, Some(tables)).and_then(|le| {
             let (_, range) = mercs2_formats::ucfx::block_chunk_spans(&le)?.into_iter().next().ok_or("no chunk")?;
             group_shaders(&parse_ucfx_tree(&le[range])?, list);
             Ok(())
@@ -1524,7 +1524,7 @@ pub fn type_compare(archive: &Path, pc: &Path, type_name: &str) -> Result<(), St
             one.extend_from_slice(&w.to_be_bytes());
         }
         one.extend_from_slice(&c.body);
-        let le = convert_block(&one, false, None, None, None, None).map_err(|e| format!("0x{:08X}: {e}", c.name))?;
+        let le = convert_block(&one, false, None, None, None).map_err(|e| format!("0x{:08X}: {e}", c.name))?;
         let (_, range) = mercs2_formats::ucfx::block_chunk_spans(&le)?.into_iter().next().ok_or("no chunk")?;
         let ours = &le[range];
         let Some(theirs) = twins.get(&(c.name, ty)) else {
@@ -1905,7 +1905,7 @@ pub fn tiny_slots(inputs: &[String], out: &Path) -> Result<(), String> {
                     one.extend_from_slice(&w.to_be_bytes());
                 }
                 one.extend_from_slice(&c.body);
-                let le = convert_block(&one, false, None, None, None, Some(tables)).map_err(|e| format!("0x{:08X}: {e}", c.name))?;
+                let le = convert_block(&one, false, None, None, Some(tables)).map_err(|e| format!("0x{:08X}: {e}", c.name))?;
                 let (_, range) = mercs2_formats::ucfx::block_chunk_spans(&le)?.into_iter().next().ok_or("no chunk")?;
                 if is_tiny_container(&le[range.clone()]) {
                     containers.push((format!("0x{:08X}", c.name), le[range].to_vec()));

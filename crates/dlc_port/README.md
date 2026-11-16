@@ -6,10 +6,12 @@ form. `--shipment <folder>` writes it into a Shipment as components: one file pe
 manifest's `contributions:` line. `qm build` compiles those, so `shipments/blow-it-up-again/` holds no WAD.
 
 ```
-dlc_port --package <ps3.pkg> --java <java> --unluac <unluac.jar> --vz-wad <game>/data/vz.wad --shipment <folder>
+dlc_port --package <ps3.pkg> --vz-wad <game>/data/vz.wad --shipment <folder>
 ```
 
-The PS3 package needs no other input: every one of its 7,770 chunks converts. `--xbox-doh-oracle <xbox package>`
+The PS3 package needs no other input and no other program: every one of its 7,770 chunks converts, its MP3
+audio decoded in Rust. Xbox 360 audio (XMA, XMA2) is not decoded: a bank holding it fails the run, naming
+the codec. `--xbox-doh-oracle <xbox package>`
 names a further source, whose chain replaces any chunk PS3 cannot convert. A chunk is carried when the base lacks
 its (name, type), or when its type is one a level overrides and its bytes are not PC's (`src/components.rs`).
 
@@ -30,7 +32,7 @@ The pipeline, in the order `src/main.rs` runs it:
    field and path per block.
 3. **Per-block convert** — `TextureTable::from_doh` first reads every block, because a texture's
    `INFO` sits in one block and its rungs in others. `StreamTable::read` then re-encodes each `.pws`:
-   XMA2 or MP3 decoded by ffmpeg, IMA ADPCM written the way a retail `.pws` lays it out, and the
+   MP3 decoded by `nanomp3` (XMA2 refused), IMA ADPCM written the way a retail `.pws` lays it out, and the
    bank's records rewritten to match, so a streamed bank needs its file. A bank finds its file by
    hash: `vo_stream_dlctest.english.pws` is the entry `vo_stream_dlctest.english`. A streamed bank
    with no file, or a file no bank claims, fails the run. Then each block is either `segs`-decompressed
@@ -66,33 +68,32 @@ From an Xbox 360 DLC RAR:
 
 ```
 cargo run -p dlc_port -- --x360-rar DLC01.rar --unrar /path/to/UnRAR.exe \
-  --java /path/to/java --unluac /path/to/unluac.jar --vz-wad /path/to/vz.wad --output vz-patch.wad
+  --vz-wad /path/to/vz.wad --output vz-patch.wad
 ```
 
 From an STFS container or a raw `DLC01.doh`:
 
 ```
 cargo run -p dlc_port -- --x360-stfs DLC01.doh \
-  --java /path/to/java --unluac /path/to/unluac.jar --vz-wad /path/to/vz.wad --output vz-patch.wad
+  --vz-wad /path/to/vz.wad --output vz-patch.wad
 ```
 
 Inspect the block table without converting anything:
 
 ```
 cargo run -p dlc_port -- --x360-stfs DLC01.doh \
-  --java /path/to/java --unluac /path/to/unluac.jar --vz-wad /path/to/vz.wad --list-blocks
+  --vz-wad /path/to/vz.wad --list-blocks
 ```
 
 Convert a slice of the block range while iterating:
 
 ```
-cargo run -p dlc_port -- --x360-stfs DLC01.doh --java /path/to/java --unluac /path/to/unluac.jar \
+cargo run -p dlc_port -- --x360-stfs DLC01.doh \
   --vz-wad /path/to/vz.wad --start-block 100 --max-blocks 20 -o test.wad
 ```
 
 Flags: `--x360-rar`, `--x360-stfs` (one is required), `--unrar PATH` / `--bsdtar PATH` (exactly
-one is required with `--x360-rar`), `--java PATH` and `--unluac PATH` (required: the java
-executable and unluac jar that convert Lua bytecode blocks), `--vz-wad PATH` (required: the
+one is required with `--x360-rar`), `--vz-wad PATH` (required: the
 player's PC `vz.wad`, whose `schm` chunks lay out the DLC's compact ECS containers, see
 `mercs2_formats::be_to_le::ecs`, and whose texture list decides which pixel-less DLC textures the
 base game serves), `-o/--output` (required unless `--list-blocks`),

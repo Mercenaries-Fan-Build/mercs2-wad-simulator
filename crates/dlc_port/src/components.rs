@@ -23,7 +23,6 @@ use mercs2_formats::types::{
 use mercs2_formats::ucfx::block_chunk_spans;
 use ucfx_byteswap::convert::convert_block;
 use ucfx_byteswap::ecs::ComponentSchemas;
-use ucfx_byteswap::lua::LuaTools;
 
 use crate::xbox_doh_oracle::is_ps3_compact_decl_rejection;
 
@@ -80,7 +79,7 @@ fn be32(b: &[u8], o: usize) -> Result<u32, String> {
 }
 
 /// Convert every chunk `wanted` accepts, one at a time.
-pub fn convert(a: &Archive, lua: &LuaTools, schemas: &ComponentSchemas, wanted: impl Fn(u32, u32) -> bool) -> Result<Converted, String> {
+pub fn convert(a: &Archive, schemas: &ComponentSchemas, wanted: impl Fn(u32, u32) -> bool) -> Result<Converted, String> {
     let (mut chunks, mut refused) = (Vec::new(), HashSet::new());
     for (bi, e) in a.indx.iter().enumerate() {
         let path = a.paths.get(bi).ok_or_else(|| format!("block {bi} has no path"))?;
@@ -102,7 +101,7 @@ pub fn convert(a: &Archive, lua: &LuaTools, schemas: &ComponentSchemas, wanted: 
             one.extend_from_slice(&be[row..row + 16]);
             one.extend_from_slice(chunk);
             let tables = BlockTables { textures: a.textures, rung: Some(rung), streams: a.streams };
-            let le = match convert_block(&one, false, None, Some(lua), Some(schemas), Some(tables)) {
+            let le = match convert_block(&one, false, None, Some(schemas), Some(tables)) {
                 Ok(le) => le,
                 Err(err) if is_ps3_compact_decl_rejection(&err) => {
                     refused.insert((name, ty));

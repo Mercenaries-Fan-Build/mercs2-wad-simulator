@@ -112,10 +112,11 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   (notes-on-the-released-game), holding `data/`, `mercs2-ecs/`, `mercs2-luacd/` and
 ///   `mercs2-dlc-luacd/`. Read only by `mercs2_workshop --pack-data`
 ///   ([`local_config_notes_docs_dir`]).
-/// * `unluac_jar` — the unluac jar that disassembles and reassembles console Lua bytecode. Read
-///   only by dev tools and tests that convert console Lua bytecode ([`local_config_unluac_jar`]).
-/// * `java_binary` — the `java` executable that runs unluac. Read only by dev tools and tests
-///   that convert console Lua bytecode ([`local_config_java_binary`]).
+/// * `unluac_jar` — the unluac jar whose disassemble/assemble round-trip of console Lua bytecode is
+///   the oracle the Rust conversion is checked against. Read only by `mercs2_probe
+///   lua-convert-check` ([`local_config_unluac_jar`]).
+/// * `java_binary` — the `java` executable that runs unluac. Read only by `mercs2_probe
+///   lua-convert-check` ([`local_config_java_binary`]).
 /// * `unrar_binary` — the `UnRAR.exe` that unpacks RAR'd Xbox 360 DLC. Read only by tests of the
 ///   RAR'd DLC path ([`local_config_unrar_binary`]).
 /// * `lua51_src_dir` — a **directory**: the pristine Lua 5.1 `src` tree the vendored copy is

@@ -3,8 +3,7 @@
 //! Port of the STFS half of `tools/x360_dlc_io.py` (py360-derived block
 //! mapping). Walks the interleaved hash-table/data-block layout to read logical
 //! file data (here: the DLC `.doh`). RAR extraction shells out to the extractor
-//! the caller names ([`RarExtractor`]: `UnRAR.exe` or `bsdtar` at an explicit path),
-//! mirroring the ffmpeg/java subprocess pattern elsewhere in this workspace.
+//! the caller names ([`RarExtractor`]: `UnRAR.exe` or `bsdtar` at an explicit path).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 use ucfx_byteswap::ecs::ComponentSchemas;
-use ucfx_byteswap::{aset, convert, lua, report, texture, validate};
+use ucfx_byteswap::{aset, convert, report, texture, validate};
 
 use report::SchemaCoverageReport;
 
@@ -66,15 +66,6 @@ struct Cli {
     tex_fourcc: Option<String>,
     #[arg(long)]
     tex_mips: Option<usize>,
-
-    /// java executable that runs unluac. Converting a block that holds Lua bytecode (`BINN`)
-    /// requires --java and --unluac; such a block fails to convert without them.
-    #[arg(long, value_name = "JAVA_PATH", requires = "unluac")]
-    java: Option<PathBuf>,
-
-    /// unluac jar that round-trips Lua bytecode (`BINN`). Given together with --java.
-    #[arg(long, value_name = "UNLUAC_JAR", requires = "java")]
-    unluac: Option<PathBuf>,
 
     /// PC vz.wad whose `schm` chunks lay out compact ECS containers. Converting a block that holds
     /// one (every console `worldentity`) requires it; such a block fails to convert without it.
@@ -221,16 +212,6 @@ fn main() {
         None
     };
 
-    // clap's `requires` pairs --java with --unluac, so both are set or neither is.
-    let lua_tools = match (cli.java, cli.unluac) {
-        (Some(java), Some(unluac)) => Some(lua::LuaTools { java, unluac }),
-        (None, None) => None,
-        _ => {
-            eprintln!("Error: --java and --unluac must be given together");
-            std::process::exit(1);
-        }
-    };
-
     let schemas = match cli.vz_wad.as_deref().map(ComponentSchemas::from_vz_wad).transpose() {
         Ok(s) => s,
         Err(e) => {
@@ -239,7 +220,7 @@ fn main() {
         }
     };
 
-    match convert::convert_block(&input_data, cli.dry_run, report.as_mut(), lua_tools.as_ref(), schemas.as_ref(), None) {
+    match convert::convert_block(&input_data, cli.dry_run, report.as_mut(), schemas.as_ref(), None) {
         Ok(output) => {
             if let Some(rpt) = &report {
                 rpt.print_report();

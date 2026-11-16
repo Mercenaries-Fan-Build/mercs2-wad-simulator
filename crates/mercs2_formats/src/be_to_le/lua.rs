@@ -1,27 +1,18 @@
-//! Xbox 360 (big-endian) Lua 5.1 bytecode → PC (little-endian) conversion.
+//! Console (big-endian, Xbox 360 and PS3) Lua 5.1 bytecode → PC (little-endian) conversion.
 //!
-//! NOT a byte-swap. Uses unluac's bytecode-level disassemble/assemble round-trip
-//! (flip `.endianness BIG`→`LITTLE`), which is bytecode-faithful and robust —
-//! mirroring how `audio.rs` shells to `ffmpeg`. A fragile field-by-field endian
-//! swap of Lua bytecode has repeatedly caused corruption; this regenerates the
-//! chunk structurally via the assembler. Decompile-to-source is NOT used (unluac
-//! emits Lua 5.2+ `goto`/labels on complex control flow that the 5.1 compiler
-//! rejects) — the bytecode-level disassemble/assemble avoids that.
+//! NOT a byte-swap in place. The chunk is decoded whole by [`crate::luachunk`], which reads either
+//! byte order and refuses anything it does not consume exactly, its byte order is set to little,
+//! and it is encoded again. A field-by-field swap in place is what corrupted chunks before; a
+//! structural decode/encode cannot miss a field.
 //!
-//! Toolchain: a `java` executable and the unluac jar, both passed in by the caller as a
-//! [`LuaTools`].
+//! This replaced a round-trip through unluac's disassembler and assembler (java). Over every Lua
+//! chunk of the Blow It Up Again DLC, 34 on PS3 and the same 34 on Xbox 360, the two produced the
+//! same bytes; `mercs2_probe lua-convert-check` repeats that comparison against a package.
 
-use std::path::PathBuf;
-use std::process::Command;
+use crate::ffcs::Endian;
+use crate::luachunk;
 
 const LUAQ_SIG: &[u8; 4] = b"\x1bLua";
-
-struct ScopeGuard(PathBuf);
-impl Drop for ScopeGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn swap32(b: &mut [u8], o: usize) {
     b[o..o + 4].reverse();
@@ -30,99 +21,16 @@ fn swap16(b: &mut [u8], o: usize) {
     b[o..o + 2].reverse();
 }
 
-fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
-        return None;
+/// One standalone big-endian LuaQ chunk, in PC's little-endian order: decoded whole, its byte order
+/// set to little, encoded again. A chunk that does not decode exactly, or is already little-endian,
+/// is refused.
+pub fn luaq_be_to_le(be_luaq: &[u8]) -> Result<Vec<u8>, String> {
+    let mut chunk = luachunk::decode(be_luaq).map_err(|e| e.to_string())?;
+    if chunk.endian != Endian::Big {
+        return Err("the Lua chunk is already little-endian; a console chunk is big-endian".into());
     }
-    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
-}
-
-/// The external programs that round-trip console Lua bytecode: the `java` executable and the
-/// unluac jar it runs (`java -jar <unluac> --disassemble` / `--assemble`). The caller supplies
-/// both paths; [`convert_binn_be_to_le`] runs exactly these.
-#[derive(Debug, Clone)]
-pub struct LuaTools {
-    /// The `java` executable.
-    pub java: PathBuf,
-    /// The unluac jar.
-    pub unluac: PathBuf,
-}
-
-fn flip_endianness(listing: &[u8]) -> Option<Vec<u8>> {
-    for (from, to) in [
-        (&b".endianness\tBIG"[..], &b".endianness\tLITTLE"[..]),
-        (&b".endianness BIG"[..], &b".endianness LITTLE"[..]),
-    ] {
-        if let Some(p) = find_sub(listing, from) {
-            let mut out = Vec::with_capacity(listing.len() + 8);
-            out.extend_from_slice(&listing[..p]);
-            out.extend_from_slice(to);
-            out.extend_from_slice(&listing[p + from.len()..]);
-            return Some(out);
-        }
-    }
-    None
-}
-
-/// Round-trip one standalone BE LuaQ bytecode chunk to PC LE via unluac.
-fn luaq_be_to_le(be_luaq: &[u8], tools: &LuaTools) -> Result<Vec<u8>, String> {
-    if be_luaq.len() < 12 || &be_luaq[0..4] != LUAQ_SIG {
-        return Err("not a LuaQ chunk (missing \\x1bLua signature)".into());
-    }
-    if !tools.java.is_file() {
-        return Err(format!("java executable {} is not a file", tools.java.display()));
-    }
-    if !tools.unluac.is_file() {
-        return Err(format!("unluac jar {} is not a file", tools.unluac.display()));
-    }
-    let java = &tools.java;
-    let jar = &tools.unluac;
-
-    let dir = std::env::temp_dir().join(format!(
-        "mercs2_lua_{}_{}",
-        std::process::id(),
-        be_luaq.len()
-    ));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let _g = ScopeGuard(dir.clone());
-    let be_path = dir.join("be.luac");
-    let luas_path = dir.join("chunk.luas");
-    let le_path = dir.join("le.luac");
-    std::fs::write(&be_path, be_luaq).map_err(|e| e.to_string())?;
-
-    let dis = Command::new(&java)
-        .arg("-jar").arg(&jar).arg("--disassemble").arg(&be_path)
-        .output()
-        .map_err(|e| format!("java/unluac launch failed: {e}"))?;
-    if !dis.status.success() {
-        return Err(format!(
-            "unluac --disassemble failed: {}",
-            String::from_utf8_lossy(&dis.stderr).chars().take(300).collect::<String>()
-        ));
-    }
-    let listing =
-        flip_endianness(&dis.stdout).ok_or("no `.endianness BIG` directive in disassembly")?;
-    std::fs::write(&luas_path, &listing).map_err(|e| e.to_string())?;
-
-    let asm = Command::new(&java)
-        .arg("-jar").arg(&jar).arg("--assemble").arg(&luas_path)
-        .arg("--output").arg(&le_path)
-        .output()
-        .map_err(|e| format!("java/unluac launch failed: {e}"))?;
-    if !asm.status.success() || !le_path.is_file() {
-        return Err(format!(
-            "unluac --assemble failed: {}",
-            String::from_utf8_lossy(&asm.stderr).chars().take(300).collect::<String>()
-        ));
-    }
-    let le = std::fs::read(&le_path).map_err(|e| e.to_string())?;
-    if le.len() < 12 || &le[0..4] != LUAQ_SIG || le[6] != 1 {
-        return Err(format!(
-            "assembled chunk is not PC-LE LuaQ (header {:02x?})",
-            &le[..le.len().min(12)]
-        ));
-    }
-    Ok(le)
+    chunk.endian = Endian::Little;
+    Ok(luachunk::encode(&chunk))
 }
 
 /// BINN metadata before the LuaQ signature. Ports `_convert_binn_pre_luaq`
@@ -160,22 +68,21 @@ fn convert_binn_pre_luaq(head: &mut [u8]) {
     }
 }
 
+/// Where a BINN body's LuaQ bytecode starts: the first `\x1bLua` in its first 256 bytes, after the
+/// BINN metadata. `None` for a script-reference record, which holds no bytecode. The bytecode runs
+/// to the body's end.
+pub fn luaq_offset(body: &[u8]) -> Option<usize> {
+    let scan_end = body.len().saturating_sub(4).min(256);
+    (0..scan_end).find(|&s| &body[s..s + 4] == LUAQ_SIG)
+}
+
 /// Convert a BINN chunk body (Lua bytecode container, or a script-reference
-/// record) from Xbox BE to PC LE. The LuaQ bytecode is converted via the unluac
-/// round-trip; the BINN framing/metadata is per-field swapped. A script-ref
+/// record) from console BE to PC LE. The LuaQ bytecode is converted by
+/// [`luaq_be_to_le`]; the BINN framing/metadata is per-field swapped. A script-ref
 /// (no LuaQ) just byte-swaps its leading u32. Mirrors
-/// `tools/ucfx_be_to_le.py::_convert_lua_be_to_le`. Only a body holding LuaQ bytecode runs
-/// `tools`.
-pub fn convert_binn_be_to_le(be: &[u8], tools: &LuaTools) -> Result<Vec<u8>, String> {
-    let scan_end = be.len().saturating_sub(4).min(256);
-    let mut luaq_off = None;
-    for s in 0..scan_end {
-        if &be[s..s + 4] == LUAQ_SIG {
-            luaq_off = Some(s);
-            break;
-        }
-    }
-    let luaq_off = match luaq_off {
+/// `tools/ucfx_be_to_le.py::_convert_lua_be_to_le`.
+pub fn convert_binn_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
+    let luaq_off = match luaq_offset(be) {
         None => {
             // Script-reference record: only the leading u32 is byte-swapped.
             let mut out = be.to_vec();
@@ -190,7 +97,7 @@ pub fn convert_binn_be_to_le(be: &[u8], tools: &LuaTools) -> Result<Vec<u8>, Str
     if luaq_off > 0 {
         convert_binn_pre_luaq(&mut head);
     }
-    let le_luaq = luaq_be_to_le(&be[luaq_off..], tools)?;
+    let le_luaq = luaq_be_to_le(&be[luaq_off..])?;
     head.extend_from_slice(&le_luaq);
     Ok(head)
 }
@@ -198,74 +105,113 @@ pub fn convert_binn_be_to_le(be: &[u8], tools: &LuaTools) -> Result<Vec<u8>, Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game_paths::{local_config_java_binary, local_config_unluac_jar};
-    use std::path::Path;
+    use crate::luachunk::{Chunk, Constant, LocVar, Proto};
 
-    /// The `java_binary` and `unluac_jar` keys of `.mercs2-local.toml`. Panics naming the missing
-    /// key when either is absent.
-    fn local_tools() -> LuaTools {
-        let start = Path::new(env!("CARGO_MANIFEST_DIR"));
-        LuaTools {
-            java: local_config_java_binary(start).unwrap_or_else(|e| panic!("{e}")),
-            unluac: local_config_unluac_jar(start).unwrap_or_else(|e| panic!("{e}")),
-        }
-    }
-
-    /// Tool paths that do not exist. A body without a LuaQ signature returns from
-    /// `convert_binn_be_to_le` before `luaq_be_to_le` checks or runs the tools.
-    fn absent_tools() -> LuaTools {
-        LuaTools {
-            java: PathBuf::from("absent/java"),
-            unluac: PathBuf::from("absent/unluac.jar"),
+    /// A two-function chunk with every constant type, line info, a local and an upvalue.
+    fn chunk(endian: Endian) -> Chunk {
+        let inner = Proto {
+            source: None,
+            line_defined: 3,
+            last_line_defined: 5,
+            nups: 1,
+            num_params: 2,
+            is_vararg: 0,
+            max_stack: 4,
+            code: vec![0x0000_001e],
+            constants: vec![],
+            protos: vec![],
+            line_info: vec![5],
+            loc_vars: vec![LocVar { name: b"a".to_vec(), start_pc: 0, end_pc: 1 }],
+            upvalues: vec![b"up".to_vec()],
+        };
+        Chunk {
+            endian,
+            main: Proto {
+                source: None,
+                line_defined: 0,
+                last_line_defined: 0,
+                nups: 0,
+                num_params: 0,
+                is_vararg: 2,
+                max_stack: 2,
+                code: vec![0x0000_0024, 0x0080_001e],
+                constants: vec![
+                    Constant::Nil,
+                    Constant::Boolean(true),
+                    Constant::Number(1.5f32.to_bits()),
+                    Constant::String(b"CallWithOptionalArgs".to_vec()),
+                ],
+                protos: vec![inner],
+                line_info: vec![1, 2],
+                loc_vars: vec![],
+                upvalues: vec![],
+            },
         }
     }
 
     #[test]
     fn test_empty_binn_body() {
         let empty = vec![];
-        let result = convert_binn_be_to_le(&empty, &absent_tools());
+        let result = convert_binn_be_to_le(&empty);
         assert_eq!(result, Ok(Vec::new()));
     }
 
     #[test]
     fn test_short_binn_body() {
         let short = vec![0u8; 2];
-        let result = convert_binn_be_to_le(&short, &absent_tools());
+        let result = convert_binn_be_to_le(&short);
         assert_eq!(result, Ok(short));
     }
 
     #[test]
-    fn test_luaq_signature_detection() {
-        // Body with Lua signature: starts with junk, then \x1bLua
-        let mut data = vec![0u8; 100];
-        // Insert Lua signature at offset 50
-        data[50..54].copy_from_slice(b"\x1bLua");
-        // This runs the bytecode through unluac with the configured tools.
-        let result = convert_binn_be_to_le(&data, &local_tools());
-        // The result is not checked; the junk chunk's conversion outcome is unluac's.
-        let _ = result;
-    }
-
-    #[test]
-    fn test_no_luaq_signature_skips_java() {
-        // Body without Lua signature: only the leading u32 is byte-swapped, no tool runs.
+    fn test_no_luaq_signature_swaps_only_the_leading_word() {
+        // Body without Lua signature: a script reference, whose leading u32 alone is byte-swapped.
         let mut data = vec![0u8; 100];
         data[0..4].copy_from_slice(&[1, 2, 3, 4]);
-        let output = convert_binn_be_to_le(&data, &absent_tools())
-            .expect("a body without a LuaQ signature must convert without the tools");
+        let output = convert_binn_be_to_le(&data).expect("a body without a LuaQ signature converts");
         let mut want = data.clone();
         want[0..4].copy_from_slice(&[4, 3, 2, 1]);
         assert_eq!(output, want);
     }
 
+    /// A big-endian chunk after BINN metadata comes out as the same chunk little-endian, the
+    /// metadata swapped as before.
     #[test]
-    fn a_luaq_body_with_a_missing_tool_names_the_path() {
+    fn a_big_endian_chunk_converts_to_the_same_chunk_little_endian() {
+        let mut head = vec![0u8; 24];
+        head[0..4].copy_from_slice(&[0, 0, 0, 7]);
+        head[15..19].copy_from_slice(b"ess\0");
+        head[20..24].copy_from_slice(&[0, 0, 0, 9]);
+        let mut be = head.clone();
+        be.extend_from_slice(&luachunk::encode(&chunk(Endian::Big)));
+        assert_eq!(luaq_offset(&be), Some(24));
+
+        let out = convert_binn_be_to_le(&be).expect("converts");
+        let mut want_head = head;
+        convert_binn_pre_luaq(&mut want_head);
+        assert_eq!(&out[..24], &want_head[..]);
+        assert_eq!(&out[..4], &[7, 0, 0, 0]);
+        assert_eq!(&out[20..24], &[9, 0, 0, 0]);
+        assert_eq!(&out[24..], &luachunk::encode(&chunk(Endian::Little))[..]);
+        assert_eq!(luachunk::decode(&out[24..]).unwrap(), chunk(Endian::Little));
+    }
+
+    /// Bytes after the signature that are not a whole chunk are refused, not passed through.
+    #[test]
+    fn a_signature_followed_by_junk_is_refused() {
         let mut data = vec![0u8; 100];
-        data[0..4].copy_from_slice(LUAQ_SIG);
-        let e = convert_binn_be_to_le(&data, &absent_tools()).unwrap_err();
-        assert!(e.contains("absent/java"), "{e}");
-        let tools = LuaTools { unluac: PathBuf::from("absent/unluac.jar"), ..local_tools() };
-        let e = convert_binn_be_to_le(&data, &tools).unwrap_err();
-        assert!(e.contains("absent/unluac.jar"), "{e}");
+        data[50..54].copy_from_slice(LUAQ_SIG);
+        assert!(convert_binn_be_to_le(&data).is_err());
+
+        let mut trailing = luachunk::encode(&chunk(Endian::Big));
+        trailing.push(0);
+        assert!(luaq_be_to_le(&trailing).is_err());
+    }
+
+    /// A chunk that is already little-endian is not a console chunk.
+    #[test]
+    fn a_little_endian_chunk_is_refused() {
+        let e = luaq_be_to_le(&luachunk::encode(&chunk(Endian::Little))).unwrap_err();
+        assert!(e.contains("already little-endian"), "{e}");
     }
 }

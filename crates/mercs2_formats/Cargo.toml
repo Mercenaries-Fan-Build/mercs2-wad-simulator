@@ -9,6 +9,11 @@ repository.workspace = true
 
 [dependencies]
 flate2 = "1"
+# `be_to_le::audio`: the MP3 a PS3 wavebank carries (codec 0x0C), decoded in Rust — a safe, bit-exact port of
+# minimp3. Over the PS3 Blow It Up Again package's 2,903 MP3 clips it gave ffmpeg's sample counts on every
+# clip, every sample within ±1 of ffmpeg's float decode, and the same bytes on macOS arm64, macOS x86_64 and
+# Linux arm64; symphonia 0.6.1 differed between those platforms and dropped whole frames.
+nanomp3 = "0.2"
 # PS3 DLC decrypt chain (ps3_* modules): the retail PKG data region, the NPDRM
 # EDAT payload, and the SCE SELF appldr/NPDRM layers are all AES-128/256, and the
 # title klicensee is recovered by AES-CMAC. Only `aes` (block cipher) + `cmac` are
