@@ -37,6 +37,11 @@ pub struct UiState {
     pub face_time: Option<f32>,
     /// On the EFFECTS tab: the time (seconds) to run the opened effect to and pause at.
     pub fx_time: Option<f32>,
+    /// On the UI / GFX tab: the export of the opened movie to play alone, by its export name.
+    pub export: Option<String>,
+    /// On the UI / GFX tab: the named clip of the opened movie to draw alone, by its path
+    /// (`_level0.buttonHolder_mc.button6_mc`).
+    pub stage_clip: Option<String>,
     /// On the WORLD LAYERS tab: the entity of the opened layer to select and frame, by its label.
     pub entity: Option<String>,
     /// On the Live page: a `.replay` to play in place of the game, so the page captures with none running.
@@ -98,6 +103,12 @@ impl UiState {
         }
         if st.fx_time.is_some() && !(st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("EFFECTS"))) {
             return Err(format!("{}: `fx_time` needs `\"tab\": \"EFFECTS\"` and a `load`", path.display()));
+        }
+        let ui_load = st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("UI / GFX"));
+        for (key, set) in [("export", st.export.is_some()), ("stage_clip", st.stage_clip.is_some())] {
+            if set && !ui_load {
+                return Err(format!("{}: `{key}` needs `\"tab\": \"UI / GFX\"` and a `load`", path.display()));
+            }
         }
         let facefx_load = st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("FACEFX"));
         for (key, set) in [("face_pose", st.face_pose.is_some()), ("face_time", st.face_time.is_some())] {
