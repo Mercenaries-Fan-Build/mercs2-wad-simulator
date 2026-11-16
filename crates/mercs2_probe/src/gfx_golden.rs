@@ -21,7 +21,8 @@
 //! Usage:
 //!   mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>
 
-use mercs2_formats::gfx::{tag_name, Features, GfxMovie};
+use mercs2_formats::gfx::{features, tag_name, Features};
+use mercs2_formats::gfx_stream::TagStream;
 use mercs2_formats::gfx_def::{Character, MovieDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -661,15 +662,15 @@ pub fn gfx_golden(dir: &Path, md_out: &Path, json_out: &Path) -> Result<(), Stri
             .map(|s| s.to_string_lossy().into_owned())
             .ok_or_else(|| format!("{} has no file name", path.display()))?;
         let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        match GfxMovie::parse(&data) {
-            Ok(m) => {
-                let feat = m.features();
+        match TagStream::parse(&data).and_then(|m| Ok((m.stage_px()?, m))) {
+            Ok((stage, m)) => {
+                let feat = features(&m);
                 rows.push(MovieRow {
                     name,
                     rel,
                     bytes: data.len(),
                     magic: String::from_utf8_lossy(&m.magic).into_owned(),
-                    stage: m.stage_px(),
+                    stage,
                     frames: m.frame_count,
                     tag_total: m.tags.len(),
                     feat,
