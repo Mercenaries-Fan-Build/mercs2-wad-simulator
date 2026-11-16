@@ -102,6 +102,17 @@ impl TagStream {
         Ok(TagStream { magic: *b"GFX", version: 8, length_counts_header: true, frame_rect, frame_rate, frame_count, tags, trailing })
     }
 
+    /// The frame `RECT` in twips, `[xmin, xmax, ymin, ymax]`.
+    pub fn stage(&self) -> Result<[i32; 4], String> {
+        crate::gfx::Cursor::new(&self.frame_rect, 0).read_rect()
+    }
+
+    /// The stage in pixels, `[width, height]`.
+    pub fn stage_px(&self) -> Result<[f32; 2], String> {
+        let [xmin, xmax, ymin, ymax] = self.stage()?;
+        Ok([(xmax - xmin) as f32 / 20.0, (ymax - ymin) as f32 / 20.0])
+    }
+
     /// Whether the file's body is deflated (`CFX`, `CWS`).
     pub fn compressed(&self) -> bool {
         matches!(&self.magic, b"CFX" | b"CWS")
