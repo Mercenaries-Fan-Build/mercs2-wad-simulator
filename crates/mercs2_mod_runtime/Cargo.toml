@@ -16,7 +16,7 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-mercs2_formats = "6.0"
+mercs2_formats = "6.0.1"
 # The Lua debugger names engine bindings from the game's own luaL_Reg registry (`luareg`) and labels the
 # running build from the catalogue.
 mercs2_exemap = "1.1"
