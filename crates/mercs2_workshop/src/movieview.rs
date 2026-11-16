@@ -14,7 +14,6 @@ use mercs2_engine::gfx::stage::Movie;
 use mercs2_engine::gfx::text::FontLib;
 use mercs2_engine::gfx_pass::{GfxImages, GfxPass};
 use mercs2_engine::wad;
-use mercs2_formats::gfx::GfxMovie;
 use mercs2_formats::gfx_def::{Control, Matrix, MovieDef, Place, Timeline};
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::texture::TextureData;
@@ -80,7 +79,7 @@ fn movie_bytes(w: &mut WadStack, src: usize, hash: u32, label: &str) -> Result<V
 /// The movie `hash` as source `src` holds it, decoded.
 fn movie_def(w: &mut WadStack, src: usize, hash: u32, label: &str) -> Result<MovieDef, String> {
     let bytes = movie_bytes(w, src, hash, label)?;
-    MovieDef::decode(&GfxMovie::parse(&bytes).map_err(|e| format!("{label}: {e}"))?).map_err(|e| format!("{label}: {e}"))
+    MovieDef::read(&bytes).map_err(|e| format!("{label}: {e}"))
 }
 
 /// A movie's external images, by the file name its image tags carry, resolved like any texture.
@@ -648,6 +647,7 @@ mod tests {
 mod retail_tests {
     use super::*;
     use crate::index::{AssetIndex, Kind};
+    use std::collections::BTreeMap;
 
     fn device() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -679,6 +679,8 @@ mod retail_tests {
             let rows: Vec<_> = index.rows(Kind::UiGfx).to_vec();
             assert!(!rows.is_empty(), "the UI tab lists no rows");
             let mut failed = Vec::new();
+            let mut checked = BTreeMap::new();
+            let mut not_utf8 = 0;
             for row in &rows {
                 let label = row.label();
                 let result = (|| -> Result<(), String> {
@@ -697,15 +699,49 @@ mod retail_tests {
                     if TagStream::parse(&stream.file()?)?.body() != body {
                         return Err("the written file reads back to another body".into());
                     }
-                    Ok(())
+                    typed_tags_write_back(&stream.tags, &mut checked, &mut not_utf8)
                 })();
                 if let Err(e) = result {
                     failed.push(format!("{label} (0x{:08X}, {}): {e}", row.hash, w.source_path(row.src)));
                 }
             }
-            println!("{overlays:?}: {} movies, {} failed", rows.len(), failed.len());
+            println!("{overlays:?}: {} movies, {} failed; typed tags by code {checked:?}; {not_utf8} strings not UTF-8", rows.len(), failed.len());
             assert!(failed.is_empty(), "{} of {} movies failed:\n{}", failed.len(), rows.len(), failed.join("\n"));
+            for code in mercs2_formats::gfx_tags::TYPED {
+                assert!(checked.get(&code).is_some_and(|n| *n > 0), "no instance of tag {code} was checked");
+            }
         }
+    }
+
+    /// Every tag [`mercs2_formats::gfx_tags`] types, in `tags` and every sprite's timeline, reads and
+    /// writes back to its bytes; counted by code, with the strings that are not UTF-8.
+    fn typed_tags_write_back(tags: &[mercs2_formats::gfx_stream::Tag], checked: &mut BTreeMap<u16, usize>, not_utf8: &mut usize) -> Result<(), String> {
+        use mercs2_formats::gfx_stream::TagBody;
+        use mercs2_formats::gfx_tags::{decode, Typed};
+        for (at, tag) in tags.iter().enumerate() {
+            let body = match &tag.body {
+                TagBody::Sprite { tags, .. } => {
+                    typed_tags_write_back(tags, checked, not_utf8)?;
+                    continue;
+                }
+                TagBody::Raw(b) => b,
+            };
+            let Some(typed) = decode(tag.code, body).map_err(|e| format!("tag #{at} ({}): {e}", tag.code))? else { continue };
+            if typed.encode()? != *body {
+                return Err(format!("tag #{at} ({}) writes back to other bytes", tag.code));
+            }
+            *checked.entry(tag.code).or_default() += 1;
+            let strings: Vec<&[u8]> = match &typed {
+                Typed::Place(p) => p.name.iter().map(Vec::as_slice).collect(),
+                Typed::EditText(t) => [Some(&t.variable), t.text.as_ref(), t.font_class.as_ref()].into_iter().flatten().map(Vec::as_slice).collect(),
+                Typed::Label(l) => vec![&l.name],
+                Typed::Export(list) => list.iter().map(|(_, n)| n.as_slice()).collect(),
+                Typed::Import(i) => std::iter::once(i.url.as_slice()).chain(i.assets.iter().map(|(_, n)| n.as_slice())).collect(),
+                Typed::ShowFrame | Typed::Remove { .. } => Vec::new(),
+            };
+            *not_utf8 += strings.iter().filter(|s| std::str::from_utf8(s).is_err()).count();
+        }
+        Ok(())
     }
 
     /// An on-load call reaches the movie before its first frame, as the exe's does:
