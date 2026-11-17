@@ -1357,7 +1357,6 @@ fn add_sound_lowers_to_one_block_the_engine_plays() {
     let wad = mercs2_formats::patch_wad::build_patch_wad_multi(
         &[block],
         0,
-        None,
         &mercs2_formats::patch_wad::FFCS_CERT_BLOB,
     )
     .expect("assembles");
@@ -1556,4 +1555,50 @@ fn replace_animation_without_a_game_says_so() {
         build::build(&s, None, None, None, None, None),
         Err(BuildError::GameRequired { kind: "replace_animation", .. })
     ));
+}
+
+/// The self-check refuses a WAD whose CSUM meta is below a block's entry count: the engine sizes its
+/// block-entry install ring from it and would retry that block forever.
+#[test]
+fn verify_emitted_refuses_a_csum_meta_below_a_blocks_entry_count() {
+    use mercs2_formats::patch_wad::{build_patch_wad_multi, PatchBlock, FFCS_CERT_BLOB};
+    let mut raw = 3u32.to_le_bytes().to_vec();
+    raw.resize(64, 0x5A);
+    let block = PatchBlock::from_decompressed(&raw, "blocks\\VZ\\resident_P000_Q3.block".into(), vec![], None).unwrap();
+    let mut wad = build_patch_wad_multi(&[block], 0, &FFCS_CERT_BLOB).unwrap();
+    assert_eq!(&wad[0x2C..0x30], &3u32.to_le_bytes(), "the writer writes the block's entry count");
+    wad[0x2C..0x30].copy_from_slice(&2u32.to_le_bytes());
+    match build::verify_emitted(&wad, &mercs2_quartermaster::shader::ShaderKeys::with(&[])) {
+        Err(BuildError::Lower { message, .. }) => assert!(message.contains("never install"), "{message}"),
+        other => panic!("expected the CSUM meta refusal, got {other:?}"),
+    }
+}
+
+/// A re-emitted block ships every block its rows name as LOD rungs; a rung it does not carry is
+/// refused, because the writer would sentinel it and the asset would lose its finer tiers.
+#[test]
+fn script_patch_blocks_carries_every_rung_its_rows_name() {
+    use mercs2_formats::patch_wad::PatchBlock;
+    use mercs2_formats::scripts_block::{Entry, ScriptsBlock};
+    let loaded = |rung_blocks: Vec<PatchBlock>| build::LoadedScriptBlock {
+        path: "blocks\\VZ\\resident_P000_Q3.block".into(),
+        block: ScriptsBlock { entries: vec![Entry { name_hash: 0xA, type_hash: 0xF011_157A, field_c: 0, bytes: vec![0u8; 16] }] },
+        // _P000 = this block (7), _P001 = block 8.
+        rows: std::collections::HashMap::from([(0xA, ((7u32 << 16) | 8, 0xFFFF_FFFF, 27))]),
+        source_block_index: 7,
+        wad: 0,
+        rung_blocks,
+    };
+    let touched = std::collections::BTreeSet::from([0usize]);
+    match build::script_patch_blocks(&[loaded(vec![])], &touched, "test") {
+        Err(BuildError::Lower { message, .. }) => assert!(message.contains("not carried"), "{message}"),
+        other => panic!("expected the uncarried-rung refusal, got {other:?}"),
+    }
+    let mut fine = PatchBlock::from_decompressed(&[0u8; 8], "blocks\\VZ\\fine_P001_Q2.block".into(), vec![], None).unwrap();
+    fine.source_block_index = Some(8);
+    let out = build::script_patch_blocks(&[loaded(vec![fine])], &touched, "test").expect("the rung is carried");
+    assert_eq!(out.iter().map(|b| (b.path_string.as_str(), b.source_block_index)).collect::<Vec<_>>(), [
+        ("blocks\\VZ\\resident_P000_Q3.block", Some(7)),
+        ("blocks\\VZ\\fine_P001_Q2.block", Some(8)),
+    ]);
 }
