@@ -17,6 +17,7 @@
 use mercs2_formats::ffcs::{load_ffcs_archive, Endian, FfcsArchive};
 use mercs2_formats::texture::{extract_texture, TextureData};
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Which bake a WAD belongs to.
@@ -334,6 +335,22 @@ pub struct ModelEditInputs {
     pub source_block_index: u32,
 }
 
+/// A block to re-emit whole, with what keeps its rows' LOD chains ([`GameStack::block_for_reemit`]).
+pub struct ReemitBlock {
+    /// The decompressed block.
+    pub raw: Vec<u8>,
+    /// `asset_hash -> (packed_block_ref, secondary_ref, type_id)`: the rows the block publishes, in its
+    /// WAD's block index space.
+    pub rows: std::collections::HashMap<u32, (u32, u32, u32)>,
+    /// The block's index in its WAD: the re-emitted block's `source_block_index`.
+    pub source_block_index: u32,
+    /// The block's WAD's position in the stack: every index here is in that WAD's index space.
+    pub wad: usize,
+    /// The blocks the rows' rungs name (and the blocks their rows name), byte-for-byte, each with its
+    /// own rows and `source_block_index`.
+    pub rung_blocks: Vec<mercs2_formats::patch_wad::PatchBlock>,
+}
+
 /// An opened `[base, overlays…]` stack.
 pub struct GameStack {
     wads: Vec<OpenWad>,
@@ -618,6 +635,71 @@ impl GameStack {
             return Some((dec, rows));
         }
         None
+    }
+
+    /// A block located by PTHS substring (last-mounted wins, as [`Self::block_and_rows_by_path`]), with
+    /// what re-emitting it whole needs so its rows keep their LOD chains: its index in the WAD it came
+    /// from, and every other block of that WAD its rows name as a `_P001`..`_P003` rung — plus, for each
+    /// of those, the rows it publishes and the blocks THEY name — byte-for-byte (compressed bytes and
+    /// INDX words) with its `source_block_index`, so the writer re-points the rungs instead of
+    /// sentinelling them. `None` when no WAD of the stack has the block; an error when its WAD cannot
+    /// be read.
+    pub fn block_for_reemit(&mut self, needle: &str) -> Option<Result<ReemitBlock, String>> {
+        let needle = needle.to_lowercase();
+        let (wi, idx) = self.wads.iter().enumerate().rev().find_map(|(wi, wad)| {
+            wad.archive.paths.iter().position(|p| p.to_lowercase().contains(&needle)).map(|idx| (wi, idx))
+        })?;
+        Some(self.reemit_at(wi, idx))
+    }
+
+    fn reemit_at(&mut self, wi: usize, idx: usize) -> Result<ReemitBlock, String> {
+        let wad = &mut self.wads[wi];
+        let path = wad.path.display().to_string();
+        let raw = mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, idx as u16)
+            .map_err(|m| format!("{path}: {}: {m}", wad.archive.paths[idx]))?;
+        fn rows_of(archive: &FfcsArchive, b: usize) -> Vec<&mercs2_formats::ffcs::AsetEntry> {
+            archive.aset.iter().filter(|e| e.block_index() as usize == b).collect()
+        }
+        let rows = rows_of(&wad.archive, idx)
+            .into_iter()
+            .map(|e| (e.asset_hash, (e.packed_block_ref, e.secondary_ref, e.type_id)))
+            .collect();
+        // The rung closure: the blocks this block's rows name, and the blocks THEIR rows name.
+        let mut todo: Vec<usize> = rows_of(&wad.archive, idx).iter().flat_map(|e| e.lod_chain()[1..].to_vec()).map(usize::from).collect();
+        let mut carried: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        while let Some(b) = todo.pop() {
+            if b == idx || !carried.insert(b) {
+                continue;
+            }
+            if b >= wad.archive.indx.len() {
+                return Err(format!("{path}: a row names block {b}, past its {} blocks", wad.archive.indx.len()));
+            }
+            todo.extend(rows_of(&wad.archive, b).iter().flat_map(|e| e.lod_chain()[1..].to_vec()).map(usize::from));
+        }
+        let mut rung_blocks = Vec::with_capacity(carried.len());
+        for b in carried {
+            let x = wad.archive.indx[b].clone();
+            let size = x.compressed_page_count() as usize * mercs2_formats::patch_wad::PAGE_SIZE;
+            let mut bytes = vec![0u8; size];
+            wad.file
+                .seek(SeekFrom::Start(x.page_index as u64 * mercs2_formats::patch_wad::PAGE_SIZE as u64))
+                .and_then(|_| wad.file.read_exact(&mut bytes))
+                .map_err(|e| format!("{path}: block {b}: {e}"))?;
+            if x.is_compressed() {
+                let len = mercs2_formats::sges::compressed_len(&bytes).map_err(|m| format!("{path}: block {b}: {m}"))?;
+                bytes.truncate(len);
+            }
+            let block_rows = rows_of(&wad.archive, b)
+                .into_iter()
+                .map(|e| mercs2_formats::patch_wad::AsetEntry::new(e.asset_hash, e.secondary_ref, e.packed_block_ref, e.type_id))
+                .collect();
+            let mut pb = mercs2_formats::patch_wad::PatchBlock::new(bytes, wad.archive.paths[b].clone(), block_rows);
+            pb.packed_field = x.packed_field;
+            pb.flags = (x.flags_and_page_count >> 16) as u16;
+            pb.source_block_index = Some(b as u32);
+            rung_blocks.push(pb);
+        }
+        Ok(ReemitBlock { raw, rows, source_block_index: idx as u32, wad: wi, rung_blocks })
     }
 
     /// Everything an in-place LAYER edit (`edit_world` — a vz_state / layers_static placement patch)
