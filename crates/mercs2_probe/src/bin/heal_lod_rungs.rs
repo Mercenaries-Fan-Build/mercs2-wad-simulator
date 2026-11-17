@@ -104,7 +104,7 @@ fn main() {
         }
     }
 
-    let wad = build_patch_wad_multi(&contents.blocks, contents.csum_value, None, &FFCS_CERT_BLOB)
+    let wad = build_patch_wad_multi(&contents.blocks, contents.csum_value, &FFCS_CERT_BLOB)
         .expect("rebuild patch");
     std::fs::write(out_path, &wad).expect("write out");
     println!(
