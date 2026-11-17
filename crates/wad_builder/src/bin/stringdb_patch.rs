@@ -463,7 +463,7 @@ fn run() -> Result<(), String> {
     let blk = PatchBlock::from_decompressed(&block, path.clone(), aset, tier)?;
     println!("patch block: {} aset rows, {} pages declared", blk.aset_entries.len(), blk.declared_pages());
 
-    let wad = build_patch_wad_multi(&[blk], 0, None, &FFCS_CERT_BLOB)?;
+    let wad = build_patch_wad_multi(&[blk], 0, &FFCS_CERT_BLOB)?;
     std::fs::write(&out, &wad).map_err(|e| format!("write {out}: {e}"))?;
     println!("Wrote {out} ({} bytes)", wad.len());
     Ok(())
