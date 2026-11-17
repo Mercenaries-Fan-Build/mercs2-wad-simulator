@@ -15,14 +15,14 @@ use std::path::Path;
 
 use mercs2_formats::be_to_le::convert::convert_block;
 use mercs2_formats::be_to_le::ecs::{ecs_containers, is_compact, read_records, ComponentSchemas};
-use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, typed_chunks, BlockTables, TextureTable};
 use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::game_paths::{local_config_ps3_vz_wad, local_config_vz_wad, local_config_xbox_vz_wad};
 use mercs2_formats::mixr::Mixr;
 use mercs2_formats::placement::comp_inventory;
 use mercs2_formats::sges::decompress_block;
-use mercs2_formats::types::{TYPE_HASH_GUIDMAP, TYPE_HASH_WORLD_ENTITY_DATA};
+use mercs2_formats::types::{TYPE_HASH_GUIDMAP, TYPE_HASH_MODEL, TYPE_HASH_WORLD_ENTITY_DATA};
 use mercs2_formats::ucfx::block_chunk_spans;
 use mercs2_formats::worldentity::WorldEntity;
 
@@ -90,19 +90,20 @@ fn every_xbox_mixr_equals_its_pc_twin() {
     let mut compared = 0usize;
     for (i, e) in entries.iter().enumerate() {
         let be = read_be_block(&doh, e).unwrap();
-        if !contains(&be, b"RXIM") {
+        // A MIXR lives in a kit model; a byte scan of the whole block also hits audio data
+        // (`bulding_destruct`'s XMA2 wavebank holds the bytes `RXIM` and no model).
+        if !typed_chunks(&be, TYPE_HASH_MODEL).unwrap().iter().any(|(_, c)| contains(c, b"RXIM")) {
             continue;
         }
         let textures = BlockTables { textures: &table, rung: rung_of_path(&paths[i]), streams: None };
-        let le = convert_block(&be, false, None, None, None, Some(textures)).unwrap();
+        let le = convert_block(&be, false, None, None, Some(textures)).unwrap();
         for (entry, r) in block_chunk_spans(&le).unwrap() {
             let Some(m) = Mixr::find(&le[r]).unwrap() else { continue };
             assert_eq!(twins.get(&(entry.name_hash, entry.type_hash)), Some(&m), "0x{:08X}", entry.name_hash);
             compared += 1;
         }
     }
-    assert!(compared > 0);
-    eprintln!("{compared} MIXR tables equal their PC twins");
+    assert_eq!(compared, 34);
 }
 
 #[test]
