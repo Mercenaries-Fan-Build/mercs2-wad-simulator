@@ -29,6 +29,7 @@ pub mod audio;
 pub mod blocks;
 pub mod chunk_invariants;
 pub mod consume;
+pub mod install_ring;
 pub mod material;
 pub mod model;
 pub mod names;
