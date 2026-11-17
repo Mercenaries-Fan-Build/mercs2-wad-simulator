@@ -91,7 +91,7 @@ fn run(game_wad: &Path, out_dir: &Path, mark: Option<&Path>, shipments: &[PathBu
     let touched: BTreeSet<usize> = out.scripts.iter().map(|l| l.block).collect();
     let blocks = build::script_patch_blocks(&loaded, &touched, "forge").map_err(|e| e.to_string())?;
     let csum = mercs2_formats::donor::base_csum(game_wad)?;
-    let wad = build_patch_wad_multi(&blocks, csum.0, csum.1, &FFCS_CERT_BLOB)?;
+    let wad = build_patch_wad_multi(&blocks, csum, &FFCS_CERT_BLOB)?;
     for d in build::verify_emitted(&wad, &mercs2_quartermaster::shader::ShaderKeys::with(&[])).map_err(|e| e.to_string())? {
         println!("self-check\t{d}");
     }
