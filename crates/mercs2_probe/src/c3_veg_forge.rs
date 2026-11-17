@@ -190,7 +190,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Err("no cells modified (all already had the model?)".into());
     }
 
-    let wad_bytes = build_patch_wad_multi(&blocks, 0, None, &FFCS_CERT_BLOB)?;
+    let wad_bytes = build_patch_wad_multi(&blocks, 0, &FFCS_CERT_BLOB)?;
     std::fs::write(&out, &wad_bytes)
         .map_err(|e| format!("write {out}: {e}"))?;
     println!(
