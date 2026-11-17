@@ -3503,7 +3503,7 @@ mod sound {
             });
         }
         let block = assets_block(format!("blocks\\{name}\\{name}.block"), &assets).expect("block");
-        let wad = mercs2_formats::patch_wad::build_patch_wad_multi(&[block], 0, None, &mercs2_formats::patch_wad::FFCS_CERT_BLOB).expect("wad");
+        let wad = mercs2_formats::patch_wad::build_patch_wad_multi(&[block], 0, &mercs2_formats::patch_wad::FFCS_CERT_BLOB).expect("wad");
         std::fs::write(path, wad).unwrap();
     }
 
@@ -3558,7 +3558,7 @@ mod sound {
             .expect("the level's WAD");
         let raw = std::fs::read(out.join("data/qmlevel-patch.wad")).unwrap();
         assert_eq!(patch.sha256, build::sha256_hex(&raw));
-        let (csum, _) = mercs2_formats::donor::base_csum(&vz).unwrap();
+        let csum = mercs2_formats::donor::base_csum(&vz).unwrap();
         let wad = read_patch_wad(&raw).unwrap();
         assert_eq!(wad.csum_value, csum, "an overlay carries its base's CSUM");
         assert_eq!(wad.blocks.len(), 1, "assets naming one block ship in it");
@@ -4239,4 +4239,48 @@ fn an_add_placement_with_a_fresh_key_builds_and_places_it() {
         mercs2_formats::placement::entity_key_set(&dec).contains(&free)
     });
     assert!(placed, "the shipped block places 0x{free:08X}");
+}
+
+/// The length of the LOD chain `(packed_block_ref, secondary_ref)` encode: `_P000` plus every rung up
+/// to the first absent one (0xFFFF), as the engine walks it.
+fn chain_len(packed: u32, secondary: u32) -> usize {
+    1 + [packed & 0xFFFF, secondary >> 16, secondary & 0xFFFF].iter().take_while(|&&r| r != 0xFFFF).count()
+}
+
+/// ★ Re-emitting vz's resident block keeps every row's LOD chain. Its rows name other blocks of vz.wad
+/// as `_P001`..`_P003` rungs (the PMC-courtyard paving names `resident-pmcoutpost_fountain_P001`..`_P003`);
+/// the re-emit carries those blocks so the writer re-points the rungs. Without them the writer sentinels
+/// the rungs and the courtyard renders at its coarsest tier (seen in game, 2026-11-17).
+#[test]
+fn reemitted_resident_keeps_every_rows_lod_chain() {
+    let mut game = retail_game();
+    let loaded = build::load_script_blocks(&mut game, link::SCRIPT_BLOCKS, "test").expect("the scripts blocks load");
+    let (_, resident_path) = link::SCRIPT_BLOCKS[1];
+    let resident = loaded.iter().position(|lb| lb.path == resident_path).expect("the stack has vz's resident block");
+    assert!(
+        loaded[resident].rung_blocks.iter().any(|b| b.path_string.to_lowercase().contains("resident-pmcoutpost_fountain_p003")),
+        "the fountain rungs are carried: {:?}",
+        loaded[resident].rung_blocks.iter().map(|b| &b.path_string).collect::<Vec<_>>()
+    );
+
+    let blocks = build::script_patch_blocks(&loaded, &std::collections::BTreeSet::from([resident]), "test").expect("re-emits");
+    let wad = mercs2_formats::patch_wad::build_patch_wad_multi(&blocks, 0, &mercs2_formats::patch_wad::FFCS_CERT_BLOB).expect("assembles");
+    let read = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("reads back");
+    let emitted = read.blocks.iter().find(|b| b.path_string == resident_path).expect("the resident block ships");
+
+    let mut checked = 0;
+    for row in &emitted.aset_entries {
+        let &(packed, secondary, _) = loaded[resident].rows.get(&row.asset_hash).expect("every emitted row is a base row");
+        assert_eq!(
+            chain_len(row.u32_2, row.u32_1),
+            chain_len(packed, secondary),
+            "0x{:08X} keeps its LOD chain",
+            row.asset_hash
+        );
+        checked += 1;
+    }
+    // One row per block entry (`rows` is keyed by hash, and two resident entries share one).
+    assert_eq!(checked, loaded[resident].block.entries.len(), "a row for every entry is emitted");
+    let deep = loaded[resident].rows.values().filter(|&&(p, s, _)| chain_len(p, s) > 1).count();
+    assert!(deep >= 10, "vz's resident has multi-rung rows to keep ({deep})");
 }
