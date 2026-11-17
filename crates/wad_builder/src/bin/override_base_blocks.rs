@@ -133,7 +133,7 @@ fn run() -> Result<(), String> {
         blocks.push(blk);
     }
 
-    let wad_bytes = build_patch_wad_multi(&blocks, 0, None, &FFCS_CERT_BLOB)?;
+    let wad_bytes = build_patch_wad_multi(&blocks, 0, &FFCS_CERT_BLOB)?;
     std::fs::write(&out, &wad_bytes).map_err(|e| format!("write {out}: {e}"))?;
     println!("Wrote {out} ({} bytes, {} blocks)", wad_bytes.len(), blocks.len());
     Ok(())
