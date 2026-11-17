@@ -219,6 +219,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut exit_code = 0i32;
 
+    let aux_wads = cli
+        .base_wad_dir
+        .as_ref()
+        .map(|d| discover_aux_wads(d, &cli.wad, cli.base_wad.as_deref()))
+        .unwrap_or_default();
+
+    // A block with more entries than every mounted WAD's CSUM meta is never installed by the engine
+    // and its level never starts (`wad_simulator::install_ring`).
+    println!("{}", "=== Block-Entry Install Ring (CSUM meta) ===".bright_white().bold());
+    let mut ring_wads: Vec<&std::path::Path> = vec![cli.wad.as_path()];
+    ring_wads.extend(cli.base_wad.as_deref());
+    ring_wads.extend(aux_wads.iter().map(|p| p.as_path()));
+    match wad_simulator::install_ring::check_install_ring(&ring_wads) {
+        Ok(r) => {
+            println!("ring {} (largest CSUM meta, from {}) over {} WAD(s), {} block(s)", r.ring, r.ring_from.display(), ring_wads.len(), r.blocks);
+            if cli.base_wad.is_none() {
+                println!("{}", "no --base-wad: the ring is the given WADs' only; the game also counts its base WADs'".yellow());
+            }
+            for o in &r.overflows {
+                println!("{} {} in {}: {} entries, more than the ring's {}", "NEVER INSTALLED".red().bold(), o.block, o.wad.display(), o.entries, r.ring);
+            }
+            if !r.overflows.is_empty() {
+                exit_code = 1;
+            }
+        }
+        Err(e) => {
+            eprintln!("install-ring check failed: {e}");
+            exit_code = 1;
+        }
+    }
+    println!();
+
     if !cli.skip_aset {
         // NOTE: the former "ASET OOB Validation" pass (run_aset_oob) was removed.
         // It treated the packed-ref low-16 as a 16-byte-entry-table INDEX and flagged
@@ -253,11 +285,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let base = cli.base_wad.as_deref();
         let patch = Some(cli.wad.as_path());
-        let aux_wads = cli
-            .base_wad_dir
-            .as_ref()
-            .map(|d| discover_aux_wads(d, &cli.wad, base))
-            .unwrap_or_default();
         let manifest_path = cli.audio_manifest.clone().or_else(|| {
             Some(PathBuf::from("output/analysis/dlc_audio_manifest.json"))
         });
