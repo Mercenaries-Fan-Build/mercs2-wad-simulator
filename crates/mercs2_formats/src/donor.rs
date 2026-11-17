@@ -119,20 +119,21 @@ pub fn donor_block<P: AsRef<Path>>(wad_paths: &[P], donor: u32) -> Result<Vec<u8
     Err(last)
 }
 
-/// The base WAD's `CSUM` `(value, meta)`, to be mirrored into an overlay.
+/// The base WAD's `CSUM` row value, to be mirrored into an overlay.
 ///
-/// The proven publish path carries these across from the base rather than zeroing them, so any
-/// overlay we emit should do the same — it costs one header read and keeps our output the same
-/// shape as WADs that are known to load.
-pub fn base_csum<P: AsRef<Path>>(base_wad: P) -> Result<(u32, Option<u32>), String> {
+/// The proven publish path carries the value across from the base rather than zeroing it. The row's
+/// `meta` is not taken from the base: the writer computes it from the overlay's own blocks
+/// ([`crate::patch_wad::csum_meta_for`]).
+pub fn base_csum<P: AsRef<Path>>(base_wad: P) -> Result<u32, String> {
     let path = base_wad.as_ref();
     let mut file =
         std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     let archive = load_ffcs_archive(&mut file, size)
         .map_err(|e| format!("base FFCS {}: {e}", path.display()))?;
-    let row = find_chunk(&archive.chunks, b"CSUM");
-    Ok((row.map(|r| r.offset).unwrap_or(0), row.map(|r| r.meta)))
+    find_chunk(&archive.chunks, b"CSUM")
+        .map(|r| r.offset)
+        .ok_or_else(|| format!("base FFCS {}: no CSUM chunk row", path.display()))
 }
 
 #[cfg(test)]
