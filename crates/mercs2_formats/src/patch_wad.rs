@@ -396,22 +396,38 @@ pub fn validate_blocks(blocks: &[PatchBlock]) -> Result<(), String> {
     }
 }
 
+/// The entry count of a block: the first `u32` of its decompressed bytes (the block's entry table).
+/// A block flagged compressed (`flags` bit 15, INDX bit 31) is an `sges` stream and only its head is
+/// inflated; a stored block's bytes are its decompressed bytes.
+pub fn block_entry_count(block: &PatchBlock) -> Result<u32, String> {
+    let head = if block.flags & 0x8000 != 0 {
+        crate::sges::decompress_sges_head(&block.compressed_data, 4).map_err(|m| format!("{}: {m}", block.path_string))?
+    } else {
+        block.compressed_data.clone()
+    };
+    let word = head
+        .get(0..4)
+        .ok_or_else(|| format!("{}: {} decompressed bytes, too few for an entry count", block.path_string, head.len()))?;
+    Ok(u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+}
+
+/// The CSUM row `meta` a WAD of `blocks` must carry: the largest entry count of any block. The engine
+/// sizes its block-entry install ring from the largest `meta` of every mounted WAD and retries a block
+/// with more entries than that ring forever (`docs/format_reference.md`, CSUM row); retail WADs carry
+/// exactly this value (vz.wad 7018 = `VZ\resident`, shell.wad 416 = `Shell\scaleform_shell`).
+pub fn csum_meta_for(blocks: &[PatchBlock]) -> Result<u32, String> {
+    blocks.iter().try_fold(0u32, |m, b| Ok(m.max(block_entry_count(b)?)))
+}
+
 /// Build a PC FFCS patch WAD from one or more blocks.
 ///
-/// `csum_meta` sets the CSUM chunk's `meta` field. When `None`, it is
-/// auto-detected from the ASET-entry count of a block whose path ends with
-/// `\resident_p000_q3.block` (falling back to 0). Pass it explicitly when any block
-/// may have been carried in from another WAD — an imported block with that path would
-/// otherwise silently hijack the value.
+/// The CSUM row's `meta` is [`csum_meta_for`] the blocks; its value is `csum_value` (qm passes the
+/// base WAD's).
 ///
-/// Errors if [`validate_blocks`] fails.
-pub fn build_patch_wad_multi(
-    blocks: &[PatchBlock],
-    csum_value: u32,
-    csum_meta: Option<u32>,
-    cert_blob: &[u8; 144],
-) -> Result<Vec<u8>, String> {
+/// Errors if [`validate_blocks`] fails or a block's entry count cannot be read.
+pub fn build_patch_wad_multi(blocks: &[PatchBlock], csum_value: u32, cert_blob: &[u8; 144]) -> Result<Vec<u8>, String> {
     validate_blocks(blocks)?;
+    let csum_meta = csum_meta_for(blocks)?;
 
     let num_blocks = blocks.len();
 
@@ -452,17 +468,6 @@ pub fn build_patch_wad_multi(
         current_page += pages_needed;
     }
     let file_size = current_page * PAGE_SIZE;
-
-    // ── Resolve CSUM meta (resident ASET entry count) ──
-    let csum_meta = csum_meta.unwrap_or_else(|| {
-        for blk in blocks {
-            let lower = blk.path_string.to_lowercase().replace('/', "\\");
-            if lower.ends_with("\\resident_p000_q3.block") {
-                return blk.aset_entries.len() as u32;
-            }
-        }
-        0
-    });
 
     // ── FFCS header (256 bytes) ──
     let mut out = vec![0u8; file_size];
@@ -552,7 +557,9 @@ pub fn build_patch_wad_multi(
             remap_rung(s2, known_src),
             remap_rung(s3, known_src),
         );
-        if (p1, p2, p3) != (s1, s2, s3) {
+        // A rung re-pointed at a block this patch carries is not a loss; only a present rung that became
+        // 0xFFFF is.
+        if [(s1, p1), (s2, p2), (s3, p3)].iter().any(|&(s, p)| s != 0xFFFF && p == 0xFFFF) {
             sentinelled += 1;
         }
         let u2 = ((blk_idx as u32) << 16) | p1 as u32;
@@ -770,7 +777,7 @@ pub fn merge_patch_wads(
         }
     }
 
-    build_patch_wad_multi(&merged, contents.csum_value, None, &FFCS_CERT_BLOB)
+    build_patch_wad_multi(&merged, contents.csum_value, &FFCS_CERT_BLOB)
 }
 
 #[cfg(test)]
@@ -883,9 +890,9 @@ mod tests {
     /// each copied row's rungs still name the copied blocks, not the target's blocks of those numbers.
     #[test]
     fn merged_blocks_keep_their_rungs() {
-        let target = build_patch_wad_multi(&chain("a", 0xA, 0), 0, None, &FFCS_CERT_BLOB).unwrap();
+        let target = build_patch_wad_multi(&chain("a", 0xA, 0), 0, &FFCS_CERT_BLOB).unwrap();
         assert_eq!(rung1_of(&target, 0xA), "blocks\\VZ\\a_P001_Q2.block");
-        let source = build_patch_wad_multi(&chain("b", 0xB, 0), 0, None, &FFCS_CERT_BLOB).unwrap();
+        let source = build_patch_wad_multi(&chain("b", 0xB, 0), 0, &FFCS_CERT_BLOB).unwrap();
         let merged = merge_patch_wads(&target, read_patch_wad(&source).unwrap().blocks, true).unwrap();
         assert_eq!(rung1_of(&merged, 0xA), "blocks\\VZ\\a_P001_Q2.block");
         assert_eq!(rung1_of(&merged, 0xB), "blocks\\VZ\\b_P001_Q2.block");
@@ -959,26 +966,29 @@ mod tests {
         assert!(err.contains("DATA starts at"), "got: {err}");
     }
 
+    /// A stored (uncompressed) block of `len` bytes whose entry table says `entries`, padded with `fill`
+    /// so the reader's trailing-zero trim and 4-byte realign reproduce it exactly.
+    fn stored_block(entries: u32, len: usize, fill: u8, path: &str, rows: Vec<AsetEntry>) -> PatchBlock {
+        let mut data = entries.to_le_bytes().to_vec();
+        data.resize(len, fill);
+        let mut b = PatchBlock::new(data, path.to_string(), rows);
+        b.flags = 0;
+        b
+    }
+
     #[test]
     fn build_then_read_roundtrip() {
-        // Two blocks with 4-byte-aligned, non-zero-terminated payloads so the
-        // reader's trailing-zero trim + 4-byte realign reproduce them exactly.
-        let b0 = PatchBlock::new(
-            vec![0xABu8; 24], // len % 4 == 0, last byte != 0
-            "blocks\\dlc01\\resident_p000_q3.block".to_string(),
-            vec![
-                AsetEntry::new(0x11111111, 0xFFFFFFFF, 0x1234, 0xAA),
-                AsetEntry::new(0x22222222, 1, 2, 3),
-            ],
+        let b0 = stored_block(
+            2,
+            24,
+            0xAB,
+            "blocks\\dlc01\\resident_p000_q3.block",
+            vec![AsetEntry::new(0x11111111, 0xFFFFFFFF, 0x1234, 0xAA), AsetEntry::new(0x22222222, 1, 2, 3)],
         );
-        let b1 = PatchBlock::new(
-            vec![0xCDu8; 32],
-            "blocks\\dlc01\\speedcity\\foo.block".to_string(),
-            vec![AsetEntry::new(0x33333333, 0xFFFFFFFF, 0x5678, 0xBB)],
-        );
+        let b1 = stored_block(5, 32, 0xCD, "blocks\\dlc01\\speedcity\\foo.block", vec![AsetEntry::new(0x33333333, 0xFFFFFFFF, 0x5678, 0xBB)]);
         let blocks = vec![b0.clone(), b1.clone()];
 
-        let wad = build_patch_wad_multi(&blocks, 0xCAFEBABE, None, &FFCS_CERT_BLOB).expect("build");
+        let wad = build_patch_wad_multi(&blocks, 0xCAFEBABE, &FFCS_CERT_BLOB).expect("build");
 
         // Header structure
         assert_eq!(&wad[0..4], b"FFCS");
@@ -988,9 +998,9 @@ mod tests {
         assert_eq!(&wad[0x30..0x34], b"ASET");
         assert_eq!(&wad[0x3C..0x40], b"PTHS");
         assert_eq!(&wad[0x48..0x48 + 144], &FFCS_CERT_BLOB[..]);
-        // CSUM value + auto-detected meta (resident block has 2 ASET entries)
+        // CSUM value as passed; meta = the largest block entry count (5, the non-resident block).
         assert_eq!(read_u32_le(&wad, 0x24 + 4), 0xCAFEBABE);
-        assert_eq!(read_u32_le(&wad, 0x24 + 8), 2);
+        assert_eq!(read_u32_le(&wad, 0x24 + 8), 5);
 
         // Round-trip parse
         let parsed = read_patch_wad(&wad).expect("read");
@@ -1023,21 +1033,16 @@ mod tests {
     /// guarantee, so it is dropped on purpose; `aset_refcheck` is the gate for the correct shape.
     #[test]
     fn python_parity_on_framing_and_lod_rungs_never_dangle() {
-        let b0 = PatchBlock::new(
-            vec![0xABu8; 24],
-            "blocks\\dlc01\\resident_p000_q3.block".to_string(),
-            vec![
-                AsetEntry::new(0x11111111, 0xFFFFFFFF, 0x1234, 0xAA),
-                AsetEntry::new(0x22222222, 1, 2, 3),
-            ],
+        let b0 = stored_block(
+            2,
+            24,
+            0xAB,
+            "blocks\\dlc01\\resident_p000_q3.block",
+            vec![AsetEntry::new(0x11111111, 0xFFFFFFFF, 0x1234, 0xAA), AsetEntry::new(0x22222222, 1, 2, 3)],
         );
-        let b1 = PatchBlock::new(
-            vec![0xCDu8; 32],
-            "blocks\\dlc01\\speedcity\\foo.block".to_string(),
-            vec![AsetEntry::new(0x33333333, 0xFFFFFFFF, 0x5678, 0xBB)],
-        );
+        let b1 = stored_block(5, 32, 0xCD, "blocks\\dlc01\\speedcity\\foo.block", vec![AsetEntry::new(0x33333333, 0xFFFFFFFF, 0x5678, 0xBB)]);
         let wad =
-            build_patch_wad_multi(&[b0, b1], 0xCAFEBABE, None, &FFCS_CERT_BLOB).expect("build");
+            build_patch_wad_multi(&[b0, b1], 0xCAFEBABE, &FFCS_CERT_BLOB).expect("build");
 
         // Framing golden, unchanged from the Python cross-check.
         assert_eq!(
@@ -1065,6 +1070,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An sges-compressed block whose entry table declares `entries`.
+    fn counted_block(entries: u32, path: &str) -> PatchBlock {
+        let mut raw = entries.to_le_bytes().to_vec();
+        raw.resize(64, 0x5A);
+        PatchBlock::from_decompressed(&raw, path.to_string(), vec![], None).unwrap()
+    }
+
+    /// The CSUM meta is the largest entry count of ANY block, as in retail (shell.wad's 416 is
+    /// `scaleform_shell`, not its resident block). The engine sizes its block-entry install ring from it
+    /// and retries forever a block with more entries than the ring.
+    #[test]
+    fn csum_meta_is_the_largest_block_entry_count() {
+        let blocks = [counted_block(3, "blocks\\Shell\\resident_P000_Q3.block"), counted_block(416, "blocks\\Shell\\scaleform_shell_P000_Q3.block")];
+        let wad = build_patch_wad_multi(&blocks, 0x1234_5678, &FFCS_CERT_BLOB).unwrap();
+        assert_eq!(read_u32_le(&wad, 0x24 + 8), 416);
+        assert_eq!(read_u32_le(&wad, 0x24 + 4), 0x1234_5678, "the CSUM value passes through");
+
+        // vz's resident with one entry past retail's 7018: the meta must follow it, or the level never loads.
+        let wad = build_patch_wad_multi(&[counted_block(7019, "blocks\\VZ\\resident_P000_Q3.block")], 0, &FFCS_CERT_BLOB).unwrap();
+        assert_eq!(read_u32_le(&wad, 0x24 + 8), 7019);
+    }
+
+    /// Merging a bigger block into a WAD raises its CSUM meta.
+    #[test]
+    fn merging_a_bigger_block_raises_the_csum_meta() {
+        let target = build_patch_wad_multi(&[counted_block(3, "blocks\\VZ\\a.block")], 0, &FFCS_CERT_BLOB).unwrap();
+        assert_eq!(read_u32_le(&target, 0x24 + 8), 3);
+        let merged = merge_patch_wads(&target, vec![counted_block(7020, "blocks\\VZ\\resident_P000_Q3.block")], true).unwrap();
+        assert_eq!(read_u32_le(&merged, 0x24 + 8), 7020);
+    }
+
+    /// A block whose entry count cannot be read is refused, naming the block.
+    #[test]
+    fn a_block_with_no_readable_entry_count_is_refused() {
+        let junk = PatchBlock::new(vec![0xABu8; 24], "blocks\\junk.block".into(), vec![]);
+        let err = build_patch_wad_multi(&[junk], 0, &FFCS_CERT_BLOB).unwrap_err();
+        assert!(err.contains("blocks\\junk.block"), "got: {err}");
     }
 }
 
