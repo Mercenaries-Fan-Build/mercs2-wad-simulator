@@ -72,6 +72,13 @@ pub struct LoadedScriptBlock {
     pub block: ScriptsBlock,
     /// `asset_hash -> (packed_block_ref, secondary_ref, type_id)`, as the base WAD had them.
     pub rows: std::collections::HashMap<u32, (u32, u32, u32)>,
+    /// The block's index in the WAD it was read from, and that WAD's position in the stack: the rows'
+    /// rungs are in that WAD's index space.
+    pub source_block_index: u32,
+    pub wad: usize,
+    /// The blocks the rows name as LOD rungs, carried with the block so its rows keep their chains
+    /// ([`GameStack::block_for_reemit`]).
+    pub rung_blocks: Vec<PatchBlock>,
 }
 
 /// Load each of `blocks` (`(PTHS needle, PTHS path)`, [`link::SCRIPT_BLOCKS`] or
@@ -88,10 +95,11 @@ pub fn load_script_blocks(
 ) -> Result<Vec<LoadedScriptBlock>, BuildError> {
     let mut out = Vec::new();
     for (needle, path) in blocks {
-        let Some((raw, rows)) = stack.block_and_rows_by_path(needle) else {
+        let Some(found) = stack.block_for_reemit(needle) else {
             continue;
         };
-        let block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
+        let found = found.map_err(|m| BuildError::Lower { index: 0, kind, message: format!("reading {path}: {m}") })?;
+        let block = ScriptsBlock::parse(&found.raw).map_err(|m| BuildError::Lower {
             index: 0,
             kind,
             message: format!("parsing {path}: {m}"),
@@ -99,7 +107,10 @@ pub fn load_script_blocks(
         out.push(LoadedScriptBlock {
             path: (*path).to_string(),
             block,
-            rows,
+            rows: found.rows,
+            source_block_index: found.source_block_index,
+            wad: found.wad,
+            rung_blocks: found.rung_blocks,
         });
     }
     if out.is_empty() {
@@ -139,14 +150,40 @@ pub fn load_script_blocks(
 /// A hash with no row in the base falls back to a sentinel script row. That should not happen for a
 /// block read out of the stack — retail gives every carried asset a row — and a row that exists
 /// beats the M0004 hang of no row at all.
+///
+/// ★ **The rows keep their LOD chains.** A row's `_P001`..`_P003` rungs name other blocks of the base
+/// WAD (vz resident's PMC-courtyard textures name `resident-pmcoutpost_fountain_P001`..`_P003`). The
+/// emitted block carries its `source_block_index` and the blocks its rows name come with it
+/// ([`LoadedScriptBlock::rung_blocks`]), so the writer re-points every rung; without them it sentinels
+/// them and those assets render at their coarsest tier.
 pub fn script_patch_blocks(
     loaded: &[LoadedScriptBlock],
     touched: &std::collections::BTreeSet<usize>,
     kind: &'static str,
 ) -> Result<Vec<PatchBlock>, BuildError> {
+    let fail = |message: String| BuildError::Lower { index: 0, kind, message };
     let mut out = Vec::new();
+    let mut carried: Vec<PatchBlock> = Vec::new();
+    // Every source index emitted here must be in ONE WAD's index space, or the writer's
+    // source -> patch map would join blocks of different WADs.
+    let mut space: Option<usize> = None;
     for &bi in touched {
         let lb = &loaded[bi];
+        match space {
+            None => space = Some(lb.wad),
+            Some(w) if w != lb.wad => {
+                return Err(fail(format!(
+                    "{} was read from the stack's WAD #{}, and another re-emitted block from WAD #{w}: their LOD rungs number different WADs' blocks",
+                    lb.path, lb.wad
+                )))
+            }
+            Some(_) => {}
+        }
+        for rb in &lb.rung_blocks {
+            if !carried.iter().any(|c| c.path_string.eq_ignore_ascii_case(&rb.path_string)) {
+                carried.push(rb.clone());
+            }
+        }
         let aset: Vec<AsetEntry> = lb
             .block
             .entries
@@ -158,15 +195,29 @@ pub fn script_patch_blocks(
                 None => AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_SCRIPT),
             })
             .collect();
-        out.push(
-            PatchBlock::from_decompressed(&lb.block.serialize(), lb.path.clone(), aset, None)
-                .map_err(|m| BuildError::Lower {
-                    index: 0,
-                    kind,
-                    message: m,
-                })?,
-        );
+        let mut block = PatchBlock::from_decompressed(&lb.block.serialize(), lb.path.clone(), aset, None)
+            .map_err(|m| BuildError::Lower {
+                index: 0,
+                kind,
+                message: m,
+            })?;
+        block.source_block_index = Some(lb.source_block_index);
+        // Every rung a row names must ship: the block itself or one carried with it. A rung that does
+        // not would be sentinelled by the writer and its asset would lose its finer tiers.
+        let ships: std::collections::BTreeSet<u32> =
+            lb.rung_blocks.iter().filter_map(|b| b.source_block_index).chain([lb.source_block_index]).collect();
+        for e in &block.aset_entries {
+            for r in [e.u32_2 & 0xFFFF, e.u32_1 >> 16, e.u32_1 & 0xFFFF] {
+                if r != 0xFFFF && !ships.contains(&r) {
+                    return Err(fail(format!("{}: asset 0x{:08X} names block {r} as a LOD rung, and it is not carried", lb.path, e.asset_hash)));
+                }
+            }
+        }
+        out.push(block);
     }
+    // A carried block that is itself re-emitted here ships once, as the re-emitted copy.
+    carried.retain(|c| !out.iter().any(|o| o.path_string.eq_ignore_ascii_case(&c.path_string)));
+    out.extend(carried);
     Ok(out)
 }
 
@@ -470,8 +521,8 @@ fn check_sound_loaders(
     Ok(())
 }
 
-/// The CSUM row of the `shell.wad` beside `game`'s base WAD, which a shell patch is stamped with.
-fn shell_csum(game: &GameStack, kind: &'static str) -> Result<(u32, Option<u32>), BuildError> {
+/// The CSUM row value of the `shell.wad` beside `game`'s base WAD, which a shell patch is stamped with.
+fn shell_csum(game: &GameStack, kind: &'static str) -> Result<u32, BuildError> {
     let fail = |message: String| BuildError::Lower { index: 0, kind, message };
     let base = game.paths().first().map(|p| p.to_path_buf()).ok_or_else(|| fail("the game stack is empty".into()))?;
     let shell = crate::sound::sibling_wad(&base, "shell.wad").map_err(fail)?;
@@ -828,6 +879,20 @@ pub fn verify_emitted(wad: &[u8], keys: &crate::shader::ShaderKeys) -> Result<Ve
             kind: "verify",
             message: format!("the WAD we just wrote does not read back: {m}"),
         })?;
+    // The CSUM meta sizes the engine's block-entry install ring, which never shrinks below the largest
+    // meta mounted; a block with more entries than that is retried forever and its level never starts.
+    let meta = u32::from_le_bytes([wad[0x2C], wad[0x2D], wad[0x2E], wad[0x2F]]);
+    for b in &contents.blocks {
+        let n = mercs2_formats::patch_wad::block_entry_count(b)
+            .map_err(|m| BuildError::Lower { index: 0, kind: "verify", message: format!("the WAD we just wrote: {m}") })?;
+        if n > meta {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "verify",
+                message: format!("the WAD we just wrote has CSUM meta {meta}, and {} holds {n} entries: the game would never install it", b.path_string),
+            });
+        }
+    }
     let mut found = crate::lint::artifact_checks(&contents.blocks);
     found.extend(crate::lint::shader_key_checks(&contents.blocks, &keys.pixel, &keys.vertex));
     if crate::lint::blocks_build(&found) {
@@ -4963,9 +5028,8 @@ pub fn build(
         blocks.extend(vz_blocks);
     }
 
-    // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
-    // previously passed 0/None here, which is a gratuitous divergence from output shapes that are
-    // known to load — it costs one header read to match them.
+    // Mirror the base WAD's CSUM value into the overlay, as the proven publish path does. The row's
+    // meta is the writer's to compute from the overlay's own blocks (`patch_wad::csum_meta_for`).
     let csum = match game
         .as_deref()
         .and_then(|g| g.paths().first().map(|p| p.to_path_buf()))
@@ -4975,7 +5039,7 @@ pub fn build(
             kind: "assemble",
             message: m,
         })?,
-        None => (0, None),
+        None => 0,
     };
 
     let out_dir = out_dir
@@ -4989,7 +5053,7 @@ pub fn build(
     let mut placements = Vec::new();
     let mut wad_path = None;
     if !blocks.is_empty() {
-        let wad = build_patch_wad_multi(&blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+        let wad = build_patch_wad_multi(&blocks, csum, &FFCS_CERT_BLOB).map_err(|m| {
             BuildError::Lower {
                 index: 0,
                 kind: "assemble",
@@ -5038,7 +5102,7 @@ pub fn build(
     // place a Shipment writes a WAD, earned only by the collision-checked name (`language_name_refusal`).
     for (language, display, lang_blocks, (from, to)) in lang_wads {
         let wad =
-            build_patch_wad_multi(&lang_blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+            build_patch_wad_multi(&lang_blocks, csum, &FFCS_CERT_BLOB).map_err(|m| {
                 BuildError::Lower {
                     index: 0,
                     kind: "add_language",
@@ -5101,7 +5165,7 @@ pub fn build(
     // (`level::stream_relative`), and the output mirrors the tree a deploy copies into.
     for (name, display, level) in level_wads {
         let fail = |message: String| BuildError::Lower { index: 0, kind: "add_level", message };
-        let wad = build_patch_wad_multi(&level.blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(fail)?;
+        let wad = build_patch_wad_multi(&level.blocks, csum, &FFCS_CERT_BLOB).map_err(fail)?;
         let found = verify_emitted(&wad, &shader_keys)?;
         for d in &found {
             log.push(format!("self-check ({name}-patch.wad): {d}"));
@@ -5365,13 +5429,13 @@ fn write_patch_wad(
     out_dir: &Path,
     relative: &str,
     blocks: &[PatchBlock],
-    csum: (u32, Option<u32>),
+    csum: u32,
     destination: Destination,
     keys: &crate::shader::ShaderKeys,
     log: &mut Vec<String>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<Placement, BuildError> {
-    let wad = build_patch_wad_multi(blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+    let wad = build_patch_wad_multi(blocks, csum, &FFCS_CERT_BLOB).map_err(|m| {
         BuildError::Lower {
             index: 0,
             kind: "assemble",
@@ -6493,7 +6557,7 @@ pub fn link_installed(
         });
     }
     let wad_bytes =
-        build_patch_wad_multi(&patches, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+        build_patch_wad_multi(&patches, csum, &FFCS_CERT_BLOB).map_err(|m| {
             BuildError::Lower {
                 index: 0,
                 kind: "link",
