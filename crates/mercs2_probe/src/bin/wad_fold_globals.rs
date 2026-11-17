@@ -99,7 +99,7 @@ fn main() {
     }
 
     // Single-source build (all from vz.wad) so the rung remap has one source index space.
-    let out = build_patch_wad_multi(&folded, vz.csum_value, None, &FFCS_CERT_BLOB)
+    let out = build_patch_wad_multi(&folded, vz.csum_value, &FFCS_CERT_BLOB)
         .expect("build dlc01-patch.wad");
     std::fs::write(out_path, &out).unwrap_or_else(|e| panic!("write {out_path}: {e}"));
     println!("\nwrote {out_path}: {} bytes, {} blocks, sha256 {}", out.len(), folded.len(), sha_full(&out));
