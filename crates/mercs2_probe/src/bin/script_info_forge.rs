@@ -61,7 +61,7 @@ fn run(args: &[String]) -> Result<(), (u8, String)> {
     if !bad.is_empty() {
         return Err((1, format!("each named script must be found exactly once: {}", bad.join(", "))));
     }
-    let wad = build_patch_wad_multi(&blocks, contents.csum_value, None, &FFCS_CERT_BLOB).map_err(|m| (2, m))?;
+    let wad = build_patch_wad_multi(&blocks, contents.csum_value, &FFCS_CERT_BLOB).map_err(|m| (2, m))?;
     std::fs::write(&args[1], &wad).map_err(|e| (2, format!("{}: {e}", args[1])))?;
     println!("wrote {} ({} bytes)", args[1], wad.len());
     Ok(())
