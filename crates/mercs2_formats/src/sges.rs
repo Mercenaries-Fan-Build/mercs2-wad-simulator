@@ -315,23 +315,30 @@ pub fn decompress_block_head(
         head.truncate(max_out);
         return Ok(head);
     }
+    decompress_sges_head(&head, max_out).map_err(|m| format!("block {idx}: {m}"))
+}
+
+/// Decompress only the HEAD (first ≤ `max_out` bytes) of an in-memory `sges`/`segs` segment stream:
+/// its header, segment table and first segment. Enough to read a block's entry table (its entry
+/// count is the first `u32`) without inflating the whole block.
+pub fn decompress_sges_head(head: &[u8], max_out: usize) -> Result<Vec<u8>, String> {
     if head.len() < 24 {
-        return Err(format!("block {idx}: {} bytes, too small for a segment stream", head.len()));
+        return Err(format!("{} bytes, too small for a segment stream", head.len()));
     }
-    let e = stream_endian(&head).map_err(|m| format!("block {idx}: {m}"))?;
-    let segment_count = read_u16(e, &head, 6) as usize;
+    let e = stream_endian(head)?;
+    let segment_count = read_u16(e, head, 6) as usize;
     if segment_count == 0 {
         return Err("segment stream head: no segments".into());
     }
     // First segment table row @0x10 (same decode as `decompress_sges`).
-    let compressed_size0 = read_u16(e, &head, 16) as usize;
-    let raw_uncomp = read_u16(e, &head, 18) as usize;
+    let compressed_size0 = read_u16(e, head, 16) as usize;
+    let raw_uncomp = read_u16(e, head, 18) as usize;
     let uncompressed_size = if raw_uncomp == 0 {
         DEFAULT_SEGMENT_SIZE
     } else {
         raw_uncomp
     };
-    let offset_with_flag = e.u32(&head, 20);
+    let offset_with_flag = e.u32(head, 20);
     let is_compressed = (offset_with_flag & 1) != 0;
     let data_offset = (offset_with_flag & 0xFFFFFFFE) as usize;
     if data_offset >= head.len() {
