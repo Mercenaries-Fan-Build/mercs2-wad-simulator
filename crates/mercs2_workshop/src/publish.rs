@@ -196,10 +196,10 @@ fn publish(
         blocks.push(pb);
     }
 
-    // ── Assemble the patch WAD (CSUM value/meta mirrored from the base, like mercs2_smuggler). ──
-    let (csum_value, csum_meta) = base_csum(&wad_paths[0])?;
+    // ── Assemble the patch WAD (CSUM value mirrored from the base, like mercs2_smuggler). ──
+    let csum_value = base_csum(&wad_paths[0])?;
 
-    let wad_bytes = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
+    let wad_bytes = build_patch_wad_multi(&blocks, csum_value, &FFCS_CERT_BLOB)?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
@@ -431,8 +431,8 @@ pub fn publish_conformant(
     blocks.extend(tex_blocks);
 
     // assemble + self-test (reuse the multi-block packer)
-    let (csum_value, csum_meta) = base_csum(&wad_paths[0])?;
-    let wad_bytes = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
+    let csum_value = base_csum(&wad_paths[0])?;
+    let wad_bytes = build_patch_wad_multi(&blocks, csum_value, &FFCS_CERT_BLOB)?;
     std::fs::write(output, &wad_bytes).map_err(|e| format!("write {}: {e}", output.display()))?;
     let sha = sha256_hex(&wad_bytes);
     let mut results = Vec::new();
@@ -579,10 +579,10 @@ pub fn publish_skel(
         PatchBlock::new(compressed, format!("blocks\\VZ\\mod_{hash:08x}.block"), aset);
     pb.packed_field = ((new_block.len() + 0x7FFF) / 0x8000) as u32;
 
-    let (csum_value, csum_meta) = base_csum(&wad_paths[0])?;
+    let csum_value = base_csum(&wad_paths[0])?;
     let mut all_blocks = vec![pb];
     all_blocks.extend(tex_blocks);
-    let wad_bytes = build_patch_wad_multi(&all_blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
+    let wad_bytes = build_patch_wad_multi(&all_blocks, csum_value, &FFCS_CERT_BLOB)?;
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
