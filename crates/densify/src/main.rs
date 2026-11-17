@@ -715,7 +715,7 @@ fn build_overlay(
         carried,
         blk.declared_pages()
     );
-    let bytes = build_patch_wad_multi(&[blk], 0, None, &FFCS_CERT_BLOB)?;
+    let bytes = build_patch_wad_multi(&[blk], 0, &FFCS_CERT_BLOB)?;
     std::fs::write(out, &bytes).map_err(|e| format!("write {}: {e}", out.display()))?;
     Ok(())
 }
