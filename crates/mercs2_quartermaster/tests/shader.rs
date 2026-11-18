@@ -1,6 +1,10 @@
 //! The shader kinds, hermetically: synthetic stores stand in for the game's, so every rule gets a
 //! case that fires and a case that stays quiet with no game present.
 
+mod common {
+    pub mod game;
+}
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -799,7 +803,7 @@ fn the_plan_lists_each_items_data_files_and_links_both_stores() {
     )
     .unwrap();
     let b = discover::open(&plain_dir).unwrap();
-    let p = plan(&[PlanInput { id: "a", shipment: &a }, PlanInput { id: "b", shipment: &b }], Producer::Preflight, None)
+    let p = plan(&[PlanInput { id: "a", shipment: &a }, PlanInput { id: "b", shipment: &b }], Producer::Preflight, common::game::empty_game())
         .expect("plan");
     assert_eq!(p.format, mercs2_quartermaster::plan::PLAN_FORMAT);
     assert_eq!(p.libraries, None, "preflight links nothing, so it records no libraries");
@@ -808,6 +812,6 @@ fn the_plan_lists_each_items_data_files_and_links_both_stores() {
     assert_eq!(p.link_file_paths, vec![DataFile::Shader3, DataFile::Shader3Low]);
     let json = serde_json::to_value(&p).unwrap();
     assert_eq!(json["link_file_paths"], serde_json::json!(["data/shader3.bin", "data/shader3Low.bin"]));
-    let none = plan(&[PlanInput { id: "b", shipment: &b }], Producer::Preflight, None).unwrap();
+    let none = plan(&[PlanInput { id: "b", shipment: &b }], Producer::Preflight, common::game::empty_game()).unwrap();
     assert!(none.link_file_paths.is_empty());
 }
