@@ -154,6 +154,16 @@ fn retail_game() -> mercs2_quartermaster::GameStack {
         .unwrap_or_else(|e| panic!("could not open the game stack {}: {e}", vz.display()))
 }
 
+/// The PTHS paths of the blocks a re-emitted `vz.wad` resident block carries as LOD rungs, as
+/// `load_script_blocks` reads them from `game` ([`build::LoadedScriptBlock::rung_blocks`]).
+fn resident_rungs(game: &mut mercs2_quartermaster::GameStack) -> Vec<String> {
+    let loaded = build::load_script_blocks(game, link::SCRIPT_BLOCKS, "test").expect("the scripts blocks load");
+    let (_, resident_path) = link::SCRIPT_BLOCKS[1];
+    let resident = loaded.iter().find(|lb| lb.path == resident_path).expect("the stack has vz's resident block");
+    assert!(!resident.rung_blocks.is_empty(), "vz's resident block carries rungs");
+    resident.rung_blocks.iter().map(|b| b.path_string.clone()).collect()
+}
+
 // ---------------------------------------------------------------------------
 // Against the real game
 // ---------------------------------------------------------------------------
@@ -726,13 +736,18 @@ fn add_outfit_builds_model_and_wardrobe_row_together() {
 
     // The overlay carries the model block and the two relinked scripts blocks: scripts_vz (the
     // wardrobe and the master) and the resident block (the player script).
+    // The resident block ships with the blocks it carries as LOD rungs.
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let rungs = resident_rungs(&mut game);
     assert_eq!(
         contents.blocks.len(),
-        3,
-        "expected a model block, a scripts_vz block and the resident block"
+        3 + rungs.len(),
+        "expected a model block, a scripts_vz block, the resident block and its rungs"
     );
+    for r in &rungs {
+        assert!(contents.blocks.iter().any(|b| &b.path_string == r), "{r} ships");
+    }
     let chunk = |block: &str, script: &str| -> Vec<u8> {
         let blk = contents
             .blocks
@@ -955,24 +970,19 @@ fn a_resident_patch_lua_builds_into_a_valid_overlay() {
     let bytes = std::fs::read(report.wad.as_ref().expect("a wad")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
 
-    // Only the resident block is republished — patching a resident script must not drag
-    // `scripts_vz` along.
-    assert_eq!(
-        contents.blocks.len(),
-        1,
-        "expected only the touched block, got {:?}",
-        contents
-            .blocks
-            .iter()
-            .map(|b| b.path_string.clone())
-            .collect::<Vec<_>>()
-    );
-    let blk = &contents.blocks[0];
-    assert!(
-        blk.path_string.to_lowercase().contains(r"\resident_p000_q3.block"),
-        "wrong block: {}",
-        blk.path_string
-    );
+    // Only the resident block is republished, with the blocks it carries as LOD rungs — patching a
+    // resident script must not drag `scripts_vz` along.
+    let mut want = resident_rungs(&mut game);
+    want.push(link::SCRIPT_BLOCKS[1].1.to_string());
+    want.sort();
+    let mut got: Vec<String> = contents.blocks.iter().map(|b| b.path_string.clone()).collect();
+    got.sort();
+    assert_eq!(got, want, "expected only the touched block and its rungs");
+    let blk = contents
+        .blocks
+        .iter()
+        .find(|b| b.path_string.to_lowercase().contains(r"\resident_p000_q3.block"))
+        .expect("the resident block");
 
     // ★ A row for EVERY entry. Claiming only the scripts is the M0004 HANG: an asset carried in a
     // block with no row naming it cannot be resolved by hash, and the world load silently never
@@ -4283,4 +4293,67 @@ fn reemitted_resident_keeps_every_rows_lod_chain() {
     assert_eq!(checked, loaded[resident].block.entries.len(), "a row for every entry is emitted");
     let deep = loaded[resident].rows.values().filter(|&&(p, s, _)| chain_len(p, s) > 1).count();
     assert!(deep >= 10, "vz's resident has multi-rung rows to keep ({deep})");
+}
+
+/// ★ The load plan promises exactly the blocks the link carries as LOD rungs: `linked_rung_paths`,
+/// which `link_block_paths` lists, names the blocks `load_script_blocks` carries with `vz.wad`'s
+/// scripts blocks and `shell.wad`'s.
+#[test]
+fn the_plan_promises_the_rungs_the_link_carries() {
+    let mut game = retail_game();
+    let mut promised = build::linked_rung_paths(&game).expect("the rungs");
+    let mut shell = game.open_sibling("shell.wad").expect("shell.wad");
+    let vz = build::load_script_blocks(&mut game, link::SCRIPT_BLOCKS, "test").expect("vz's scripts blocks");
+    let front = build::load_script_blocks(&mut shell, link::SHELL_SCRIPT_BLOCKS, "test").expect("shell's scripts block");
+    let mut carried: Vec<String> = Vec::new();
+    for b in vz.iter().chain(&front).flat_map(|lb| &lb.rung_blocks) {
+        if !carried.contains(&b.path_string) {
+            carried.push(b.path_string.clone());
+        }
+    }
+    assert!(!carried.is_empty(), "the scripts blocks carry rungs");
+    promised.sort();
+    carried.sort();
+    assert_eq!(promised, carried);
+}
+
+/// ★ A Shipment's overlay and the link WAD never ship the same block once a deploy drops the plan's
+/// `link_block_paths` from the overlay (the Modkit's collapse): `add_outfit` re-emits vz's resident
+/// block with its LOD rungs in its own build, and the link re-emits them too. A block in both would
+/// be one group partly overriding another, which the deploy refuses.
+#[test]
+fn an_overlay_and_the_link_share_no_block_after_the_deploy_drops_the_promised_ones() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let dir = scratch("overlay_link_disjoint");
+    std::fs::create_dir_all(dir.join("s/src")).unwrap();
+    std::fs::write(dir.join("s/src/sean.glb"), cube_glb()).unwrap();
+    let s = shipment(
+        &dir.join("s"),
+        "  - kind: add_outfit\n    name: qm_sean_devlin\n    slug: SeanDevlin\n\
+         \x20   display: Sean Devlin\n    wearer: mattias\n    model: src/sean.glb\n\
+         \x20   donor: pmc_hum_mattias\n",
+    );
+    let built = build::build(&s, Some(&mut game), None, Some(&dir.join("build")), Some(&corpus), None).expect("builds");
+    let ids = arg_ids(1);
+    let linked = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &dir.join("link"), None).expect("links");
+
+    let paths = |wad: &Path| -> Vec<String> {
+        let bytes = std::fs::read(wad).unwrap();
+        mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read").blocks.into_iter().map(|b| b.path_string).collect()
+    };
+    let promised = &linked.plan.link_block_paths;
+    let kept: Vec<String> = paths(built.wad.as_ref().expect("an overlay"))
+        .into_iter()
+        .filter(|p| !promised.iter().any(|q| q.eq_ignore_ascii_case(p)))
+        .collect();
+    let link_wad = paths(linked.wad.as_ref().expect("a link WAD"));
+    let rungs = resident_rungs(&mut game);
+    for r in &rungs {
+        assert!(link_wad.contains(r), "the link carries {r}");
+    }
+    assert!(!kept.is_empty(), "the overlay keeps its model block");
+    for p in &kept {
+        assert!(!link_wad.iter().any(|l| l.eq_ignore_ascii_case(p)), "{p} ships in the overlay after the deploy drops the promised blocks, and in the link WAD");
+    }
 }
