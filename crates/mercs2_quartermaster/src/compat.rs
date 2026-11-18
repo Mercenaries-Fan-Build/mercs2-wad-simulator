@@ -156,15 +156,7 @@ pub fn game_root_of(vz_wad: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{} has no parent directory", data.display()))
 }
 
-/// Whether any Shipment declares `supersedes`, and so needs the game folder probed, or replaces a
-/// line (`replace_sound_wave`), whose merged banks the plan reads from the game's WADs.
-pub fn needs_game_root<'a>(manifests: impl IntoIterator<Item = &'a Manifest>) -> bool {
-    manifests.into_iter().any(|m| {
-        !m.supersedes.is_empty() || m.contributions.iter().any(|c| matches!(c, crate::manifest::Contribution::ReplaceSoundWave { .. }))
-    })
-}
-
-/// The game stack the plan reads a line's banks from: `vz.wad` in `game_root`'s `data` folder (both
+/// The game stack the plan reads the link's blocks from: `vz.wad` in `game_root`'s `data` folder (both
 /// matched case-insensitively), then each declared language's WAD ([`game_stack_paths`]).
 fn plan_stack(game_root: &Path, manifests: &[&Manifest]) -> Result<crate::game::GameStack, String> {
     let entries = std::fs::read_dir(game_root).map_err(|e| format!("reading {}: {e}", game_root.display()))?;
@@ -252,12 +244,12 @@ enum Wanted<'m> {
 
 /// Compute the load plan for a request.
 ///
-/// `game_root` is required when any item declares `supersedes` ([`needs_game_root`]); the probe
-/// is never skipped.
+/// `game_root` is the game folder: the `supersedes` probe looks in it, and the link's blocks are
+/// read from its WADs ([`build::link_block_paths`]).
 pub fn plan(
     inputs: &[PlanInput<'_>],
     producer: Producer,
-    game_root: Option<&Path>,
+    game_root: &Path,
 ) -> Result<LoadPlan, CompatError> {
     let mut findings: Vec<Finding> = Vec::new();
     let manifest = |i: usize| &inputs[i].shipment.manifest;
@@ -726,10 +718,9 @@ pub fn plan(
         if m.supersedes.is_empty() {
             continue;
         }
-        let root = game_root.ok_or_else(|| CompatError::GameRootRequired { id: id(declarer) })?;
         for (index, entry) in m.supersedes.iter().enumerate() {
             let present =
-                superseded_present(root, entry).map_err(|message| CompatError::Probe {
+                superseded_present(game_root, entry).map_err(|message| CompatError::Probe {
                     id: id(declarer),
                     message,
                 })?;
@@ -766,25 +757,11 @@ pub fn plan(
         .iter()
         .any(|f| f.severity == FindingSeverity::Error);
 
-    // The banks a replaced line reaches are the game's answer; any other set's blocks follow from
-    // the manifests alone.
+    // The link's blocks are the game's answer: the rungs its scripts blocks carry, and the banks a
+    // replaced line reaches.
     let manifests: Vec<&Manifest> = inputs.iter().map(|i| &i.shipment.manifest).collect();
-    let line_item = inputs.iter().find(|i| {
-        i.shipment.manifest.contributions.iter().any(|c| matches!(c, crate::manifest::Contribution::ReplaceSoundWave { .. }))
-    });
-    let mut stack = match line_item {
-        Some(item) => {
-            let root = game_root.ok_or_else(|| CompatError::Item {
-                id: item.id.to_string(),
-                message: "this Shipment replaces a line (replace_sound_wave), and the banks that play it \
-                          are read from the game's WADs; no game folder was resolved — pass --game"
-                    .into(),
-            })?;
-            Some(plan_stack(root, &manifests).map_err(|message| CompatError::GameRoot { message })?)
-        }
-        None => None,
-    };
-    let link_block_paths = build::link_block_paths(manifests.iter().copied(), stack.as_mut())
+    let mut stack = plan_stack(game_root, &manifests).map_err(|message| CompatError::GameRoot { message })?;
+    let link_block_paths = build::link_block_paths(manifests.iter().copied(), &mut stack)
         .map_err(|message| CompatError::GameRoot { message })?;
 
     Ok(LoadPlan {
