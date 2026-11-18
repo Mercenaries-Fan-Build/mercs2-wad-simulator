@@ -169,8 +169,8 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         out: PathBuf,
         /// Where the game is installed: vz.wad, the install root or its data folder. Defaults to
-        /// host discovery. Needed only when a Shipment declares `supersedes`; resolved whenever
-        /// given.
+        /// host discovery. Every plan reads the link's blocks from the game's WADs, and a
+        /// `supersedes` is probed in its folder.
         #[arg(long, value_name = "PATH")]
         game: Option<PathBuf>,
     },
@@ -970,19 +970,13 @@ fn cmd_preflight(
         Ok(o) => o,
         Err(code) => return code,
     };
-    // The game folder is derived only when something needs probing — but a --game that was given
-    // is always resolved, so a wrong one never passes silently.
-    let root = if game_path.is_some() || compat::needs_game_root(opened.iter().map(|s| &s.manifest)) {
-        let derived = compat::resolve_vz_wad(game_path).and_then(|vz| compat::game_root_of(&vz));
-        match derived {
-            Ok(r) => Some(r),
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(EXIT_UNUSABLE);
-            }
+    // The plan reads the link's blocks from the game's WADs, so every preflight resolves the game.
+    let root = match compat::resolve_vz_wad(game_path).and_then(|vz| compat::game_root_of(&vz)) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
         }
-    } else {
-        None
     };
     let inputs: Vec<PlanInput<'_>> = items
         .iter()
@@ -992,7 +986,7 @@ fn cmd_preflight(
             shipment,
         })
         .collect();
-    let plan_ = match compat::plan(&inputs, Producer::Preflight, root.as_deref()) {
+    let plan_ = match compat::plan(&inputs, Producer::Preflight, &root) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
