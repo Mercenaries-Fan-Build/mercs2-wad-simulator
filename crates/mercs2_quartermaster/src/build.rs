@@ -5520,28 +5520,55 @@ pub fn merged_string_tables<'a>(
 
 /// Every block `qm link` re-emits for a set, as the load plan's `link_block_paths` states it: the
 /// `vz.wad` scripts blocks ([`link::SCRIPT_BLOCKS`]), the `shell.wad` scripts block
-/// ([`link::SHELL_SCRIPT_BLOCKS`]), then each merged string table's block in hash order, then each
+/// ([`link::SHELL_SCRIPT_BLOCKS`]), then the blocks those carry as LOD rungs ([`linked_rung_paths`]),
+/// then each merged string table's block in hash order, then each
 /// merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`]; one path
 /// for the bank in every WAD that carries it; for a bank the engine loads, the block carries its
 /// sounddb and wavebank too), then — when any Shipment has an `add_fx` or a `replace_fx` — the
 /// effects block ([`crate::fx::EFFECTS_BLOCK`]).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
-/// the set-wide version of each. The banks a `replace_sound_wave` reaches are read from `game`.
+/// the set-wide version of each. The rungs, and the banks a `replace_sound_wave` reaches, are read
+/// from `game`.
 pub fn link_block_paths<'a>(
     manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
-    game: Option<&mut GameStack>,
+    game: &mut GameStack,
 ) -> Result<Vec<String>, String> {
     let manifests: Vec<&crate::manifest::Manifest> = manifests.into_iter().collect();
     let fx = manifests.iter().any(|m| crate::fx::has_fx(m));
-    let sound = crate::sound::linked_sound_entries(manifests.iter().copied(), game)?;
+    let rungs = linked_rung_paths(game)?;
+    let sound = crate::sound::linked_sound_entries(manifests.iter().copied(), Some(game))?;
     Ok(link::SCRIPT_BLOCKS
         .iter()
         .chain(link::SHELL_SCRIPT_BLOCKS)
         .map(|(_, p)| p.to_string())
+        .chain(rungs)
         .chain(merged_string_tables(manifests.iter().copied()).into_iter().map(stringdb_block_path))
         .chain(sound.into_iter().map(crate::sound::block_path))
         .chain(fx.then(|| crate::fx::EFFECTS_BLOCK.1.to_string()))
         .collect())
+}
+
+/// The blocks `qm link` carries with the scripts blocks it re-emits, so their rows keep their LOD
+/// chains ([`script_patch_blocks`], [`GameStack::rung_paths`]): the rungs of `game`'s
+/// [`link::SCRIPT_BLOCKS`], then those of the [`link::SHELL_SCRIPT_BLOCKS`] of the `shell.wad`
+/// beside it, by PTHS path, each once. A scripts block the stack does not have carries nothing, as
+/// [`load_script_blocks`] skips it.
+pub fn linked_rung_paths(game: &GameStack) -> Result<Vec<String>, String> {
+    let shell = game.open_sibling("shell.wad")?;
+    let mut out: Vec<String> = Vec::new();
+    for (stack, blocks) in [(game, link::SCRIPT_BLOCKS), (&shell, link::SHELL_SCRIPT_BLOCKS)] {
+        for (needle, _) in blocks {
+            let Some(paths) = stack.rung_paths(needle) else {
+                continue;
+            };
+            for p in paths? {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(&p)) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// How [`merge_string_tables`] treats key writes: the one difference between a Shipment's own
@@ -5978,16 +6005,9 @@ pub fn link_installed(
     let mut log = Vec::new();
     let mut mutations = Vec::new();
 
-    let root = if crate::compat::needs_game_root(inputs.iter().map(|i| &i.shipment.manifest)) {
-        let vz = game.paths()[0].to_path_buf();
-        Some(
-            crate::compat::game_root_of(&vz)
-                .map_err(|message| BuildError::Compat(crate::compat::CompatError::GameRoot { message }))?,
-        )
-    } else {
-        None
-    };
-    let mut plan = crate::compat::plan(inputs, crate::plan::Producer::Link, root.as_deref())
+    let root = crate::compat::game_root_of(game.paths()[0])
+        .map_err(|message| BuildError::Compat(crate::compat::CompatError::GameRoot { message }))?;
+    let mut plan = crate::compat::plan(inputs, crate::plan::Producer::Link, &root)
         .map_err(BuildError::Compat)?;
     let write_plan = |plan: &crate::plan::LoadPlan| {
         crate::plan::write_plan(out_dir, plan).map_err(|message| BuildError::Io {
@@ -6324,11 +6344,13 @@ pub fn link_installed(
     let table_blocks = merge_string_tables(&shipments, game, StringMerge::Upsert, &mut log)?;
     let sound_paths: std::collections::BTreeSet<String> =
         sound_entries.iter().map(|&e| crate::sound::block_path(e)).collect();
+    let rung_paths = linked_rung_paths(game).map_err(|message| BuildError::Lower { index: 0, kind: "link", message })?;
     let promised: Vec<String> = plan
         .link_block_paths
         .iter()
         .filter(|p| {
             !link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).any(|(_, s)| s == p)
+                && !rung_paths.contains(p)
                 && !sound_paths.contains(*p)
                 && *p != crate::fx::EFFECTS_BLOCK.1
         })
@@ -6475,6 +6497,18 @@ pub fn link_installed(
         plan.ok = false;
         write_plan(&plan)?;
         return Err(BuildError::Plan(Box::new(plan)));
+    }
+
+    // A deploy drops a Shipment's copy of a block only when the plan promised it; a block the link
+    // ships unpromised would sit beside that copy, and the two would conflict.
+    for b in patches.iter().chain(&shell_blocks) {
+        if !plan.link_block_paths.iter().any(|p| p.eq_ignore_ascii_case(&b.path_string)) {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: format!("internal error: the link ships {}, and the plan did not promise it", b.path_string),
+            });
+        }
     }
 
     let csum =
