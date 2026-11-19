@@ -33,6 +33,23 @@ pub struct RingReport {
     pub overflows: Vec<Overflow>,
 }
 
+impl RingReport {
+    /// `"<n> block(s) never installed (<block>: <entries> entries, …, ring <ring>)"`; `None` when every
+    /// block fits the ring.
+    pub fn failure(&self) -> Option<String> {
+        if self.overflows.is_empty() {
+            return None;
+        }
+        let blocks: Vec<String> = self.overflows.iter().map(|o| format!("{}: {} entries", o.block, o.entries)).collect();
+        Some(format!(
+            "{} never installed ({}, ring {})",
+            crate::verdict::count(self.overflows.len(), "block", "blocks"),
+            blocks.join(", "),
+            self.ring
+        ))
+    }
+}
+
 /// Every block of `wads` against the largest CSUM `meta` among them. An error when a WAD cannot be read,
 /// has no CSUM row, or a block's entry count cannot be read.
 pub fn check_install_ring(wads: &[&Path]) -> Result<RingReport, String> {
