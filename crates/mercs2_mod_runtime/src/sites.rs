@@ -20,6 +20,7 @@ const HEADER_BYTES: usize = 0x1000;
 
 static SITES: OnceLock<LuaSites> = OnceLock::new();
 static DEBUG: OnceLock<Result<mercs2_formats::lua_sites::DebugSites, String>> = OnceLock::new();
+static REFS: OnceLock<Result<mercs2_formats::lua_sites::RefSites, String>> = OnceLock::new();
 static SHADERS: OnceLock<ShaderSites> = OnceLock::new();
 static TREES: OnceLock<TreeSites> = OnceLock::new();
 static MODES: OnceLock<DisplayModeSites> = OnceLock::new();
@@ -71,6 +72,32 @@ pub(crate) fn debug() -> Result<mercs2_formats::lua_sites::DebugSites, String> {
             Ok(d)
         })
         .clone()
+}
+
+/// Resolve the function-reference sites, once, after the Lua sites resolved (so `.text` is decrypted):
+/// `m2_lua_install` calls it on the mod's thread, so the scan never runs on the game thread. A failure is
+/// kept, and every ref call returns it.
+pub(crate) fn resolve_refs() -> Result<mercs2_formats::lua_sites::RefSites, String> {
+    if SITES.get().is_none() {
+        return Err("the game's Lua sites are not resolved yet".into());
+    }
+    REFS.get_or_init(|| {
+        let r = mapped().and_then(|img| mercs2_formats::lua_sites::resolve_refs(&img))?;
+        rt_log::line(&format!(
+            "ref sites: luaL_ref {:#x}, luaL_unref {:#x}, lua_rawgeti {:#x}, lua_pcall {:#x}",
+            r.lual_ref, r.lual_unref, r.lua_rawgeti, r.lua_pcall
+        ));
+        Ok(r)
+    })
+    .clone()
+}
+
+/// The function-reference sites [`resolve_refs`] resolved; never scans.
+pub(crate) fn refs() -> Result<mercs2_formats::lua_sites::RefSites, String> {
+    match REFS.get() {
+        Some(r) => r.clone(),
+        None => Err("the function-reference sites are resolved by m2_lua_install, which has not completed".into()),
+    }
 }
 
 /// The sites, resolving them now when that has not been done; `Err` names what did not resolve.

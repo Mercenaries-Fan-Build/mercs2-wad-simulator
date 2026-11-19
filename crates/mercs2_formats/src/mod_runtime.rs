@@ -40,6 +40,10 @@ pub struct ShaderClass {
     pub sho: *const c_char,
 }
 
+/// `m2_lua_pcall`'s result when it refused to call (nothing was called and the stack is unchanged); a
+/// call that ran returns the Lua status, 0 for success.
+pub const PCALL_REFUSED: c_int = -1;
+
 /// `m2_lua_exec`'s result codes.
 pub const EXEC_OK: c_int = 0;
 pub const EXEC_COMPILE: c_int = 1;
@@ -94,6 +98,11 @@ pub mod ffi {
         pub fn m2_lua_push_bool(l: *mut c_void, b: c_int);
         pub fn m2_lua_push_number(l: *mut c_void, n: f64);
         pub fn m2_lua_push_string(l: *mut c_void, s: *const c_char, len: c_int);
+        pub fn m2_lua_ref(l: *mut c_void, idx: c_int) -> c_int;
+        pub fn m2_lua_unref(l: *mut c_void, r: c_int) -> c_int;
+        pub fn m2_lua_push_ref(l: *mut c_void, r: c_int) -> c_int;
+        pub fn m2_lua_pcall(l: *mut c_void, nargs: c_int, nresults: c_int) -> c_int;
+        pub fn m2_lua_pop(l: *mut c_void, n: c_int) -> c_int;
         pub fn m2_lua_debug_set_sink(cb: Option<LuaDebugSink>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_debug_on_paused(cb: Option<LuaDebugPausedCb>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_debug_paused() -> c_int;
@@ -121,6 +130,120 @@ impl LastError {
     /// This thread's last message, or NULL when it has recorded none.
     pub fn get(&self) -> *const c_char {
         self.0.with(|s| s.borrow().as_ref().map_or(core::ptr::null(), |c| c.as_ptr()))
+    }
+}
+
+/// The refs `m2_lua_ref` hands out, and the thread each global state's scripts run on.
+///
+/// A ref is a handle of the runtime's own, never the registry number `luaL_ref` returned: a load cycle
+/// builds a fresh global state whose registry numbers its refs from 1 again (possibly at the same address),
+/// so a registry number from an earlier cycle names whatever the new registry put there. A handle names one
+/// `luaL_ref` on one global state in one of its lives ([`state_created`](Self::state_created) starts a new
+/// life), and is never reused in the process; one the table did not issue, one released, one from another
+/// global state and one from an earlier life are refused.
+#[derive(Debug, Default)]
+pub struct RefTable {
+    /// The last handle issued.
+    last: i32,
+    states: Vec<RefState>,
+    issued: std::collections::BTreeMap<i32, Issued>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RefState {
+    global: u32,
+    life: u32,
+    thread: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Issued {
+    global: u32,
+    life: u32,
+    lua_ref: i32,
+}
+
+impl RefTable {
+    pub const fn new() -> RefTable {
+        RefTable { last: 0, states: Vec::new(), issued: std::collections::BTreeMap::new() }
+    }
+
+    fn state(&self, global: u32) -> Option<&RefState> {
+        self.states.iter().find(|s| s.global == global)
+    }
+
+    /// The game built a state on `global`, on `thread`: a new life, whose registry holds none of the earlier
+    /// lives' refs. Returns how many refs of earlier lives were still held.
+    pub fn state_created(&mut self, global: u32, thread: u32) -> usize {
+        match self.states.iter_mut().find(|s| s.global == global) {
+            Some(s) => {
+                s.life += 1;
+                s.thread = thread;
+            }
+            None => self.states.push(RefState { global, life: 0, thread }),
+        }
+        self.issued.values().filter(|i| i.global == global).count()
+    }
+
+    /// A script ran on `global`, on `thread`: recorded when the table has not seen that global state.
+    pub fn state_seen(&mut self, global: u32, thread: u32) {
+        if self.state(global).is_none() {
+            self.states.push(RefState { global, life: 0, thread });
+        }
+    }
+
+    /// `thread` is the thread scripts on `global` run on.
+    pub fn check_thread(&self, global: u32, thread: u32) -> Result<(), String> {
+        match self.state(global) {
+            None => Err(format!(
+                "no script has been seen running on global state {global:#x}: refs are taken and used with the L of a \
+                 binding, or of a state or tick callback"
+            )),
+            Some(s) if s.thread != thread => {
+                Err(format!("global state {global:#x} runs its scripts on thread {}, not on the calling thread {thread}", s.thread))
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// A handle for `lua_ref`, taken on `global` now.
+    pub fn issue(&mut self, global: u32, lua_ref: i32) -> Result<i32, String> {
+        let life = self.state(global).ok_or_else(|| format!("global state {global:#x} is unknown"))?.life;
+        let handle = self.last.checked_add(1).ok_or("every ref handle (up to 2147483647) has been issued")?;
+        self.last = handle;
+        self.issued.insert(handle, Issued { global, life, lua_ref });
+        Ok(handle)
+    }
+
+    /// The registry number of `handle`, when it is live on `global`.
+    pub fn lua_ref(&self, global: u32, handle: i32) -> Result<i32, String> {
+        let Some(i) = self.issued.get(&handle) else {
+            return Err(format!("ref {handle} is not live: m2_lua_ref did not return it, or it was released"));
+        };
+        if i.global != global {
+            return Err(format!("ref {handle} was taken on global state {:#x}, not on {global:#x}", i.global));
+        }
+        let life = self.state(global).map_or(i.life, |s| s.life);
+        if i.life != life {
+            return Err(format!("ref {handle} was taken before global state {global:#x} was rebuilt (an earlier load cycle)"));
+        }
+        Ok(i.lua_ref)
+    }
+
+    /// Forget `handle` once its registry slot is released.
+    pub fn release(&mut self, handle: i32) {
+        self.issued.remove(&handle);
+    }
+
+    /// Forget `handle` when it was taken in an earlier life of its global state, whose registry is gone, so
+    /// there is nothing to release. True when it was forgotten.
+    pub fn forget_earlier_life(&mut self, handle: i32) -> bool {
+        let Some(i) = self.issued.get(&handle) else { return false };
+        let earlier = self.state(i.global).is_some_and(|s| s.life != i.life);
+        if earlier {
+            self.issued.remove(&handle);
+        }
+        earlier
     }
 }
 
@@ -541,6 +664,77 @@ mod tests {
         .unwrap();
         assert_eq!(LAST.get(), mine, "the string this thread is reading was not replaced");
         assert_eq!(unsafe { CStr::from_ptr(mine) }, c"first call");
+    }
+
+    const G: u32 = 0x0123_4560;
+    const GAME: u32 = 7;
+
+    #[test]
+    fn a_ref_is_used_and_released_once() {
+        let mut t = RefTable::new();
+        t.state_created(G, GAME);
+        let a = t.issue(G, 1).unwrap();
+        let b = t.issue(G, 2).unwrap();
+        assert!(a > 0 && b > a);
+        assert_eq!(t.lua_ref(G, a), Ok(1));
+        assert_eq!(t.lua_ref(G, b), Ok(2));
+        t.release(a);
+        assert!(t.lua_ref(G, a).unwrap_err().contains("not live"), "a released ref is refused, so a second unref never reaches the registry");
+        assert_eq!(t.lua_ref(G, b), Ok(2));
+        assert!(t.lua_ref(G, 0).unwrap_err().contains("not live"));
+        assert!(t.lua_ref(G, -1).unwrap_err().contains("not live"));
+        assert!(t.lua_ref(G, 99).unwrap_err().contains("not live"), "the game's own registry numbers are not handles");
+    }
+
+    /// The review's `cycle` reproduction: a mod keeps ref 1 from the first state, the game rebuilds the
+    /// state (here at the same address) and takes registry ref 1 itself; the mod's stale ref then pushed or
+    /// released the game's value. Its handle is refused, though the registry number collides.
+    #[test]
+    fn a_ref_from_an_earlier_life_of_its_global_state_is_refused() {
+        let mut t = RefTable::new();
+        t.state_created(G, GAME);
+        let old = t.issue(G, 1).unwrap();
+        assert_eq!(t.state_created(G, GAME), 1, "one ref of the first life was still held");
+        let new = t.issue(G, 1).unwrap();
+        assert_ne!(old, new, "the handle differs where the registry number repeats");
+        assert!(t.lua_ref(G, old).unwrap_err().contains("before global state 0x1234560 was rebuilt"));
+        assert_eq!(t.lua_ref(G, new), Ok(1));
+        assert!(t.forget_earlier_life(old));
+        assert!(t.lua_ref(G, old).unwrap_err().contains("not live"));
+        assert!(!t.forget_earlier_life(new), "a live ref is not forgotten");
+        assert_eq!(t.lua_ref(G, new), Ok(1));
+    }
+
+    #[test]
+    fn a_ref_is_refused_on_another_global_state() {
+        let mut t = RefTable::new();
+        t.state_created(G, GAME);
+        t.state_seen(G + 0x100, GAME);
+        let a = t.issue(G, 3).unwrap();
+        assert!(t.lua_ref(G + 0x100, a).unwrap_err().contains("taken on global state 0x1234560, not on 0x1234660"));
+        assert!(t.issue(G + 0x200, 1).unwrap_err().contains("unknown"));
+    }
+
+    #[test]
+    fn calls_are_refused_off_the_thread_a_global_state_runs_on() {
+        let mut t = RefTable::new();
+        assert!(t.check_thread(G, GAME).unwrap_err().contains("no script has been seen running"));
+        t.state_seen(G, GAME);
+        assert_eq!(t.check_thread(G, GAME), Ok(()));
+        assert!(t.check_thread(G, 9).unwrap_err().contains("runs its scripts on thread 7, not on the calling thread 9"));
+        t.state_seen(G, 9);
+        assert!(t.check_thread(G, 9).is_err(), "a script seen on another thread does not move a known state");
+        t.state_created(G, 9);
+        assert_eq!(t.check_thread(G, 9), Ok(()), "a rebuilt state runs where it was built");
+    }
+
+    #[test]
+    fn handles_run_out_rather_than_repeat() {
+        let mut t = RefTable::new();
+        t.state_created(G, GAME);
+        t.last = i32::MAX - 1;
+        assert_eq!(t.issue(G, 1), Ok(i32::MAX));
+        assert!(t.issue(G, 2).unwrap_err().contains("every ref handle"));
     }
 
     #[test]

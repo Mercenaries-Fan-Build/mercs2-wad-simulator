@@ -11,7 +11,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameA;
 
 const MAX_MODULES: usize = 32;
 /// One line, CRLF included.
-const LINE_MAX: usize = 1536;
+pub(crate) const LINE_MAX: usize = 1536;
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -100,6 +100,16 @@ pub extern "C" fn m2_log_init(module: HMODULE) {
 
 /// Append `line` and CRLF to the module's log and flush; nothing when the module has no log open.
 pub(crate) fn write_line(module: HMODULE, line: &[u8]) {
+    write(module, line, true);
+}
+
+/// [`write_line`] without the flush, for a line a mod's call can repeat every frame: `WriteFile` hands it
+/// to the system's file cache, which outlives the game process; only the flush to disk is skipped.
+pub(crate) fn append_line(module: HMODULE, line: &[u8]) {
+    write(module, line, false);
+}
+
+fn write(module: HMODULE, line: &[u8], flush: bool) {
     let Some(file) = file_for(module) else { return };
     let mut buf = [0u8; LINE_MAX];
     let n = line.len().min(LINE_MAX - 2);
@@ -109,7 +119,9 @@ pub(crate) fn write_line(module: HMODULE, line: &[u8]) {
     let mut written = 0u32;
     unsafe {
         WriteFile(file, buf.as_ptr(), (n + 2) as u32, &mut written, core::ptr::null_mut());
-        FlushFileBuffers(file);
+        if flush {
+            FlushFileBuffers(file);
+        }
     }
 }
 
