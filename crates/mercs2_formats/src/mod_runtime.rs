@@ -40,6 +40,10 @@ pub struct ShaderClass {
     pub sho: *const c_char,
 }
 
+/// `m2_lua_pcall`'s result when it refused to call (nothing was called and the stack is unchanged); a
+/// call that ran returns the Lua status, 0 for success.
+pub const PCALL_REFUSED: c_int = -1;
+
 /// `m2_lua_exec`'s result codes.
 pub const EXEC_OK: c_int = 0;
 pub const EXEC_COMPILE: c_int = 1;
@@ -94,6 +98,10 @@ pub mod ffi {
         pub fn m2_lua_push_bool(l: *mut c_void, b: c_int);
         pub fn m2_lua_push_number(l: *mut c_void, n: f64);
         pub fn m2_lua_push_string(l: *mut c_void, s: *const c_char, len: c_int);
+        pub fn m2_lua_ref(l: *mut c_void, idx: c_int) -> c_int;
+        pub fn m2_lua_unref(l: *mut c_void, r: c_int);
+        pub fn m2_lua_push_ref(l: *mut c_void, r: c_int);
+        pub fn m2_lua_pcall(l: *mut c_void, nargs: c_int, nresults: c_int) -> c_int;
         pub fn m2_lua_debug_set_sink(cb: Option<LuaDebugSink>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_debug_on_paused(cb: Option<LuaDebugPausedCb>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_debug_paused() -> c_int;
