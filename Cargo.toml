@@ -18,7 +18,7 @@ repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-gam
 # with it — a consumer pinned to an earlier major (e.g. mercs2-modkit) will NOT pick 6.0.0 up until it
 # is edited too.
 [workspace.dependencies]
-mercs2_formats = { path = "crates/mercs2_formats", version = "6.0.3" }
+mercs2_formats = { path = "crates/mercs2_formats", version = "6.1.0" }
 loadprobe = { path = "crates/loadprobe", version = "2.4.1" }
 mercs2_luac = { path = "crates/mercs2_luac", version = "1.3.1" }
 mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.1.1" }
