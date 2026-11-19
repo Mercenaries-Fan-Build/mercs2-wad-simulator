@@ -46,7 +46,7 @@ mercs2_engine = { path = "crates/mercs2_engine", version = "3.0.2" }
 # The Shipment format, linter and builder. Registered here because neither the Workshop nor Modkit
 # owns the format — this crate does, and both are clients. Without an entry they cannot write
 # `mercs2_quartermaster = { workspace = true }` at all.
-mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "7.1.0" }
+mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "7.1.1" }
 mercs2_bridge = { path = "crates/mercs2_bridge", version = "0.1.4" }
 mercs2_exemap = { path = "crates/mercs2_exemap", version = "1.1.2" }
 securom_unwrap = { path = "crates/securom_unwrap", version = "0.1.0" }
