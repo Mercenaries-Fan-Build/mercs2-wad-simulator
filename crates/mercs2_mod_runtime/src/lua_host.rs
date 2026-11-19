@@ -451,11 +451,9 @@ fn install() -> Result<(), String> {
         return Ok(());
     }
     let s = sites::wait()?;
-    // Here, on the mod's thread, so the scan never stalls the game thread. A failure does not stop the
-    // install: it is logged and every ref call returns it.
-    if let Err(e) = sites::resolve_refs() {
-        rt_log::line(&format!("ERROR m2_lua_ref, m2_lua_unref, m2_lua_push_ref and m2_lua_pcall are unavailable: {e}"));
-    }
+    // Here, on the mod's thread, so the scan never stalls the game thread. A miss fails the install before
+    // any detour is attached (m2_lua_install logs it as ERROR), and every ref call returns it too.
+    sites::resolve_refs()?;
     attach(s, Site::RegisterNamespaces, walker as *mut c_void, &ORIG_WALKER)?;
     attach(s, Site::LuaBType, type_detour as *mut c_void, &ORIG_TYPE)?;
     attach(s, Site::CreateTextWidget, widget_detour as *mut c_void, &ORIG_WIDGET)?;
@@ -469,8 +467,10 @@ fn install() -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve the sites (waiting up to 30 s for SecuROM to decrypt the game's code) and attach the Lua host's
-/// detours. Idempotent. 1 on success; 0 with [`m2_lua_last_error`] set. Not from `DllMain`.
+/// Resolve the sites (waiting up to 30 s for SecuROM to decrypt the game's code), then the function-reference
+/// sites, and attach the Lua host's detours. Idempotent. 1 on success; 0 with [`m2_lua_last_error`] set when
+/// a site did not resolve (a function-reference pattern included: nothing is attached then) or a detour
+/// could not be attached. Not from `DllMain`.
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_lua_install() -> c_int {
     match install() {
