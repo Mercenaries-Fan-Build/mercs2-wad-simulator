@@ -325,6 +325,22 @@ pub fn pcall_callee<M: Mem>(m: &M, l: u32, nargs: i32, nresults: i32) -> Result<
     Ok(callee)
 }
 
+/// The `L->top` that `lua_pop(L, n)` leaves. Lua 5.1's `lua_pop` is `lua_settop(L, -n-1)`, which for a
+/// negative index only lowers `L->top` (lapi.c, after `api_check(L, -(idx+1) <= L->top - L->base)`); the
+/// game inlines it the same way, `add dword ptr [L+8], -8` to pop one value in `luaL_ref` (pc-v10
+/// 0x0085FDBC). `n` runs from 0 to the values of the running function's frame.
+pub fn pop_top<M: Mem>(m: &M, l: u32, n: i32) -> Result<u32, String> {
+    if n < 0 {
+        return Err(format!("n {n} is negative"));
+    }
+    let (top, base) = top_base(m, l)?;
+    let depth = (top - base) / TVALUE_SIZE;
+    if n as u32 > depth {
+        return Err(format!("n {n} is more than the {depth} value(s) of the running function's frame"));
+    }
+    Ok(top - n as u32 * TVALUE_SIZE)
+}
+
 #[cfg(test)]
 pub mod fake {
     use super::Mem;
@@ -538,6 +554,22 @@ mod tests {
         m.map(L, l);
         assert_eq!(pcall_callee(&m, L, 0, 63), Ok(STACK + TVALUE_SIZE));
         assert!(pcall_callee(&m, L, 0, 64).unwrap_err().contains("is 63 slot(s) above the function's slot"));
+    }
+
+    #[test]
+    fn a_pop_lowers_top_by_up_to_the_frame_s_values() {
+        // Three values from slot 1: top is slot 4, base slot 1.
+        let m = state(&[(1, LUA_TNUMBER), (2, LUA_TNUMBER), (3, LUA_TNUMBER)], true);
+        let base = STACK + TVALUE_SIZE;
+        assert_eq!(pop_top(&m, L, 0), Ok(base + 3 * TVALUE_SIZE), "popping nothing leaves top");
+        assert_eq!(pop_top(&m, L, 1), Ok(base + 2 * TVALUE_SIZE));
+        assert_eq!(pop_top(&m, L, 3), Ok(base), "every value of the frame");
+        assert!(pop_top(&m, L, 4).unwrap_err().contains("more than the 3 value(s)"), "below the frame's base");
+        assert!(pop_top(&m, L, i32::MAX).unwrap_err().contains("more than the 3 value(s)"));
+        assert!(pop_top(&m, L, -1).unwrap_err().contains("negative"));
+        assert!(pop_top(&m, L, i32::MIN).unwrap_err().contains("negative"));
+        assert!(pop_top(&state(&[], true), L, 1).unwrap_err().contains("more than the 0 value(s)"), "an empty frame");
+        assert!(pop_top(&FakeMem::default(), L, 1).unwrap_err().contains("not readable"));
     }
 
     #[test]
