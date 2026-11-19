@@ -20,6 +20,7 @@ const HEADER_BYTES: usize = 0x1000;
 
 static SITES: OnceLock<LuaSites> = OnceLock::new();
 static DEBUG: OnceLock<Result<mercs2_formats::lua_sites::DebugSites, String>> = OnceLock::new();
+static REFS: OnceLock<Result<mercs2_formats::lua_sites::RefSites, String>> = OnceLock::new();
 static SHADERS: OnceLock<ShaderSites> = OnceLock::new();
 static TREES: OnceLock<TreeSites> = OnceLock::new();
 static MODES: OnceLock<DisplayModeSites> = OnceLock::new();
@@ -71,6 +72,23 @@ pub(crate) fn debug() -> Result<mercs2_formats::lua_sites::DebugSites, String> {
             Ok(d)
         })
         .clone()
+}
+
+/// The function-reference sites, resolved once on the first use after the Lua sites resolved (so `.text`
+/// is decrypted); a failure then is kept and returned to every later call.
+pub(crate) fn refs() -> Result<mercs2_formats::lua_sites::RefSites, String> {
+    if SITES.get().is_none() {
+        return Err("the game's Lua sites are not resolved yet: call m2_lua_install first".into());
+    }
+    REFS.get_or_init(|| {
+        let r = mapped().and_then(|img| mercs2_formats::lua_sites::resolve_refs(&img))?;
+        rt_log::line(&format!(
+            "ref sites: luaL_ref {:#x}, luaL_unref {:#x}, lua_rawgeti {:#x}, lua_pcall {:#x}",
+            r.lual_ref, r.lual_unref, r.lua_rawgeti, r.lua_pcall
+        ));
+        Ok(r)
+    })
+    .clone()
 }
 
 /// The sites, resolving them now when that has not been done; `Err` names what did not resolve.
