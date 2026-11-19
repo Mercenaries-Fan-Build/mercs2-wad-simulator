@@ -967,6 +967,47 @@ fn a_level_vz_row_adds_assets_and_names_templates() {
     }
 }
 
+/// A `fetch_package` and the rows built `from:` it lint without the network: a well-formed set is clean,
+/// and each malformed field, an unnamed package, a `from:` naming nothing, a row with both or neither of
+/// `rungs` and `from`, and an `add_level` with `from:` that also lists streams or has hand rows are M0316.
+#[test]
+fn a_fetch_package_and_its_from_rows_lint_without_the_network() {
+    let sha = "d62081de1b9efbc484766fb586adba04b03edd5f8571ed03cf6e722bd70263e4";
+    let package = |id: &str, url: &str, sha256: &str, size: &str| {
+        format!("  - kind: fetch_package\n    id: {id}\n    format: ps3_dlc_pkg\n    url: {url}\n    sha256: {sha256}\n    size: {size}\n")
+    };
+    let good_package = package("biua_ps3", "http://zeus.dl.playstation.net/x.pkg", sha, "407578320");
+    let level_from = "  - kind: add_level\n    name: dlc01\n    display: X\n    from: biua_ps3\n";
+    let vz_from = "  - kind: level_asset\n    level: vz\n    type: model\n    name: pmc_hum_obama\n    from: biua_ps3\n";
+    let run = |rows: &str| lint::lint(&shipment_with(rows), None, None);
+
+    let clean = run(&format!("{good_package}{level_from}{vz_from}"));
+    assert!(!codes(&clean).contains(&"M0316"), "{clean:?}");
+    assert!(!codes(&clean).contains(&"M0311"), "{clean:?}");
+
+    for bad in [
+        run(&format!("{}{level_from}", package("Biua", "http://x/y.pkg", sha, "1"))),
+        run(&format!("{}{level_from}", package("biua_ps3", "ftp://x/y.pkg", sha, "1"))),
+        run(&format!("{}{level_from}", package("biua_ps3", "http://x/y.pkg", "D62081DE", "1"))),
+        run(&format!("{}{level_from}", package("biua_ps3", "http://x/y.pkg", sha, "0"))),
+        run(&format!("{good_package}{good_package}{level_from}")),
+        run(&good_package),
+        run(&format!("{good_package}{level_from}  - kind: level_asset\n    level: vz\n    type: model\n    name: a\n    from: other\n")),
+        run(&format!(
+            "{good_package}{level_from}  - kind: level_asset\n    level: vz\n    type: model\n    name: a\n    from: biua_ps3\n    rungs: [{{ block: a_P000_Q3, file: src/a.ucfx }}]\n"
+        )),
+        run(&format!("{good_package}  - kind: add_level\n    name: dlc01\n    display: X\n    from: biua_ps3\n    streams: [src/a.pws]\n")),
+        run(&format!(
+            "{good_package}{level_from}  - kind: level_asset\n    level: dlc01\n    type: model\n    name: a\n    rungs: [{{ block: a_P000_Q3, file: src/a.ucfx }}]\n"
+        )),
+    ] {
+        assert!(codes(&bad).contains(&"M0316"), "{bad:?}");
+        assert!(lint::blocks_build(&bad));
+    }
+    let neither = run("  - kind: level_asset\n    level: vz\n    type: model\n    name: a\n");
+    assert!(codes(&neither).contains(&"M0311"), "{neither:?}");
+}
+
 /// A name that is not a lowercase `[a-z0-9_]` token cannot be a filename / stringdb key — M0200.
 #[test]
 fn a_language_name_that_is_not_a_token_is_an_error() {
