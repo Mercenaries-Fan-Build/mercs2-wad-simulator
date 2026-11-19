@@ -10,10 +10,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use mercs2_formats::be_to_le::audio::StreamTable;
-use mercs2_formats::be_to_le::texture::{rung_of_path, BlockTables, TextureTable};
-use mercs2_formats::dlc_input::{read_be_block, IndxEntry};
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
+use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block, IndxEntry};
+use mercs2_formats::dlc_stfs::load_stfs_or_doh;
+use ucfx_byteswap::convert::QUIET;
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::{
@@ -159,8 +162,91 @@ pub fn carried(chunks: Vec<Chunk>, vz_wad: &Path) -> Result<Vec<Chunk>, String> 
         .collect())
 }
 
+/// One package's DLC in PC form: the chunks a level carries over the player's `vz.wad`, and its
+/// streams re-encoded.
+pub struct Ported {
+    pub chunks: Vec<Chunk>,
+    pub streams: StreamTable,
+}
+
+/// Convert a package's big-endian archive `doh` and the `package_files` beside it into what a level
+/// carries over `vz_wad`. A chunk the archive cannot convert (a PS3 compact vertex stream) comes from
+/// `donor`, a second archive of the same DLC; without one, any such chunk fails the run, naming how
+/// many of each type.
+pub fn port(doh: &[u8], package_files: &[(String, Vec<u8>)], vz_wad: &Path, donor: Option<&Path>) -> Result<Ported, String> {
+    let schemas = ComponentSchemas::from_vz_wad(vz_wad)?;
+    let base_textures = archive_textures(vz_wad)?;
+    let (_, rows) = parse_be_ffcs(doh)?;
+    let indx_row = rows.iter().find(|r| r.tag == "INDX").ok_or("Missing INDX")?;
+    let num_blocks = indx_row.meta as usize;
+    let indx = parse_be_indx(doh, indx_row.offset as usize, num_blocks);
+    let pths = rows.iter().find(|r| r.tag == "PTHS").map(|r| parse_be_pths(doh, r.offset as usize, r.meta as usize)).unwrap_or_default();
+    let textures = TextureTable::from_doh(doh, &indx, &pths, &base_textures)?;
+    let streams = StreamTable::read(num_blocks, |i| read_be_block(doh, &indx[i]), package_files)?;
+    QUIET.store(true, Ordering::Relaxed);
+    let source = Archive { doh, indx: &indx, paths: &pths, textures: &textures, streams: Some(&streams) };
+    let mut converted = convert(&source, &schemas, |_, _| true)?;
+    if !converted.refused.is_empty() {
+        let Some(second) = donor else {
+            let mut kinds = BTreeMap::new();
+            for (_, ty) in &converted.refused {
+                *kinds.entry(type_name_from_hash(*ty)).or_insert(0usize) += 1;
+            }
+            return Err(format!("{} chunks do not convert from this package ({kinds:?}) and no second archive was named", converted.refused.len()));
+        };
+        let (xbox, _) = load_stfs_or_doh(second)?;
+        let (_, tables) = parse_be_ffcs(&xbox)?;
+        let row = tables.iter().find(|r| r.tag == "INDX").ok_or("Missing INDX")?;
+        let x_indx = parse_be_indx(&xbox, row.offset as usize, row.meta as usize);
+        let x_pths = tables.iter().find(|r| r.tag == "PTHS").map(|r| parse_be_pths(&xbox, r.offset as usize, r.meta as usize)).unwrap_or_default();
+        let x_textures = TextureTable::from_doh(&xbox, &x_indx, &x_pths, &base_textures)?;
+        let x = Archive { doh: &xbox, indx: &x_indx, paths: &x_pths, textures: &x_textures, streams: None };
+        let refused = converted.refused.clone();
+        let donated = convert(&x, &schemas, |n, t| refused.contains(&(n, t)))?;
+        substitute(&mut converted.chunks, &refused, donated.chunks)?;
+    }
+    Ok(Ported { chunks: carried(converted.chunks, vz_wad)?, streams })
+}
+
 /// One asset's rungs in manifest order: `(block stem, file)`, finest last.
-type Rungs = Vec<(String, String)>;
+pub type Rungs = Vec<(String, String)>;
+
+/// What [`write_components`] wrote, as `src/`-relative paths: each asset's rungs by `(type name, name
+/// hash)`, and each stream.
+pub struct Written {
+    pub assets: BTreeMap<(String, u32), Rungs>,
+    pub streams: Vec<String>,
+}
+
+/// Write `chunks` and `streams` under `root`: one file per asset rung at
+/// `src/level/<type>/0x<name>.<rung>.ucfx`, and each stream at `src/level/Audios/<name>`.
+pub fn write_components(root: &Path, chunks: &[Chunk], streams: &StreamTable) -> Result<Written, String> {
+    let mut assets: BTreeMap<(String, u32), Rungs> = BTreeMap::new();
+    for c in chunks {
+        let ty = type_name_from_hash(c.ty);
+        if ty == "unknown" {
+            return Err(format!("chunk 0x{:08X} has type 0x{:08X}, which has no name", c.name, c.ty));
+        }
+        let rung = rung_of_path(&c.block).ok_or_else(|| format!("{} names no rung", c.block))?;
+        let relative = format!("src/level/{ty}/0x{:08X}.{rung}.ucfx", c.name);
+        let to = root.join(&relative);
+        let dir = to.parent().ok_or("a file has a parent")?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::write(&to, &c.bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+        assets.entry((ty.to_string(), c.name)).or_default().push((c.block.clone(), relative));
+    }
+    for rungs in assets.values_mut() {
+        rungs.sort_by(|a, b| a.1.cmp(&b.1));
+    }
+    let audios = root.join("src").join("level").join("Audios");
+    let mut written = Vec::new();
+    for (name, stream) in streams.streams() {
+        std::fs::create_dir_all(&audios).map_err(|e| format!("{}: {e}", audios.display()))?;
+        std::fs::write(audios.join(name), &stream.pws).map_err(|e| format!("{name}: {e}"))?;
+        written.push(format!("src/level/Audios/{name}"));
+    }
+    Ok(Written { assets, streams: written })
+}
 
 /// The line that ends a manifest's authored contributions: the rows above it (the Shipment's own plugin, its
 /// requirements' rows) are kept, and every row below it is written here.
@@ -180,30 +266,12 @@ pub fn with_generated_rows(text: &str, rows: &str) -> Result<String, String> {
 /// Write `chunks` and `streams` under `root` and the manifest's generated contributions
 /// ([`with_generated_rows`]).
 pub fn write_shipment(root: &Path, level: &str, display: &str, chunks: &[Chunk], streams: &StreamTable) -> Result<(), String> {
-    let source = root.join("src").join("level");
-    let mut assets: BTreeMap<(String, u32), Rungs> = BTreeMap::new();
-    for c in chunks {
-        let ty = type_name_from_hash(c.ty);
-        if ty == "unknown" {
-            return Err(format!("chunk 0x{:08X} has type 0x{:08X}, which has no name", c.name, c.ty));
-        }
-        let rung = rung_of_path(&c.block).ok_or_else(|| format!("{} names no rung", c.block))?;
-        let relative = format!("src/level/{ty}/0x{:08X}.{rung}.ucfx", c.name);
-        let to = root.join(&relative);
-        let dir = to.parent().ok_or("a file has a parent")?;
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        std::fs::write(&to, &c.bytes).map_err(|e| format!("{}: {e}", to.display()))?;
-        assets.entry((ty.to_string(), c.name)).or_default().push((c.block.clone(), relative));
-    }
-    let audios = source.join("Audios");
+    let written = write_components(root, chunks, streams)?;
     let mut rows = format!("  - kind: add_level\n    name: {level}\n    display: {display}\n    streams:\n");
-    for (name, stream) in streams.streams() {
-        std::fs::create_dir_all(&audios).map_err(|e| format!("{}: {e}", audios.display()))?;
-        std::fs::write(audios.join(name), &stream.pws).map_err(|e| format!("{name}: {e}"))?;
-        rows += &format!("      - src/level/Audios/{name}\n");
+    for stream in &written.streams {
+        rows += &format!("      - {stream}\n");
     }
-    for ((ty, name), mut rungs) in assets {
-        rungs.sort_by(|a, b| a.1.cmp(&b.1));
+    for ((ty, name), rungs) in written.assets {
         rows += &format!("  - kind: level_asset\n    level: {level}\n    type: {ty}\n    name: \"0x{name:08X}\"\n    rungs:\n");
         for (block, file) in rungs {
             rows += &format!("      - {{ block: {block}, file: {file} }}\n");
