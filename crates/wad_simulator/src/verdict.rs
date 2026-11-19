@@ -143,12 +143,38 @@ mod tests {
     }
 
     #[test]
-    fn install_ring_overflows_are_one_reason() {
+    fn install_ring_overflows_are_one_reason_largest_first() {
         let mut v = Verdict::new();
         v.record_install_ring::<String>(&Ok(ring(&[(RESIDENT, 7022), ("blocks\\VZ\\x.block", 8000)])));
         assert_eq!(
             v.line(),
-            "VERDICT: FAILED — 2 blocks never installed (blocks\\VZ\\resident_P000_Q3.block: 7022 entries, blocks\\VZ\\x.block: 8000 entries, ring 7018)"
+            "VERDICT: FAILED — 2 blocks never installed (blocks\\VZ\\x.block: 8000 entries, blocks\\VZ\\resident_P000_Q3.block: 7022 entries, ring 7018)"
+        );
+    }
+
+    #[test]
+    fn exactly_three_install_ring_overflows_are_all_named() {
+        let mut v = Verdict::new();
+        v.record_install_ring::<String>(&Ok(ring(&[("a.block", 7019), ("b.block", 7100), ("c.block", 7050)])));
+        assert_eq!(
+            v.line(),
+            "VERDICT: FAILED — 3 blocks never installed (b.block: 7100 entries, c.block: 7050 entries, a.block: 7019 entries, ring 7018)"
+        );
+    }
+
+    #[test]
+    fn more_than_three_install_ring_overflows_name_the_three_largest() {
+        let mut v = Verdict::new();
+        v.record_install_ring::<String>(&Ok(ring(&[
+            ("a.block", 7019),
+            ("b.block", 7100),
+            ("c.block", 7050),
+            ("d.block", 9000),
+            ("e.block", 7020),
+        ])));
+        assert_eq!(
+            v.line(),
+            "VERDICT: FAILED — 5 blocks never installed (d.block: 9000 entries, b.block: 7100 entries, c.block: 7050 entries, +2 more, ring 7018)"
         );
     }
 
