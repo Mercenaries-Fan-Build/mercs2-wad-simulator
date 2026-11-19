@@ -36,10 +36,17 @@ fn vz_chunk(name: &str) -> Vec<u8> {
 }
 
 /// The dlc01 level's lists, from the wardrobe and player scripts the BIUA Shipment's dlc01 rows ship
-/// (the DLC's `dlc01_pmcinterior` and `dlc01_player`, under the base scripts' asset names).
+/// (the DLC's `dlc01_pmcinterior` and `dlc01_player`, under the base scripts' asset names). The rows
+/// come `from:` the Shipment's `fetch_package`, so the Shipment is materialized as `qm build` does it,
+/// from the local PS3 package (`ps3_dlc_biua_pkg`), into a cache under cargo's test temp directory.
 fn dlc01() -> RetailLevel {
     let dir = mercs2_formats::game_paths::local_config_biua_shipment_dir(start()).unwrap_or_else(|e| panic!("{e}"));
-    let s = mercs2_quartermaster::discover::open(&dir).unwrap_or_else(|e| panic!("{}: {e:?}", dir.display()));
+    let opened = mercs2_quartermaster::discover::open(&dir).unwrap_or_else(|e| panic!("{}: {e:?}", dir.display()));
+    let pkg = mercs2_formats::game_paths::local_config_ps3_dlc_biua_pkg(start()).unwrap_or_else(|e| panic!("{e}"));
+    let overrides = mercs2_quartermaster::package::Overrides::from([("biua_ps3".to_string(), pkg)]);
+    let cache = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("qm-package-cache");
+    let s = mercs2_quartermaster::package::materialize(&opened, &vz_wad(), &cache, &overrides, &mut Vec::new())
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
     let assets = mercs2_quartermaster::level::assets_of(&s.manifest, "dlc01");
     let chunk = |name: &str| {
         let a = assets
