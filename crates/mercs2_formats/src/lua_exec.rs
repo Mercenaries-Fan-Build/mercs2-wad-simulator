@@ -49,6 +49,12 @@ pub fn fmt_g(x: f64) -> String {
 
 /// Append the text of the value in the stack slot at `slot` (a `TValue`: value at +0, tag at +4).
 pub fn format_value<M: Mem>(m: &M, slot: u32, out: &mut Vec<u8>) {
+    format_value_max(m, slot, out, MAX_STRING);
+}
+
+/// [`format_value`], copying at most `max` bytes of a string: a longer one is cut there and followed by
+/// ` <max of len bytes>`.
+pub fn format_value_max<M: Mem>(m: &M, slot: u32, out: &mut Vec<u8>, max: u32) {
     let v = m.read_u32(slot);
     let tt = m.read_u32(slot + 4);
     match tt {
@@ -70,9 +76,13 @@ pub fn format_value<M: Mem>(m: &M, slot: u32, out: &mut Vec<u8>) {
                 out.extend_from_slice(b"<string: data unreadable>");
                 return;
             }
+            let shown = len.min(max);
             out.push(b'"');
-            out.extend((0..len).map(|i| m.read_u8(data + i)));
+            out.extend((0..shown).map(|i| m.read_u8(data + i)));
             out.push(b'"');
+            if shown < len {
+                out.extend_from_slice(format!(" <{shown} of {len} bytes>").as_bytes());
+            }
         }
         LUA_TTABLE => out.extend_from_slice(b"<table>"),
         LUA_TFUNCTION => out.extend_from_slice(b"<function>"),
@@ -183,6 +193,33 @@ mod tests {
         assert_eq!(String::from_utf8(render_compile_error(&m, 0x1000 + 3 * 8)).unwrap(), "[compile] \"hello\"");
         let bad = stack(&[(0x9000, LUA_TSTRING)]);
         assert_eq!(String::from_utf8(render(&bad, Outcome { succeeded: true, first_result: 0 }, 0x1000, 1)).unwrap(), "[ok]\t<string: gc unreadable>");
+    }
+
+    /// The review's 16 MiB error string: the bounded copy takes `max` bytes and names the length.
+    #[test]
+    fn a_bounded_format_copies_at_most_max_bytes_of_a_string() {
+        let mut m = stack(&[(0x2000, LUA_TSTRING), (0x10_0000, LUA_TSTRING)]);
+        let len = 16 * 1024 * 1024u32;
+        let mut big = vec![0u8; 16];
+        big[12..16].copy_from_slice(&len.to_le_bytes());
+        big.resize(16 + len as usize + 1, b'E');
+        big[16 + len as usize] = 0;
+        m.map(0x10_0000, big);
+        let mut out = Vec::new();
+        format_value_max(&m, 0x1008, &mut out, 1536);
+        let mut want = b"\"".to_vec();
+        want.extend(std::iter::repeat_n(b'E', 1536));
+        want.extend_from_slice(b"\" <1536 of 16777216 bytes>");
+        assert_eq!(out, want);
+        let mut out = Vec::new();
+        format_value_max(&m, 0x1000, &mut out, 1536);
+        assert_eq!(out, b"\"hello\"", "a string within the bound is whole and unmarked");
+        let mut out = Vec::new();
+        format_value_max(&m, 0x1000, &mut out, 5);
+        assert_eq!(out, b"\"hello\"", "a string exactly the bound is whole");
+        let mut out = Vec::new();
+        format_value_max(&m, 0x1000, &mut out, 2);
+        assert_eq!(out, b"\"he\" <2 of 5 bytes>");
     }
 
     #[test]
