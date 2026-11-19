@@ -102,6 +102,7 @@ pub mod ffi {
         pub fn m2_lua_unref(l: *mut c_void, r: c_int) -> c_int;
         pub fn m2_lua_push_ref(l: *mut c_void, r: c_int) -> c_int;
         pub fn m2_lua_pcall(l: *mut c_void, nargs: c_int, nresults: c_int) -> c_int;
+        pub fn m2_lua_pop(l: *mut c_void, n: c_int) -> c_int;
         pub fn m2_lua_debug_set_sink(cb: Option<LuaDebugSink>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_debug_on_paused(cb: Option<LuaDebugPausedCb>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_debug_paused() -> c_int;
