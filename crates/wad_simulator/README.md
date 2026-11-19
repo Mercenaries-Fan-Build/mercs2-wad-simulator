@@ -92,6 +92,8 @@ cargo run --release -p wad_simulator -- \
 ```
 
 Exit code is 0 when no fatal finding was recorded, 1 otherwise — so the command can gate a build.
+The last stdout line states the same result: `VERDICT: PASS — no fatal findings (<checks run>)`, or
+`VERDICT: FAILED — <reason>; <reason>; …` naming every failing check.
 
 ### Options
 
@@ -135,6 +137,7 @@ Exit code is 0 when no fatal finding was recorded, 1 otherwise — so the comman
 | `pws` | External `.pws` streaming audio audit |
 | `names` | Rainbow-table hash → name resolver (`pandemic_hash_m2`) |
 | `progress` | Progress lines, always flushed to stderr |
+| `verdict` | The run's final `VERDICT:` line and exit code, from every check's outcome |
 
 ## Binaries
 
