@@ -41,3 +41,4 @@ pub mod resident;
 pub mod script;
 pub mod simulate;
 pub mod texture;
+pub mod verdict;

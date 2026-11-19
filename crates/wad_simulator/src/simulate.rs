@@ -1079,20 +1079,6 @@ pub fn print_simulate_report(report: &SimulateReport, rainbow: Option<&crate::na
         println!();
     }
 
-    let xref_fatal = report.has_base_wad && !report.unresolved_hashes.is_empty();
-    let has_issues = !report.access_violations.is_empty()
-        || !report.decode_errors.is_empty()
-        || report.texture_buffer_too_small > 0
-        || report.position_violations > 0
-        || report.vertex_violations > 0
-        || report.bounds_violations > 0
-        || report.structural_violations > 0
-        // NOTE: ecs_float_violations is intentionally NOT fatal — without per-field
-        // world-position semantics it false-positives on retail-valid non-Transform
-        // Vec3/Blob32 fields (e.g. Road@0x0 ref data). Use it differentially vs a
-        // retail oracle (tools/diff_ecs_violations.py) to find DLC-specific deltas.
-        || xref_fatal;
-
     if !report.access_violations.is_empty() {
         println!(
             "  {} {}",
@@ -1192,38 +1178,57 @@ pub fn print_simulate_report(report: &SimulateReport, rainbow: Option<&crate::na
         println!();
     }
 
-    if has_issues {
-        println!(
-            "  {} Engine would likely fault or misbehave loading this WAD.",
-            "VERDICT:".red().bold()
-        );
+    let findings = fatal_findings(report);
+    if findings.is_empty() {
+        println!("  {} no fatal findings.", "CONSUMPTION:".green().bold());
     } else {
         println!(
-            "  {} Full consumption path completed without violations.",
-            "VERDICT:".green().bold()
+            "  {} {} — engine would likely fault or misbehave loading this WAD.",
+            "CONSUMPTION:".red().bold(),
+            findings.join(", ")
         );
     }
     println!();
 }
 
+/// Every fatal category of `report`, as `"<count> <category>"`; empty when nothing is fatal. The
+/// advisory results (`*_advisory`, `needs_investigation`, `dlc_texture_provenance`,
+/// `ecs_float_violations`) are never listed, and unresolved hashes only with a base WAD.
+pub fn fatal_findings(report: &SimulateReport) -> Vec<String> {
+    let fatal_ucfx = report
+        .ucfx_issues
+        .iter()
+        .filter(|u| {
+            u.contains("codec 0x05")
+                || u.contains("codec 0x01")
+                || u.contains("XMA")
+                || u.contains("streaming clip")
+        })
+        .count();
+    // NOTE: ecs_float_violations is intentionally NOT fatal — without per-field
+    // world-position semantics it false-positives on retail-valid non-Transform
+    // Vec3/Blob32 fields (e.g. Road@0x0 ref data). Use it differentially vs a
+    // retail oracle (tools/diff_ecs_violations.py) to find DLC-specific deltas.
+    let unresolved = if report.has_base_wad { report.unresolved_hashes.len() } else { 0 };
+    [
+        (report.access_violations.len(), "access violation", "access violations"),
+        (report.decode_errors.len(), "decode error", "decode errors"),
+        (report.texture_buffer_too_small, "texture buffer too small", "texture buffers too small"),
+        (report.position_violations, "position violation", "position violations"),
+        (report.vertex_violations, "vertex violation", "vertex violations"),
+        (report.bounds_violations, "bounds violation", "bounds violations"),
+        (report.structural_violations as usize, "structural violation", "structural violations"),
+        (unresolved, "unresolved hash", "unresolved hashes"),
+        (fatal_ucfx, "fatal audio issue", "fatal audio issues"),
+    ]
+    .into_iter()
+    .filter(|&(n, _, _)| n > 0)
+    .map(|(n, one, many)| crate::verdict::count(n, one, many))
+    .collect()
+}
+
 pub fn simulate_exit_code(report: &SimulateReport) -> i32 {
-    let has_fatal_ucfx = report.ucfx_issues.iter().any(|u| {
-        u.contains("codec 0x05")
-            || u.contains("codec 0x01")
-            || u.contains("XMA")
-            || u.contains("streaming clip")
-    });
-    let xref_fatal = report.has_base_wad && !report.unresolved_hashes.is_empty();
-    if report.access_violations.is_empty()
-        && report.decode_errors.is_empty()
-        && report.texture_buffer_too_small == 0
-        && report.position_violations == 0
-        && report.vertex_violations == 0
-        && report.bounds_violations == 0
-        && report.structural_violations == 0
-        && !xref_fatal
-        && !has_fatal_ucfx
-    {
+    if fatal_findings(report).is_empty() {
         0
     } else {
         1
@@ -1400,6 +1405,60 @@ mod tests {
         report.decode_errors.push("decode".to_string());
         report.vertex_violations = 10;
         assert_eq!(simulate_exit_code(&report), 1);
+    }
+
+    #[test]
+    fn fatal_findings_clean_is_empty() {
+        assert!(fatal_findings(&SimulateReport::default()).is_empty());
+    }
+
+    #[test]
+    fn fatal_findings_names_every_fatal_category_with_its_count() {
+        let report = SimulateReport {
+            access_violations: vec!["a".into()],
+            decode_errors: vec!["d".into(), "e".into()],
+            texture_buffer_too_small: 1,
+            position_violations: 2,
+            vertex_violations: 1,
+            bounds_violations: 3,
+            structural_violations: 1,
+            has_base_wad: true,
+            unresolved_hashes: vec!["0x1".into(), "0x2".into()],
+            ucfx_issues: vec!["codec 0x01 (XMA) on PC build".into(), "harmless".into(), "streaming clip 0x1 needs .pws".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            fatal_findings(&report),
+            [
+                "1 access violation",
+                "2 decode errors",
+                "1 texture buffer too small",
+                "2 position violations",
+                "1 vertex violation",
+                "3 bounds violations",
+                "1 structural violation",
+                "2 unresolved hashes",
+                "2 fatal audio issues",
+            ]
+        );
+    }
+
+    #[test]
+    fn fatal_findings_leaves_out_advisories_and_baseless_unresolved_hashes() {
+        let report = SimulateReport {
+            unresolved_hashes: vec!["0x1".into()],
+            vertex_advisory: 4,
+            bounds_advisory: 4,
+            structural_advisory: 4,
+            position_advisory: 4,
+            ecs_float_violations: 4,
+            needs_investigation: vec!["x: tag 'ABCD'".into()],
+            dlc_texture_provenance: vec!["m".into()],
+            ucfx_issues: vec!["harmless".into()],
+            ..Default::default()
+        };
+        assert!(fatal_findings(&report).is_empty(), "{:?}", fatal_findings(&report));
+        assert_eq!(simulate_exit_code(&report), 0);
     }
 
     #[test]

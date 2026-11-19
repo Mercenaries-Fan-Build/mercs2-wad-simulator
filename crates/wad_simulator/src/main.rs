@@ -32,7 +32,9 @@
 //!   --json-output report.json
 //! ```
 //!
-//! Exit code 0 = no fatal finding, 1 = fatal finding (or a pass failed outright).
+//! Exit code 0 = no fatal finding, 1 = fatal finding (or a pass failed outright). The last stdout line
+//! is the verdict that matches it (`wad_simulator::verdict`): `VERDICT: PASS — …` or
+//! `VERDICT: FAILED — <reason>; <reason>; …`.
 //!
 //! # Simulation Stages
 //!
@@ -72,6 +74,7 @@
 // The simulation modules live in the crate's `[lib]` (`src/lib.rs`) so a linter or another tool can
 // call these checks instead of shelling out to this binary. Consumed from there rather than
 // re-declared here, so there is one copy compiled once.
+use wad_simulator::verdict::Verdict;
 use wad_simulator::{aset_validate, names, simulate};
 
 use clap::Parser;
@@ -182,7 +185,7 @@ fn discover_aux_wads(dir: &std::path::Path, patch: &std::path::Path, primary_bas
     out
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
     let cli = Cli::parse();
 
     println!(
@@ -207,17 +210,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
+    let mut verdict = Verdict::new();
+
     let rainbow = match cli.rainbow_table.as_ref() {
-        Some(p) => {
-            let rt = names::RainbowTable::load(p)
-                .map_err(|e| format!("rainbow table {}: {e}", p.display()))?;
-            println!("Rainbow table: {} entries from {}", rt.len(), p.display());
-            Some(rt)
-        }
+        Some(p) => match names::RainbowTable::load(p) {
+            Ok(rt) => {
+                println!("Rainbow table: {} entries from {}", rt.len(), p.display());
+                Some(rt)
+            }
+            Err(e) => {
+                eprintln!("rainbow table {}: {e}", p.display());
+                verdict.fail(format!("rainbow table {}: {e}", p.display()));
+                finish(&verdict);
+            }
+        },
         None => None,
     };
-
-    let mut exit_code = 0i32;
 
     let aux_wads = cli
         .base_wad_dir
@@ -231,7 +239,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ring_wads: Vec<&std::path::Path> = vec![cli.wad.as_path()];
     ring_wads.extend(cli.base_wad.as_deref());
     ring_wads.extend(aux_wads.iter().map(|p| p.as_path()));
-    match wad_simulator::install_ring::check_install_ring(&ring_wads) {
+    let ring = wad_simulator::install_ring::check_install_ring(&ring_wads);
+    match &ring {
         Ok(r) => {
             println!("ring {} (largest CSUM meta, from {}) over {} WAD(s), {} block(s)", r.ring, r.ring_from.display(), ring_wads.len(), r.blocks);
             if cli.base_wad.is_none() {
@@ -240,15 +249,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for o in &r.overflows {
                 println!("{} {} in {}: {} entries, more than the ring's {}", "NEVER INSTALLED".red().bold(), o.block, o.wad.display(), o.entries, r.ring);
             }
-            if !r.overflows.is_empty() {
-                exit_code = 1;
-            }
         }
-        Err(e) => {
-            eprintln!("install-ring check failed: {e}");
-            exit_code = 1;
-        }
+        Err(e) => eprintln!("install-ring check failed: {e}"),
     }
+    verdict.record_install_ring(&ring);
     println!();
 
     if !cli.skip_aset {
@@ -263,18 +267,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}",
             "=== ASET Hash Ownership Validation ===".bright_white().bold()
         );
-        match aset_validate::run_aset_hash_validation(&cli.wad, cli.limit) {
-            Ok(stats) => {
-                aset_validate::print_hash_validation_summary(&stats);
-                if stats.misrouted > 0 || stats.true_ghost > 0 {
-                    exit_code = 1;
-                }
-            }
-            Err(e) => {
-                eprintln!("ASET hash validation failed: {e}");
-                exit_code = 1;
-            }
+        let aset = aset_validate::run_aset_hash_validation(&cli.wad, cli.limit);
+        match &aset {
+            Ok(stats) => aset_validate::print_hash_validation_summary(stats),
+            Err(e) => eprintln!("ASET hash validation failed: {e}"),
         }
+        verdict.record_aset(&aset);
         println!();
     }
 
@@ -302,27 +300,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rainbow: rainbow.as_ref(),
             aux_wads,
         };
-        match simulate::run_simulate_with_options(base, patch, opts) {
+        let sim = simulate::run_simulate_with_options(base, patch, opts);
+        match &sim {
             Ok(report) => {
-                simulate::print_simulate_report(&report, rainbow.as_ref());
-                let sim_code = simulate::simulate_exit_code(&report);
-                if sim_code != 0 {
-                    exit_code = sim_code;
-                }
+                simulate::print_simulate_report(report, rainbow.as_ref());
                 if let Some(ref json_path) = cli.json_output {
-                    let json = serde_json::to_string_pretty(&report)?;
-                    let mut f = File::create(json_path)?;
-                    f.write_all(json.as_bytes())?;
-                    println!("Wrote JSON report to {}", json_path.display());
+                    match write_json(report, json_path) {
+                        Ok(()) => println!("Wrote JSON report to {}", json_path.display()),
+                        Err(e) => {
+                            eprintln!("JSON report {}: {e}", json_path.display());
+                            verdict.fail(format!("JSON report not written: {}: {e}", json_path.display()));
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                eprintln!("Simulation failed: {e}");
-                exit_code = 1;
-            }
+            Err(e) => eprintln!("Simulation failed: {e}"),
         }
+        verdict.record_simulation(&sim);
         println!();
     }
 
-    std::process::exit(exit_code);
+    finish(&verdict);
+}
+
+fn write_json(report: &simulate::SimulateReport, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_string_pretty(report)?;
+    File::create(path)?.write_all(json.as_bytes())?;
+    Ok(())
+}
+
+/// Prints the verdict as the last stdout line and exits with its code.
+fn finish(verdict: &Verdict) -> ! {
+    let line = verdict.line();
+    if verdict.passed() {
+        println!("{}", line.green().bold());
+    } else {
+        println!("{}", line.red().bold());
+    }
+    std::process::exit(verdict.exit_code());
 }

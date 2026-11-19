@@ -43,7 +43,7 @@ default. Value types are as clap parses them.
 | `--skip-assets` | flag | off | Skip the entire Engine Asset Consumption stage (all passes, prefetch, texture sweep, xref). Leaves only the ASET hash pass — "ASET-only mode". |
 | `--json-output <JSON_OUTPUT>` | path | none | Write the full `SimulateReport` as pretty JSON to this path. Only produced when the asset-consumption stage runs (i.e. not with `--skip-assets`). |
 | `--audio-manifest <AUDIO_MANIFEST>` | path | `output/analysis/dlc_audio_manifest.json` (implicit) | `dlc_audio_manifest.json` mapping streaming clip hashes to `.pws` filenames. If omitted, the tool still tries the default path; if that file is absent the map is simply empty (no error). |
-| `--rainbow-table <RAINBOW_TABLE>` | path | none | `rainbow_table.json` (hash → name). When loaded, unresolved hashes, texture-buffer findings, and DLC texture-provenance lines are annotated with human-readable asset names. A load failure is fatal: the run stops before any pass with `Error: "rainbow table <path>: <error>"` (exit 1). |
+| `--rainbow-table <RAINBOW_TABLE>` | path | none | `rainbow_table.json` (hash → name). When loaded, unresolved hashes, texture-buffer findings, and DLC texture-provenance lines are annotated with human-readable asset names. A load failure is fatal: the run stops before any pass with `rainbow table <path>: <error>` on stderr and `VERDICT: FAILED — rainbow table <path>: <error>` on stdout (exit 1). |
 | `--base-wad-dir <BASE_WAD_DIR>` | path | none | The install `data/` dir. Every `*.wad` in it — except the patch (`--wad`), the primary base (`--base-wad`), and any filename containing "patch" — has its ASET hash set loaded (auxiliary WADs) so cross-references into sibling WADs (English/shell/Loading/vz) don't false-report as unresolved. Aux assets are **not** consumed, only their hash sets loaded. |
 | `-h`, `--help` | flag | — | Print help and exit. |
 
@@ -119,6 +119,18 @@ ASET pass reports misrouted or true-ghost hashes, exit is also 1. Advisory findi
 heuristic vertex/bounds/structural advisory, needs-investigation tags, DLC provenance) are
 reported but excluded from the verdict.
 
+**Final line.** The last non-empty stdout line is the run's verdict, built from the same failure
+list as the exit code: `VERDICT: PASS — no fatal findings (<checks run>)` on exit 0, or
+`VERDICT: FAILED — <reason>; <reason>; …` on exit 1, one reason per failing check, e.g.
+`1 block never installed (blocks\VZ\resident_P000_Q3.block: 7022 entries, ring 7018)`,
+`ASET: 2 misrouted, 1 ghost`, `simulation: 1 decode error, 2 texture buffers too small`. The
+install-ring reason names at most the 3 largest blocks, then `+N more`; every block is listed on
+its own `NEVER INSTALLED` line above. A check
+or input that could not be read is named there too (`install-ring check could not run: <error>`,
+`ASET check could not run: <error>`, `simulation could not run: <error>`,
+`rainbow table <path>: <error>`, `JSON report not written: <path>: <error>`). The consumption
+section ends with its own `CONSUMPTION:` line, which covers that section only.
+
 ## Examples
 
 ```
@@ -157,20 +169,23 @@ wad_simulator --wad vz.wad --skip-audio --asset-limit 500 --progress-interval 50
 - **`--wad` (or `--base-wad`) not found / not a valid FFCS archive.** `VirtualDisk::load` and
   `run_aset_hash_validation` open the file directly; a missing file or a bad archive header
   surfaces as `ASET hash validation failed: <io/parse error>` and/or `Simulation failed: <error>`
-  on stderr, with exit code 1. The banner still prints first.
+  on stderr, with exit code 1, and the final `VERDICT: FAILED — …` line names the check that could
+  not run. The banner still prints first.
 - **`--base-wad-dir` unreadable.** Prints `WARNING: --base-wad-dir <path> not readable` and
   continues with no auxiliary hashes — cross-refs into sibling WADs may then be reported as
   unresolved (fatal if `--base-wad` is also set).
-- **`--rainbow-table` load failure.** `main` returns the error after the banner and before any
-  pass runs: stderr shows `Error: "rainbow table <path>: <error>"` and the exit code is 1.
+- **`--rainbow-table` load failure.** The run stops after the banner and before any pass runs:
+  stderr shows `rainbow table <path>: <error>`, stdout ends with
+  `VERDICT: FAILED — rainbow table <path>: <error>`, and the exit code is 1.
 - **`--audio-manifest` missing / unparseable.** No error — the clip→pws map is silently empty
   (`load_clip_pws_map` returns `None`), so streaming clips just won't be matched to `.pws` names.
 - **A block fails to decompress.** Recorded per-block as an access violation
   (`block <n> decompress: <error>`), which is fatal (exit 1). In the ASET pass a block that won't
   decompress is counted as a `decompression_failure` instead.
-- **`--json-output` path unwritable.** `File::create` / `write_all` errors propagate out of
-  `main` and abort with a non-zero exit after the report has already printed to the console.
+- **`--json-output` path unwritable.** The error goes to stderr, the final line names it
+  (`JSON report not written: <path>: <error>`), and the exit code is 1.
 - **Fatal engine-accuracy findings.** Any access violation, decode error, texture
   BUFFER_TOO_SMALL, position/vertex/bounds/structural violation, fatal UCFX codec, or (with
-  `--base-wad`) unresolved hash prints under a red `VERDICT:` line and yields exit code 1 — the
-  signal that the game would fault or livelock loading the WAD.
+  `--base-wad`) unresolved hash is counted on a red `CONSUMPTION:` line, named again in the final
+  `VERDICT: FAILED — simulation: …` line, and yields exit code 1 — the signal that the game would
+  fault or livelock loading the WAD.

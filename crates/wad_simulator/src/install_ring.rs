@@ -33,6 +33,33 @@ pub struct RingReport {
     pub overflows: Vec<Overflow>,
 }
 
+/// Blocks named in [`RingReport::failure`].
+pub const FAILURE_BLOCKS: usize = 3;
+
+impl RingReport {
+    /// `"<n> block(s) never installed (<block>: <entries> entries, …, ring <ring>)"` naming the
+    /// [`FAILURE_BLOCKS`] largest overflows, largest first, then `+<rest> more`; `None` when every block
+    /// fits the ring. The full list is printed per block before the verdict.
+    pub fn failure(&self) -> Option<String> {
+        if self.overflows.is_empty() {
+            return None;
+        }
+        let mut largest: Vec<&Overflow> = self.overflows.iter().collect();
+        largest.sort_by_key(|o| std::cmp::Reverse(o.entries));
+        let mut blocks: Vec<String> =
+            largest.iter().take(FAILURE_BLOCKS).map(|o| format!("{}: {} entries", o.block, o.entries)).collect();
+        if largest.len() > FAILURE_BLOCKS {
+            blocks.push(format!("+{} more", largest.len() - FAILURE_BLOCKS));
+        }
+        Some(format!(
+            "{} never installed ({}, ring {})",
+            crate::verdict::count(self.overflows.len(), "block", "blocks"),
+            blocks.join(", "),
+            self.ring
+        ))
+    }
+}
+
 /// Every block of `wads` against the largest CSUM `meta` among them. An error when a WAD cannot be read,
 /// has no CSUM row, or a block's entry count cannot be read.
 pub fn check_install_ring(wads: &[&Path]) -> Result<RingReport, String> {

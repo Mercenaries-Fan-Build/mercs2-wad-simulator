@@ -178,6 +178,25 @@ pub fn run_aset_hash_validation(
     Ok(stats)
 }
 
+impl HashValidationStats {
+    /// `"ASET: <n> misrouted, <n> ghost(s)"` naming only the non-zero counts; `None` when neither
+    /// occurs.
+    pub fn failure(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.misrouted > 0 {
+            parts.push(format!("{} misrouted", self.misrouted));
+        }
+        if self.true_ghost > 0 {
+            parts.push(crate::verdict::count(self.true_ghost, "ghost", "ghosts"));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(format!("ASET: {}", parts.join(", ")))
+        }
+    }
+}
+
 pub fn print_hash_validation_summary(stats: &HashValidationStats) {
     let orphan_total = stats.misrouted + stats.true_ghost;
     println!(
