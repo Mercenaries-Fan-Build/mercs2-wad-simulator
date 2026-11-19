@@ -37,6 +37,7 @@ pub mod loader;
 pub mod manifest;
 pub mod names;
 pub mod outfits;
+pub mod package;
 pub mod pe;
 pub mod plan;
 pub mod shader;
