@@ -1,8 +1,10 @@
 [package]
 name = "dlc_port"
 version = "0.1.0"
-publish = false                # excluded from the crates.io release set
 edition = "2021"
+description = "Converts a console Mercenaries 2 DLC package (PS3 .pkg, Xbox 360 STFS/DOH) into PC-form level components. Its library is what qm's fetch_package kind runs on the player's machine."
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 
 [lib]
