@@ -56,6 +56,8 @@ mercs2_audio = { path = "../mercs2_audio", version = "3.0.1", default-features =
 # the package is downloaded once into qm's cache. `ureq` is the blocking client the Workshop already uses.
 dlc_port = { workspace = true }
 ureq = "2"
+# A download's url and the redirects it follows are parsed and resolved as URLs; the same crate ureq uses.
+url = "2"
 
 [dev-dependencies]
 # Only to BUILD a compressed `CFX` movie fixture. The `add_movie` lowering must accept one and ship
