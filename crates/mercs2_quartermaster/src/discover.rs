@@ -372,6 +372,8 @@ impl Contribution {
                 out.extend(streams.iter().map(|s| ("streams", s.as_path())));
             }
             Contribution::LevelAsset { rungs, .. } => out.extend(rungs.iter().map(|r| ("rungs", r.file.as_path()))),
+            // Downloaded at build into qm's cache, never a `src/` file.
+            Contribution::FetchPackage { .. } => {}
             Contribution::NativeHook { plugin, .. } => {
                 if let Some(p) = plugin {
                     out.push(("plugin", p.as_path()));

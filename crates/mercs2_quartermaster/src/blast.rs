@@ -773,6 +773,9 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // Inside its own level's patch: it can only meet another Shipment that adds that level,
             // which the `add_level` claim above already refuses.
             Contribution::LevelAsset { .. } => {}
+            // A source the build reads; it claims nothing in the game. What it converts is claimed by the
+            // `add_level` and `level_asset` rows that name it.
+            Contribution::FetchPackage { .. } => {}
             Contribution::NativeHook {
                 plugin,
                 symbol,

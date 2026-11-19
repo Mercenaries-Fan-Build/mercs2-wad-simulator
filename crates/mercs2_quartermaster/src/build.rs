@@ -4349,8 +4349,15 @@ fn lower(
         // Compiled with its `add_level`.
         Contribution::LevelAsset { .. } => Ok(Lowering::Nothing),
 
+        // Resolved by `package::materialize` before the build; `build` refuses one that is not.
+        Contribution::FetchPackage { .. } => Err(BuildError::Lower {
+            index,
+            kind,
+            message: "a fetch_package row reached the lowering unresolved: run it through package::materialize first".to_string(),
+        }),
+
         // A NEW level: its assets compiled into a WAD above a copy of `vz.wad` (`crate::level`).
-        Contribution::AddLevel { name, display, streams } => {
+        Contribution::AddLevel { name, display, streams, .. } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
@@ -4672,6 +4679,22 @@ pub fn build(
 ) -> Result<BuildReport, BuildError> {
     let mut log = Vec::new();
     let manifest = &shipment.manifest;
+    // `fetch_package` and `from:` are resolved before build by `package::materialize`; one that reaches
+    // here would build a level without its assets.
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let unresolved = match c {
+            Contribution::FetchPackage { .. } => true,
+            Contribution::AddLevel { from, .. } | Contribution::LevelAsset { from, .. } => from.is_some(),
+            _ => false,
+        };
+        if unresolved {
+            return Err(BuildError::Lower {
+                index,
+                kind: c.kind(),
+                message: "a fetch_package row reached the build unresolved: run it through package::materialize first".to_string(),
+            });
+        }
+    }
 
     let mut diagnostics = lint::lint(manifest, Some(&shipment.root), names);
     // Rules that need the retail WADs run only when a stack is configured. They are appended

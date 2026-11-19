@@ -427,7 +427,10 @@ pub fn load_sound_shape_problems(manifest: &Manifest) -> Vec<(usize, String)> {
         if unique.len() != sessions.len() {
             out.push((index, "in lists a session twice".to_string()));
         }
-        if let Some(s) = stream {
+        // A level built `from:` a package has its streams only once the package is converted
+        // (`package::materialize`); `build` lints that converted manifest, so the stream is checked there.
+        let converted_streams = manifest.contributions.iter().any(|c| matches!(c, Contribution::AddLevel { from: Some(_), .. }));
+        if let Some(s) = stream.as_ref().filter(|_| !converted_streams) {
             if let Err(e) = stream_level(manifest, s) {
                 out.push((index, e));
             }

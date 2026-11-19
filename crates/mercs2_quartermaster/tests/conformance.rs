@@ -179,6 +179,19 @@ contributions:
     rungs:
       - { block: resident_P000_Q3, file: src/level/arena.ucfx }
 
+  - kind: fetch_package
+    id: arena_pkg
+    format: ps3_dlc_pkg
+    url: https://example.invalid/arena.pkg
+    sha256: d62081de1b9efbc484766fb586adba04b03edd5f8571ed03cf6e722bd70263e4
+    size: 271138816
+
+  - kind: level_asset
+    level: vz
+    type: model
+    name: pmc_hum_obama
+    from: arena_pkg
+
   - kind: add_movie
     name: my_hud_widgets
     movie: src/ui/widgets.gfx
@@ -436,6 +449,21 @@ const JSON: &str = r#"
       "type": "script",
       "name": "arena",
       "rungs": [{ "block": "resident_P000_Q3", "file": "src/level/arena.ucfx" }]
+    },
+    {
+      "kind": "fetch_package",
+      "id": "arena_pkg",
+      "format": "ps3_dlc_pkg",
+      "url": "https://example.invalid/arena.pkg",
+      "sha256": "d62081de1b9efbc484766fb586adba04b03edd5f8571ed03cf6e722bd70263e4",
+      "size": 271138816
+    },
+    {
+      "kind": "level_asset",
+      "level": "vz",
+      "type": "model",
+      "name": "pmc_hum_obama",
+      "from": "arena_pkg"
     },
     {
       "kind": "add_movie",
@@ -724,6 +752,21 @@ name = "arena"
 rungs = [{ block = "resident_P000_Q3", file = "src/level/arena.ucfx" }]
 
 [[contributions]]
+kind = "fetch_package"
+id = "arena_pkg"
+format = "ps3_dlc_pkg"
+url = "https://example.invalid/arena.pkg"
+sha256 = "d62081de1b9efbc484766fb586adba04b03edd5f8571ed03cf6e722bd70263e4"
+size = 271138816
+
+[[contributions]]
+kind = "level_asset"
+level = "vz"
+type = "model"
+name = "pmc_hum_obama"
+from = "arena_pkg"
+
+[[contributions]]
 kind = "add_movie"
 name = "my_hud_widgets"
 movie = "src/ui/widgets.gfx"
@@ -908,6 +951,8 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "edit_stringdb",
             "add_language",
             "add_level",
+            "level_asset",
+            "fetch_package",
             "level_asset",
             "add_movie",
             "add_ui",

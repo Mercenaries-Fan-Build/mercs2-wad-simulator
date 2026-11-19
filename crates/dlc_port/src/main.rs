@@ -50,7 +50,7 @@ use mercs2_formats::aset_type_ids::{
 use mercs2_formats::dlc_input::{
     parse_be_aset, parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block,
 };
-use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, load_stfs_or_doh_with_streams, RarExtractor};
+use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh_with_streams, RarExtractor};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, rung_chain, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
@@ -209,38 +209,10 @@ fn run() -> Result<(), String> {
     }
 
     if let Some(root) = &cli.shipment {
-        println!("Reading texture rungs...");
-        let textures = TextureTable::from_doh(&doh, &indx, &pths, &base_textures)?;
-        println!("Re-encoding the {} streams...", package_files.len());
-        let streams = StreamTable::read(num_blocks, |i| read_be_block(&doh, &indx[i]), &package_files)?;
-        QUIET.store(true, Ordering::Relaxed);
-        let source = components::Archive { doh: &doh, indx: &indx, paths: &pths, textures: &textures, streams: Some(&streams) };
-        let mut converted = components::convert(&source, &schemas, |_, _| true)?;
-        println!("  {} chunks converted, {} assets refused", converted.chunks.len(), converted.refused.len());
-        let mut kinds = std::collections::BTreeMap::new();
-        for (_, ty) in &converted.refused {
-            *kinds.entry(mercs2_formats::types::type_name_from_hash(*ty)).or_insert(0usize) += 1;
-        }
-        for (kind, n) in &kinds {
-            println!("    {n} {kind}");
-        }
-        if !converted.refused.is_empty() {
-            let second = cli.xbox_doh_oracle.as_ref().ok_or("some PS3 chunks do not convert: name the Xbox package with --xbox-doh-oracle")?;
-            let (xbox, _) = load_stfs_or_doh(second)?;
-            let (_, tables) = parse_be_ffcs(&xbox)?;
-            let row = tables.iter().find(|r| r.tag == "INDX").ok_or("Missing INDX")?;
-            let x_indx = parse_be_indx(&xbox, row.offset as usize, row.meta as usize);
-            let x_pths = tables.iter().find(|r| r.tag == "PTHS").map(|r| parse_be_pths(&xbox, r.offset as usize, r.meta as usize)).unwrap_or_default();
-            let x_textures = TextureTable::from_doh(&xbox, &x_indx, &x_pths, &base_textures)?;
-            let x = components::Archive { doh: &xbox, indx: &x_indx, paths: &x_pths, textures: &x_textures, streams: None };
-            let refused = converted.refused.clone();
-            let donor = components::convert(&x, &schemas, |n, t| refused.contains(&(n, t)))?;
-            println!("  {} chunks of those assets from {}", donor.chunks.len(), second.display());
-            components::substitute(&mut converted.chunks, &refused, donor.chunks)?;
-        }
-        let carried = components::carried(converted.chunks, &cli.vz_wad)?;
-        println!("  {} chunks carried", carried.len());
-        components::write_shipment(root, &cli.level, &cli.display, &carried, &streams)?;
+        println!("Converting the package's chunks and {} streams...", package_files.len());
+        let ported = components::port(&doh, &package_files, &cli.vz_wad, cli.xbox_doh_oracle.as_deref())?;
+        println!("  {} chunks carried", ported.chunks.len());
+        components::write_shipment(root, &cli.level, &cli.display, &ported.chunks, &ported.streams)?;
         return Ok(());
     }
 

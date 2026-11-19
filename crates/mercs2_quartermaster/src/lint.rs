@@ -271,6 +271,19 @@ pub const M0315_PCALL_IMPORT: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0315",
 };
 
+/// A `fetch_package` the build could not use, or a `from:` that cannot resolve: an `id` that is not a
+/// lowercase `[a-z0-9_]` token or is repeated, a `url` that is not an `http(s)://` URL with a host, a
+/// `sha256` that is not 64 lowercase hex digits, a zero `size` ([`crate::package::row_problems`], which
+/// the build checks too), a package no `from:` names, a `from:` naming no
+/// `fetch_package`, a `level_asset` with both or neither of `rungs` and `from`, and an `add_level` with
+/// `from:` that also lists `streams` or has hand-written `level_asset` rows. Checked without the network
+/// ([`crate::package`]).
+pub const M0316_FETCH_PACKAGE: Rule = Rule {
+    code: "M0316",
+    title: "a fetch_package or a from: that the build cannot resolve",
+    doc: "docs/modding/manifest_format.md#m0316",
+};
+
 /// An `add_language` name that cannot be a novel language WAD — not a lowercase `[a-z0-9_]` token, or
 /// one the game already ships (`.\Data\<name>.wad`), which the kind would otherwise overwrite. The
 /// message comes from [`crate::build::language_name_refusal`], the same check the lowering enforces —
@@ -924,6 +937,7 @@ pub const RULES: &[Rule] = &[
     M0311_LEVEL_UNUSABLE,
     M0312_LIBRARY_LOAD_UNUSABLE,
     M0315_PCALL_IMPORT,
+    M0316_FETCH_PACKAGE,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -1904,6 +1918,18 @@ pub fn library_load_refusals(name: &str, load: &crate::manifest::LibraryLoad) ->
         }
     }
     out
+}
+
+/// The `id` of every `fetch_package` row, in manifest order (repeats kept, so M0316 can name them).
+fn fetch_package_ids(manifest: &Manifest) -> Vec<&str> {
+    manifest
+        .contributions
+        .iter()
+        .filter_map(|c| match c {
+            Contribution::FetchPackage { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Every `add_shop_item` whose `behaviour.script` mints a novel module: `(index, module)`.
@@ -2942,7 +2968,17 @@ pub fn lint(
                     });
                 }
             }
-            Contribution::LevelAsset { level, asset_type, name, rungs, templates, edits } => {
+            Contribution::LevelAsset { level, asset_type, name, rungs, from, templates, edits } => {
+                let mut package = |message: String| {
+                    out.push(Diagnostic { rule: M0316_FETCH_PACKAGE, severity: Severity::Error, message, at: Some(index), fix: None })
+                };
+                match from {
+                    Some(id) if !rungs.is_empty() => package(format!("level_asset {name:?}: `from: {id}` and `rungs` both name its rungs")),
+                    Some(id) if !fetch_package_ids(manifest).contains(&id.as_str()) => {
+                        package(format!("level_asset {name:?}: `from: {id}` names no fetch_package of this Shipment"))
+                    }
+                    _ => {}
+                }
                 let mut refuse = |message: String| {
                     out.push(Diagnostic { rule: M0311_LEVEL_UNUSABLE, severity: Severity::Error, message, at: Some(index), fix: None })
                 };
@@ -2959,7 +2995,7 @@ pub fn lint(
                 if !templates.is_empty() && !(vz && worldentity) {
                     refuse(format!("level_asset {name:?}: `templates` belongs to a level: vz row of type {}", crate::level::WORLDENTITY_TYPE));
                 }
-                if !templates.is_empty() && rungs.len() != 1 {
+                if !templates.is_empty() && from.is_none() && rungs.len() != 1 {
                     refuse(format!("level_asset {name:?}: a worldentity has one rung, not {}", rungs.len()));
                 }
                 let mut seen = std::collections::BTreeMap::new();
@@ -2978,8 +3014,8 @@ pub fn lint(
                 if mercs2_formats::types::type_by_name(asset_type).is_none() {
                     refuse(format!("level_asset {name:?}: no asset type is named {asset_type:?}"));
                 }
-                if rungs.is_empty() {
-                    refuse(format!("level_asset {name:?}: it has no rungs"));
+                if rungs.is_empty() && from.is_none() {
+                    refuse(format!("level_asset {name:?}: it has no rungs and no `from`"));
                 }
                 for (i, r) in rungs.iter().enumerate() {
                     match crate::level::block_refusal(&r.block) {
@@ -2991,7 +3027,43 @@ pub fn lint(
                     }
                 }
             }
-            Contribution::AddLevel { name, streams, .. } => {
+            Contribution::FetchPackage { id, url, sha256, size, .. } => {
+                let mut package = |message: String| {
+                    out.push(Diagnostic { rule: M0316_FETCH_PACKAGE, severity: Severity::Error, message, at: Some(index), fix: None })
+                };
+                for problem in crate::package::row_problems(id, url, sha256, *size) {
+                    package(problem);
+                }
+                if fetch_package_ids(manifest).iter().filter(|other| **other == id.as_str()).count() > 1 {
+                    package(format!("fetch_package id {id:?}: more than one fetch_package has it"));
+                }
+                let named = manifest.contributions.iter().any(|c| {
+                    matches!(c, Contribution::AddLevel { from: Some(f), .. } | Contribution::LevelAsset { from: Some(f), .. } if f == id)
+                });
+                if !named {
+                    package(format!("fetch_package {id}: no add_level or level_asset names it with `from:`"));
+                }
+            }
+            Contribution::AddLevel { name, streams, from, .. } => {
+                if let Some(id) = from {
+                    let mut package = |message: String| {
+                        out.push(Diagnostic { rule: M0316_FETCH_PACKAGE, severity: Severity::Error, message, at: Some(index), fix: None })
+                    };
+                    if !fetch_package_ids(manifest).contains(&id.as_str()) {
+                        package(format!("add_level {name:?}: `from: {id}` names no fetch_package of this Shipment"));
+                    }
+                    if !streams.is_empty() {
+                        package(format!("add_level {name:?}: `from: {id}` and `streams` both name its streams"));
+                    }
+                    let hand = manifest
+                        .contributions
+                        .iter()
+                        .filter(|c| matches!(c, Contribution::LevelAsset { level, .. } if level == name))
+                        .count();
+                    if hand > 0 {
+                        package(format!("add_level {name:?}: `from: {id}` writes every row of this level, and {hand} level_asset rows of it are written by hand"));
+                    }
+                }
                 let mut refuse = |message: String| {
                     out.push(Diagnostic { rule: M0311_LEVEL_UNUSABLE, severity: Severity::Error, message, at: Some(index), fix: None })
                 };
