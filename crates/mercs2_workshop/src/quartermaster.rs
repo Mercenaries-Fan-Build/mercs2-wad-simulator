@@ -1289,12 +1289,14 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             name,
             display: "My Level".into(),
             streams: Vec::new(),
+            from: None,
         },
         "level_asset" => Contribution::LevelAsset {
             level: "my_level".into(),
             asset_type: "model".into(),
             name,
             rungs: Vec::new(),
+            from: None,
             templates: Vec::new(),
             edits: Default::default(),
         },
@@ -2645,7 +2647,7 @@ fn contribution_form(
                 commit |= source_row(ui, "Rung", &mut r.file, root, &["ucfx"]);
             }
         }
-        Contribution::AddLevel { name, display, streams } => {
+        Contribution::AddLevel { name, display, streams, .. } => {
             commit |= theme::text_field(ui, "Level", name, "dlc01", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Display", display, "My Level", theme::FieldState::Neutral).lost_focus();
             for s in streams.iter_mut() {
