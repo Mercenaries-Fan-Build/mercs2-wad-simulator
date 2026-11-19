@@ -26,3 +26,9 @@ pub(crate) fn line(text: &str) {
     OPEN.call_once(|| log::m2_log_init(own_module()));
     log::write_line(own_module(), text.as_bytes());
 }
+
+/// [`line`] without the flush (`log::append_line`).
+pub(crate) fn line_unflushed(text: &str) {
+    OPEN.call_once(|| log::m2_log_init(own_module()));
+    log::append_line(own_module(), text.as_bytes());
+}
