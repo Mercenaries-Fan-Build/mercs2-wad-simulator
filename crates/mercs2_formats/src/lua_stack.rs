@@ -1,5 +1,6 @@
 //! Argument reads off the game's Lua 5.1.2 stack (32-bit, float `lua_Number`), behind m2-sdk.dll's
-//! `m2_lua_nargs`, `m2_lua_arg_*` and `m2_lua_join_strings` (`m2/m2_luastack.h`).
+//! `m2_lua_nargs`, `m2_lua_arg_*` and `m2_lua_join_strings` (`m2/m2_luastack.h`), and the stack-index
+//! checks behind `m2_lua_ref` and `m2_lua_pcall` (`m2/m2_lua.h`).
 //!
 //! TValue is 8 bytes `{u32 value; u32 tt}`. Every dereference goes through [`Mem`], which the DLL backs
 //! with `VirtualQuery`, so a caller that is not a Lua C function reads as an invalid stack, not a fault.
@@ -36,6 +37,8 @@ pub const LUA_TTABLE: u32 = 5;
 pub const LUA_TFUNCTION: u32 = 6;
 /// A `lua_State`'s own type tag, at `+4` (`tt` of its GC header).
 pub const LUA_TTHREAD: u32 = 8;
+/// `LUA_REGISTRYINDEX`; the pseudo-indices are this and below (`cmp ebp, 0xFFFFD8F0` in `luaL_ref`).
+pub const LUA_REGISTRYINDEX: i32 = -10000;
 
 /// Process memory as the readers see it.
 pub trait Mem {
@@ -217,6 +220,60 @@ pub fn join_strings<M: Mem>(m: &M, l: u32, out: &mut [u8]) -> i32 {
     count
 }
 
+/// `L->top` and `L->base`, when both are readable, aligned and ordered.
+fn top_base<M: Mem>(m: &M, l: u32) -> Result<(u32, u32), String> {
+    if l < 0x10000 || l & 3 != 0 || !readable(m, l + OFF_TOP, 8) {
+        return Err(format!("lua_State {l:#x} is not readable"));
+    }
+    let (top, base) = (m.read_u32(l + OFF_TOP), m.read_u32(l + OFF_BASE));
+    if top < base || !(top - base).is_multiple_of(TVALUE_SIZE) {
+        return Err(format!("lua_State {l:#x} has top {top:#x} and base {base:#x}, not a frame"));
+    }
+    Ok((top, base))
+}
+
+/// The address of the stack slot that the Lua 5.1 stack index `idx` names, as `index2adr` resolves a
+/// real index: `idx > 0` counts from `L->base` (1 is the first value of the running function's frame),
+/// `idx < 0` from `L->top` (-1 is the top value). 0, a pseudo-index ([`LUA_REGISTRYINDEX`] and below)
+/// and an index outside `base..top` name no slot and are errors.
+pub fn stack_slot<M: Mem>(m: &M, l: u32, idx: i32) -> Result<u32, String> {
+    let (top, base) = top_base(m, l)?;
+    let depth = (top - base) / TVALUE_SIZE;
+    if idx > 0 {
+        let i = idx as u32 - 1;
+        if i >= depth {
+            return Err(format!("stack index {idx} is above the top of a frame of {depth} value(s)"));
+        }
+        Ok(base + i * TVALUE_SIZE)
+    } else if idx < 0 && idx > LUA_REGISTRYINDEX {
+        let back = idx.unsigned_abs();
+        if back > depth {
+            return Err(format!("stack index {idx} is below the base of a frame of {depth} value(s)"));
+        }
+        Ok(top - back * TVALUE_SIZE)
+    } else if idx == 0 {
+        Err("stack index 0 names no value".into())
+    } else {
+        Err(format!("pseudo-index {idx} is not a stack slot"))
+    }
+}
+
+/// How many values the running function's frame holds (`L->top - L->base`).
+pub fn frame_depth<M: Mem>(m: &M, l: u32) -> Result<u32, String> {
+    top_base(m, l).map(|(top, base)| (top - base) / TVALUE_SIZE)
+}
+
+/// Whether `n` more values fit on the stack without growing it: `lua_checkstack`'s test,
+/// `L->stack_last - L->top > n` slots.
+pub fn has_room<M: Mem>(m: &M, l: u32, n: u32) -> Result<bool, String> {
+    let (top, _) = top_base(m, l)?;
+    if !readable(m, l + OFF_STACK_LAST, 4) {
+        return Err(format!("lua_State {l:#x} is not readable"));
+    }
+    let last = m.read_u32(l + OFF_STACK_LAST);
+    Ok(last > top && (last - top) / TVALUE_SIZE > n)
+}
+
 #[cfg(test)]
 pub mod fake {
     use super::Mem;
@@ -358,6 +415,35 @@ mod tests {
         let mut m = state(&[(STRINGS, LUA_TSTRING)], false);
         m.map(STRINGS, tstring(b"x"));
         assert_eq!(nargs(&m, L), 1);
+    }
+
+    #[test]
+    fn a_stack_index_names_a_slot_of_the_frame_or_is_refused() {
+        let m = state(&[(1, LUA_TNUMBER), (2, LUA_TNUMBER), (3, LUA_TNUMBER)], true);
+        let base = STACK + TVALUE_SIZE;
+        assert_eq!(stack_slot(&m, L, 1), Ok(base), "1 is the first value of the frame");
+        assert_eq!(stack_slot(&m, L, 3), Ok(base + 2 * TVALUE_SIZE));
+        assert_eq!(stack_slot(&m, L, -1), Ok(base + 2 * TVALUE_SIZE), "-1 is the top value");
+        assert_eq!(stack_slot(&m, L, -3), Ok(base));
+        assert!(stack_slot(&m, L, 4).unwrap_err().contains("above the top"));
+        assert!(stack_slot(&m, L, -4).unwrap_err().contains("below the base"));
+        assert!(stack_slot(&m, L, 0).unwrap_err().contains("index 0"));
+        assert!(stack_slot(&m, L, LUA_REGISTRYINDEX).unwrap_err().contains("pseudo-index -10000"));
+        assert!(stack_slot(&m, L, -10002).unwrap_err().contains("pseudo-index"), "LUA_GLOBALSINDEX");
+        assert!(stack_slot(&m, L, -9999).unwrap_err().contains("below the base"), "the last real index");
+        assert!(stack_slot(&FakeMem::default(), L, 1).unwrap_err().contains("not readable"));
+        assert!(stack_slot(&m, L + 2, 1).unwrap_err().contains("not readable"), "a misaligned state");
+        assert_eq!(frame_depth(&m, L), Ok(3));
+        assert_eq!(frame_depth(&state(&[], true), L), Ok(0), "an empty frame is a frame");
+    }
+
+    #[test]
+    fn room_is_lua_checkstack_s_test() {
+        // stack_last is slot 64; three values from slot 1 leave top at slot 4: 60 slots to stack_last.
+        let m = state(&[(1, LUA_TNUMBER), (2, LUA_TNUMBER), (3, LUA_TNUMBER)], true);
+        assert_eq!(has_room(&m, L, 59), Ok(true));
+        assert_eq!(has_room(&m, L, 60), Ok(false), "lua_checkstack grows when stack_last - top <= n");
+        assert!(has_room(&FakeMem::default(), L, 1).is_err());
     }
 
     #[test]
