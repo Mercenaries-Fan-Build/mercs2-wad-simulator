@@ -14,6 +14,11 @@ pub const OFF_STACK: u32 = 0x20;
 pub const OFF_BASE_CI: u32 = 0x28;
 pub const CI_OFF_BASE: u32 = 0x00;
 pub const CI_OFF_FUNC: u32 = 0x04;
+/// `ci->top`, the highest slot the running function may fill: `lua_pcall` (pc-v10 0x0085DF50) raises
+/// `[[L+0x14]+8]` to `L->top` after a `LUA_MULTRET` call (`adjustresults`).
+pub const CI_OFF_TOP: u32 = 0x08;
+/// `LUA_MULTRET`: a call that keeps every result.
+pub const LUA_MULTRET: i32 = -1;
 
 pub const TVALUE_SIZE: u32 = 8;
 pub const TVALUE_TT: u32 = 4;
@@ -274,6 +279,49 @@ pub fn has_room<M: Mem>(m: &M, l: u32, n: u32) -> Result<bool, String> {
     Ok(last > top && (last - top) / TVALUE_SIZE > n)
 }
 
+/// The slot of the function a `lua_pcall(L, nargs, nresults)` would call, when the call is one Lua 5.1
+/// allows: `nargs >= 0`, the frame holds the function and its `nargs` arguments, and `nresults` is
+/// [`LUA_MULTRET`] or results that end at or below `ci->top` (Lua's `checkresults`, compiled out of the
+/// game). `luaD_poscall` (pc-v10 0x00868850) writes `ci->nresults` values from the function's slot up and
+/// fills with nil past the results it got, so a larger `nresults` writes past the stack. `ci->top` is
+/// also the slot the garbage collector keeps when it shrinks the stack during the call; `L->stack_last`
+/// is checked too. `LUA_MULTRET` is allowed: its results are the callee's own, copied down.
+pub fn pcall_callee<M: Mem>(m: &M, l: u32, nargs: i32, nresults: i32) -> Result<u32, String> {
+    if nargs < 0 {
+        return Err(format!("nargs {nargs} is negative"));
+    }
+    if nresults < LUA_MULTRET {
+        return Err(format!("nresults {nresults} is below LUA_MULTRET (-1)"));
+    }
+    let (top, base) = top_base(m, l)?;
+    let depth = (top - base) / TVALUE_SIZE;
+    if depth < nargs as u32 + 1 {
+        return Err(format!("the frame holds {depth} value(s), fewer than the function and its {nargs} argument(s)"));
+    }
+    let callee = top - (nargs as u32 + 1) * TVALUE_SIZE;
+    if nresults == LUA_MULTRET {
+        return Ok(callee);
+    }
+    if !readable(m, l + OFF_CI, 4) || !readable(m, l + OFF_STACK_LAST, 4) {
+        return Err(format!("lua_State {l:#x} is not readable"));
+    }
+    let ci = m.read_u32(l + OFF_CI);
+    if !readable(m, ci + CI_OFF_TOP, 4) {
+        return Err(format!("lua_State {l:#x} has an unreadable CallInfo {ci:#x}"));
+    }
+    let end = u64::from(callee) + u64::from(nresults as u32) * u64::from(TVALUE_SIZE);
+    let (ci_top, last) = (m.read_u32(ci + CI_OFF_TOP), m.read_u32(l + OFF_STACK_LAST));
+    let limit = ci_top.min(last);
+    if end > u64::from(limit) {
+        let room = limit.saturating_sub(callee) / TVALUE_SIZE;
+        return Err(format!(
+            "nresults {nresults} does not fit: the results start at the function's slot and {room} slot(s) are left \
+             below ci->top {ci_top:#x} / stack_last {last:#x}"
+        ));
+    }
+    Ok(callee)
+}
+
 #[cfg(test)]
 pub mod fake {
     use super::Mem;
@@ -334,7 +382,7 @@ mod tests {
         let base = STACK + TVALUE_SIZE;
         let top = base + args.len() as u32 * TVALUE_SIZE;
         let ci = L + 0x40;
-        let mut l = vec![0u8; 0x48];
+        let mut l = vec![0u8; 0x58];
         let mut put = |o: u32, v: u32| l[o as usize..o as usize + 4].copy_from_slice(&v.to_le_bytes());
         put(OFF_TOP, top);
         put(OFF_BASE, if base_ok { base } else { 0 });
@@ -343,6 +391,8 @@ mod tests {
         put(OFF_STACK, STACK);
         put(0x40 + CI_OFF_BASE, base);
         put(0x40 + CI_OFF_FUNC, STACK);
+        // A C function's ci->top: LUA_MINSTACK (20) slots above its base.
+        put(0x40 + CI_OFF_TOP, base + 20 * TVALUE_SIZE);
         m.map(L, l);
         let mut s = vec![0u8; 65 * TVALUE_SIZE as usize];
         for (i, (v, tt)) in args.iter().enumerate() {
@@ -444,6 +494,43 @@ mod tests {
         assert_eq!(has_room(&m, L, 59), Ok(true));
         assert_eq!(has_room(&m, L, 60), Ok(false), "lua_checkstack grows when stack_last - top <= n");
         assert!(has_room(&FakeMem::default(), L, 1).is_err());
+    }
+
+    /// The ASan reproduction of the review: a C function's frame with LUA_MINSTACK room, `lua_pcall` with
+    /// nresults 10 returned, nresults 1000 wrote past the stack in `luaD_poscall`.
+    #[test]
+    fn pcall_results_must_end_at_or_below_ci_top() {
+        let m = state(&[(0, LUA_TFUNCTION)], true);
+        let callee = STACK + TVALUE_SIZE;
+        assert_eq!(pcall_callee(&m, L, 0, 10), Ok(callee));
+        assert_eq!(pcall_callee(&m, L, 0, 20), Ok(callee), "20 results end exactly at ci->top");
+        assert!(pcall_callee(&m, L, 0, 21).unwrap_err().contains("20 slot(s) are left"));
+        assert!(pcall_callee(&m, L, 0, 1000).unwrap_err().contains("nresults 1000 does not fit"));
+        assert!(pcall_callee(&m, L, 0, i32::MAX).unwrap_err().contains("does not fit"));
+        assert_eq!(pcall_callee(&m, L, 0, LUA_MULTRET), Ok(callee), "LUA_MULTRET keeps the callee's own results");
+        assert!(pcall_callee(&m, L, 0, -2).unwrap_err().contains("below LUA_MULTRET"));
+        assert!(pcall_callee(&m, L, -1, 0).unwrap_err().contains("negative"));
+        assert!(pcall_callee(&m, L, 1, 0).unwrap_err().contains("fewer than the function and its 1 argument"));
+        let with_args = state(&[(0, LUA_TFUNCTION), (1, LUA_TNUMBER), (2, LUA_TNUMBER)], true);
+        assert_eq!(pcall_callee(&with_args, L, 2, 0), Ok(callee), "the function sits below its arguments");
+        assert!(pcall_callee(&FakeMem::default(), L, 0, 0).is_err());
+    }
+
+    #[test]
+    fn pcall_results_must_also_end_at_or_below_stack_last() {
+        // ci->top (slot 100) above stack_last (slot 64): stack_last bounds the results.
+        let mut m = state(&[(0, LUA_TFUNCTION)], true);
+        let mut l = vec![0u8; 0x58];
+        let mut put = |o: u32, v: u32| l[o as usize..o as usize + 4].copy_from_slice(&v.to_le_bytes());
+        put(OFF_TOP, STACK + 2 * TVALUE_SIZE);
+        put(OFF_BASE, STACK + TVALUE_SIZE);
+        put(OFF_CI, L + 0x40);
+        put(OFF_STACK_LAST, STACK + 64 * TVALUE_SIZE);
+        put(OFF_STACK, STACK);
+        put(0x40 + CI_OFF_TOP, STACK + 100 * TVALUE_SIZE);
+        m.map(L, l);
+        assert_eq!(pcall_callee(&m, L, 0, 63), Ok(STACK + TVALUE_SIZE));
+        assert!(pcall_callee(&m, L, 0, 64).unwrap_err().contains("63 slot(s) are left"));
     }
 
     #[test]
