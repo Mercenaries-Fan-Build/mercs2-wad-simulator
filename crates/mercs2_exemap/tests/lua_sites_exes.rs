@@ -1,4 +1,4 @@
-//! The Lua host's sites, the shader sites, the profiler sites and pmc_bb's sites resolve exactly once, at the addresses read from the
+//! The Lua host's sites, the function-reference sites, the shader sites, the profiler sites and pmc_bb's sites resolve exactly once, at the addresses read from the
 //! disassembly, in the reference executables: the v1.0-code builds `v10-securom-unwrap`,
 //! `v10-drmfree-laa` and `dump-v10-pmcbb-unpacked` (one layout) and the v1.1 dump
 //! `dump-v11-securom-unpacked` (code at other addresses).
@@ -78,6 +78,23 @@ fn debug_sites_resolve_in_every_reference_build() {
         let s = resolve_debug(&Image::from_file(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap_or_else(|e| panic!("{id}: {e}"));
         let want = if v11 { DebugSites { undump: 0x8713f0, poscall: 0x868a70 } } else { DebugSites { undump: 0x8711d0, poscall: 0x868850 } };
         assert_eq!(s, want, "{id} debug sites");
+    }
+}
+
+/// The function-reference sites: `luaL_ref`, `luaL_unref`, `lua_rawgeti` and `lua_pcall`, read with objdump
+/// in the v1.0 dump and found with the same bytes 0x220 later in the v1.1 dump.
+#[test]
+fn ref_sites_resolve_in_every_reference_build() {
+    use mercs2_formats::lua_sites::{resolve_refs, RefSites};
+    for (id, v11, bytes) in images() {
+        let s = resolve_refs(&Image::from_file(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap_or_else(|e| panic!("{id}: {e}"));
+        let want = if v11 {
+            RefSites { lual_ref: 0x85ff70, lual_unref: 0x860050, lua_rawgeti: 0x85ddd0, lua_pcall: 0x85e170 }
+        } else {
+            RefSites { lual_ref: 0x85fd50, lual_unref: 0x85fe30, lua_rawgeti: 0x85dbb0, lua_pcall: 0x85df50 }
+        };
+        assert_eq!(s, want, "{id} ref sites");
+        println!("{id}: luaL_ref {:#x}, luaL_unref {:#x}, lua_rawgeti {:#x}, lua_pcall {:#x}", s.lual_ref, s.lual_unref, s.lua_rawgeti, s.lua_pcall);
     }
 }
 
