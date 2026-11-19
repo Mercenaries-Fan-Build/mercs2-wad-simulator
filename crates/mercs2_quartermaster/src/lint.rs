@@ -272,8 +272,9 @@ pub const M0315_PCALL_IMPORT: Rule = Rule {
 };
 
 /// A `fetch_package` the build could not use, or a `from:` that cannot resolve: an `id` that is not a
-/// lowercase `[a-z0-9_]` token or is repeated, a `url` that is not `http(s)://`, a `sha256` that is not
-/// 64 lowercase hex digits, a zero `size`, a package no `from:` names, a `from:` naming no
+/// lowercase `[a-z0-9_]` token or is repeated, a `url` that is not an `http(s)://` URL with a host, a
+/// `sha256` that is not 64 lowercase hex digits, a zero `size` ([`crate::package::row_problems`], which
+/// the build checks too), a package no `from:` names, a `from:` naming no
 /// `fetch_package`, a `level_asset` with both or neither of `rungs` and `from`, and an `add_level` with
 /// `from:` that also lists `streams` or has hand-written `level_asset` rows. Checked without the network
 /// ([`crate::package`]).
@@ -3030,20 +3031,11 @@ pub fn lint(
                 let mut package = |message: String| {
                     out.push(Diagnostic { rule: M0316_FETCH_PACKAGE, severity: Severity::Error, message, at: Some(index), fix: None })
                 };
-                if id.is_empty() || !id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
-                    package(format!("fetch_package id {id:?}: not a lowercase [a-z0-9_] token"));
+                for problem in crate::package::row_problems(id, url, sha256, *size) {
+                    package(problem);
                 }
                 if fetch_package_ids(manifest).iter().filter(|other| **other == id.as_str()).count() > 1 {
                     package(format!("fetch_package id {id:?}: more than one fetch_package has it"));
-                }
-                if !(url.starts_with("http://") || url.starts_with("https://")) {
-                    package(format!("fetch_package {id}: url {url:?} is not http:// or https://"));
-                }
-                if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-                    package(format!("fetch_package {id}: sha256 {sha256:?} is not 64 lowercase hex digits"));
-                }
-                if *size == 0 {
-                    package(format!("fetch_package {id}: size is 0"));
                 }
                 let named = manifest.contributions.iter().any(|c| {
                     matches!(c, Contribution::AddLevel { from: Some(f), .. } | Contribution::LevelAsset { from: Some(f), .. } if f == id)
