@@ -13,7 +13,7 @@
 //!   the function it is called from, and restores that frame.
 //! * [`m2_lua_ref`], [`m2_lua_unref`], [`m2_lua_push_ref`] and [`m2_lua_pcall`] keep a Lua value in the
 //!   registry and call it later, through the game's `luaL_ref`, `luaL_unref`, `lua_rawgeti` and `lua_pcall`
-//!   (`mercs2_formats::lua_sites::RefSites`).
+//!   (`mercs2_formats::lua_sites::RefSites`); [`m2_lua_pop`] removes values a caller pushed.
 //!
 //! Every detoured function is a cdecl `lua_CFunction` except the walker (`__stdcall (host)`).
 
@@ -1003,6 +1003,29 @@ pub extern "C" fn m2_lua_pcall(l: *mut c_void, nargs: c_int, nresults: c_int) ->
         Err(e) => {
             fail_unflushed(format!("m2_lua_pcall: {e}"));
             PCALL_REFUSED
+        }
+    }
+}
+
+fn lua_pop(l: u32, n: c_int) -> Result<(), String> {
+    on_owner_thread(l)?;
+    let top = lua_stack::pop_top(&luastack::Process, l, n)?;
+    write_u32(l + OFF_TOP, top);
+    Ok(())
+}
+
+/// `lua_pop(L, n)`: remove the top `n` values, as Lua 5.1's `lua_settop(L, -n-1)` does, by lowering
+/// `L->top` (`lua_stack::pop_top`). 1 when removed; 0 when refused (n < 0, more than the values of the
+/// running function's frame, an unusable state, a call off the state's thread), with nothing removed,
+/// logged and kept for [`m2_lua_last_error`]. The way to take back what a refused [`m2_lua_push_ref`] or
+/// [`m2_lua_pcall`] left on the stack.
+#[unsafe(no_mangle)]
+pub extern "C" fn m2_lua_pop(l: *mut c_void, n: c_int) -> c_int {
+    match lua_pop(l as u32, n) {
+        Ok(()) => 1,
+        Err(e) => {
+            fail_unflushed(format!("m2_lua_pop: {e}"));
+            0
         }
     }
 }
