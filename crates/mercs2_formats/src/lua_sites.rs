@@ -345,6 +345,141 @@ pub fn resolve_debug(img: &Image) -> Result<DebugSites, String> {
     Ok(DebugSites { undump: one("luaU_undump", UNDUMP)?, poscall: one("luaD_poscall", POSCALL)? })
 }
 
+/// The Lua C API functions behind m2-sdk.dll's function references (`m2_lua_ref`, `m2_lua_unref`,
+/// `m2_lua_push_ref`, `m2_lua_pcall`), resolved apart from [`LuaSites`] like [`DebugSites`]. Every one is a
+/// whole-function signature over the pc-v10 bytes, found 0x220 later in the v1.1 dump. Their register
+/// arguments are MSVC's link-time-generated conventions, read from the disassembly:
+///
+/// | site | VA (unpacked) | what it is |
+/// |---|---|---|
+/// | `luaL_ref` | `0x0085FD50` | `luaL_ref(L, t)`: `L` in `EAX`, `t` pushed, caller pops; returns the ref in `EAX` (`-1`, `LUA_REFNIL`, for a nil, which it pops) |
+/// | `luaL_unref` | `0x0085FE30` | `luaL_unref(L, LUA_REGISTRYINDEX, ref)` with the registry folded in (`mov ecx, 0xFFFFD8F0` before each call): `L` in `EDI`, `ref` pushed, caller pops; a `ref < 0` returns at once |
+/// | `lua_rawgeti` | `0x0085DBB0` | `lua_rawgeti(L, idx, n)`: `L` in `EDI`, `idx` in `ECX`, `n` pushed, caller pops |
+/// | `lua_pcall` | `0x0085DF50` | `lua_pcall(L, nargs, nresults, errfunc)`: `L` in `EAX`, `errfunc` in `ECX`, `nresults` in `EDI`, `nargs` pushed, caller pops; returns the status in `EAX` |
+///
+/// They belong together by their calls: all four call one `index2adr`, `luaL_ref`, `luaL_unref` and
+/// `lua_rawgeti` one `luaH_getnum`, and `luaL_ref` and `luaL_unref` one `lua_rawseti`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RefSites {
+    /// `luaL_ref`.
+    pub lual_ref: u32,
+    /// `luaL_unref`.
+    pub lual_unref: u32,
+    pub lua_rawgeti: u32,
+    pub lua_pcall: u32,
+}
+
+/// `luaL_ref`, entry to the final `ret`: abs_index; a nil at the top is popped and gives -1; `ref =
+/// t[0]` (the free list), then `t[0] = t[ref]`, or `ref = #t + 1`; `t[ref] = value`. `??` are the
+/// `call` targets and `luaO_nilobject`.
+const LUAL_REF: &str = "53 55 8b 6c 24 0c 81 fd f0 d8 ff ff 56 57 8b f8 7e 0d 8b 47 08 2b 47 0c c1 f8 03 8d 6c 28 01 \
+                        8b 47 08 83 c0 f8 3d ?? ?? ?? ?? 74 11 83 78 04 00 75 0b 89 47 08 83 c8 ff 5f 5e 5d 5b c3 \
+                        8b cd 8b d7 e8 ?? ?? ?? ?? 8b c8 8b 31 33 c0 e8 ?? ?? ?? ?? 8b 10 8b 4f 08 89 11 8b 40 04 \
+                        89 41 04 83 47 08 08 83 c9 ff 8b d7 e8 ?? ?? ?? ?? 83 47 08 f8 8b d8 85 db 8b cd 74 43 8b d7 \
+                        e8 ?? ?? ?? ?? 8b c8 8b 31 8b c3 e8 ?? ?? ?? ?? 8b 4f 08 8b 10 89 11 8b 40 04 89 41 04 83 47 \
+                        08 08 6a 00 8b cd 8b f7 e8 ?? ?? ?? ?? 83 c4 04 53 8b cd e8 ?? ?? ?? ?? 83 c4 04 8b c3 5f 5e \
+                        5d 5b c3 e8 ?? ?? ?? ?? 8b d8 83 c3 01 53 8b cd 8b f7 e8 ?? ?? ?? ?? 83 c4 04 5f 5e 5d 8b c3 \
+                        5b c3";
+/// `luaL_ref`'s calls: `index2adr` (twice), `luaH_getnum` (twice), `lua_rawseti` (three times).
+const LUAL_REF_INDEX2ADR: [usize; 2] = [0x41, 0x7a];
+const LUAL_REF_GETNUM: [usize; 2] = [0x4c, 0x85];
+const LUAL_REF_RAWSETI: [usize; 3] = [0xa1, 0xac, 0xca];
+/// `luaL_unref`, entry to `ret`: `if (ref >= 0) { t[ref] = t[0]; t[0] = ref; }` over the registry.
+const LUAL_UNREF: &str = "53 8b 5c 24 08 85 db 7c 5c 56 b9 f0 d8 ff ff 8b d7 e8 ?? ?? ?? ?? 8b c8 8b 31 33 c0 e8 ?? ?? ?? \
+                          ?? 8b 4f 08 8b 10 89 11 8b 40 04 89 41 04 83 47 08 08 53 b9 f0 d8 ff ff 8b f7 e8 ?? ?? ?? ?? \
+                          8b 47 08 f3 0f 2a c3 f3 0f 11 00 c7 40 04 03 00 00 00 83 47 08 08 6a 00 b9 f0 d8 ff ff e8 ?? \
+                          ?? ?? ?? 83 c4 08 5e 5b c3";
+const LUAL_UNREF_INDEX2ADR: usize = 0x11;
+const LUAL_UNREF_GETNUM: usize = 0x1c;
+const LUAL_UNREF_RAWSETI: [usize; 2] = [0x3a, 0x5c];
+/// `lua_rawgeti`, entry to `ret`: `setobj(L->top, luaH_getnum(hvalue(index2adr(L, idx)), n)); L->top++`.
+const LUA_RAWGETI: &str = "56 8b d7 e8 ?? ?? ?? ?? 8b c8 8b 44 24 08 8b 31 e8 ?? ?? ?? ?? 8b 10 8b 4f 08 89 11 8b 40 04 89 \
+                           41 04 83 47 08 08 5e c3";
+const LUA_RAWGETI_INDEX2ADR: usize = 0x03;
+const LUA_RAWGETI_GETNUM: usize = 0x10;
+/// `lua_pcall`, entry to `ret`: errfunc through `index2adr`, `c.func = L->top - (nargs + 1)`, `c.nresults =
+/// EDI`, `luaD_pcall(L, f_call, &c, savestack(c.func), errfunc)`, then `adjustresults`. `??` are the
+/// `call` targets and `f_call`'s address.
+const LUA_PCALL: &str = "55 8b ec 83 e4 f8 83 ec 0c 85 c9 56 8b f0 75 04 33 d2 eb 0c 8b d6 e8 ?? ?? ?? ?? 2b 46 20 8b d0 \
+                         8b 45 08 8d 0c c5 08 00 00 00 8b 46 08 2b c1 89 44 24 08 2b 46 20 89 7c 24 0c 50 8d 44 24 0c 50 \
+                         68 ?? ?? ?? ?? 8b c6 e8 ?? ?? ?? ?? 83 c4 0c 83 ff ff 75 0e 8b 4e 14 8b 76 08 3b 71 08 72 03 89 \
+                         71 08 5e 8b e5 5d c3";
+const LUA_PCALL_INDEX2ADR: usize = 0x16;
+/// `push f_call`'s operand.
+const LUA_PCALL_F_CALL: usize = 0x40;
+
+/// Resolve the function-reference sites: each pattern must match exactly once in `.text`, and their calls
+/// must agree.
+pub fn resolve_refs(img: &Image) -> Result<RefSites, String> {
+    let text = img.section(".text").ok_or("the image has no .text section")?;
+    let one = |name: &str, pattern: &str| -> Result<u32, String> {
+        let hits = Pattern::parse(pattern).expect("built-in pattern parses").find_all(text.bytes);
+        match hits[..] {
+            [at] => Ok(text.va + at as u32),
+            _ => Err(format!("{name} matched {} time(s), not once", hits.len())),
+        }
+    };
+    let (lref, unref, rawgeti, pcall) =
+        (one("luaL_ref", LUAL_REF), one("luaL_unref", LUAL_UNREF), one("lua_rawgeti", LUA_RAWGETI), one("lua_pcall", LUA_PCALL));
+    let failed: Vec<String> = [&lref, &unref, &rawgeti, &pcall].iter().filter_map(|r| r.as_ref().err().cloned()).collect();
+    if !failed.is_empty() {
+        return Err(format!("the function-reference sites did not resolve: {}", failed.join(", ")));
+    }
+    let s = RefSites { lual_ref: lref?, lual_unref: unref?, lua_rawgeti: rawgeti?, lua_pcall: pcall? };
+
+    // The target of the `call rel32` at `off` into the function at `f`.
+    let target = |f: u32, off: usize| {
+        let at = (f - text.va) as usize + off;
+        f.wrapping_add(off as u32 + 5).wrapping_add(u32_at(text.bytes, at + 1))
+    };
+    let agree = |what: &str, calls: &[(&str, u32, usize)]| -> Result<u32, String> {
+        let targets: Vec<(&str, u32)> = calls.iter().map(|&(name, f, off)| (name, target(f, off))).collect();
+        let first = targets[0].1;
+        if targets.iter().any(|&(_, t)| t != first) {
+            let listed: Vec<String> = targets.iter().map(|(n, t)| format!("{n} -> {t:#x}")).collect();
+            return Err(format!("the function-reference sites call different {what}: {}", listed.join(", ")));
+        }
+        if !text.contains(first) {
+            return Err(format!("the function-reference sites call {what} at {first:#x}, outside .text"));
+        }
+        Ok(first)
+    };
+    agree(
+        "index2adr",
+        &[
+            ("luaL_ref", s.lual_ref, LUAL_REF_INDEX2ADR[0]),
+            ("luaL_ref", s.lual_ref, LUAL_REF_INDEX2ADR[1]),
+            ("luaL_unref", s.lual_unref, LUAL_UNREF_INDEX2ADR),
+            ("lua_rawgeti", s.lua_rawgeti, LUA_RAWGETI_INDEX2ADR),
+            ("lua_pcall", s.lua_pcall, LUA_PCALL_INDEX2ADR),
+        ],
+    )?;
+    agree(
+        "luaH_getnum",
+        &[
+            ("luaL_ref", s.lual_ref, LUAL_REF_GETNUM[0]),
+            ("luaL_ref", s.lual_ref, LUAL_REF_GETNUM[1]),
+            ("luaL_unref", s.lual_unref, LUAL_UNREF_GETNUM),
+            ("lua_rawgeti", s.lua_rawgeti, LUA_RAWGETI_GETNUM),
+        ],
+    )?;
+    agree(
+        "lua_rawseti",
+        &[
+            ("luaL_ref", s.lual_ref, LUAL_REF_RAWSETI[0]),
+            ("luaL_ref", s.lual_ref, LUAL_REF_RAWSETI[1]),
+            ("luaL_ref", s.lual_ref, LUAL_REF_RAWSETI[2]),
+            ("luaL_unref", s.lual_unref, LUAL_UNREF_RAWSETI[0]),
+            ("luaL_unref", s.lual_unref, LUAL_UNREF_RAWSETI[1]),
+        ],
+    )?;
+    let f_call = u32_at(text.bytes, (s.lua_pcall - text.va) as usize + LUA_PCALL_F_CALL + 1);
+    if !text.contains(f_call) {
+        return Err(format!("lua_pcall at {:#x} passes f_call {f_call:#x}, outside .text", s.lua_pcall));
+    }
+    Ok(s)
+}
+
 /// Resolve every site in `img` and check that they belong together.
 pub fn resolve(img: &Image) -> Result<LuaSites, LuaSitesError> {
     let text = img.section(".text").ok_or(LuaSitesError::NoSection(".text"))?;
@@ -476,6 +611,111 @@ mod tests {
         assert_eq!(reg_rows(rdata, text, b"type"), vec![(0x402010, 0x401004)]);
         assert_eq!(reg_rows(rdata, text, b"typeX"), vec![(0x402018, 0x401008)]);
         assert!(reg_rows(rdata, text, b"pcall").is_empty());
+    }
+
+    /// A pattern's bytes with every `??` zero.
+    fn body(pattern: &str) -> Vec<u8> {
+        pattern.split_whitespace().map(|t| if t == "??" { 0 } else { u8::from_str_radix(t, 16).unwrap() }).collect()
+    }
+
+    #[test]
+    fn the_ref_patterns_have_their_calls_where_the_checks_read_them() {
+        let tok = |p: &str| -> Vec<String> { p.split_whitespace().map(str::to_owned).collect() };
+        let calls = |p: &str, offs: &[usize]| {
+            let t = tok(p);
+            for &o in offs {
+                assert_eq!(t[o], "e8", "offset {o:#x}");
+                assert!(t[o + 1..o + 5].iter().all(|b| b == "??"), "offset {o:#x}: the target is a wildcard");
+            }
+        };
+        calls(LUAL_REF, &[LUAL_REF_INDEX2ADR[0], LUAL_REF_INDEX2ADR[1], LUAL_REF_GETNUM[0], LUAL_REF_GETNUM[1]]);
+        calls(LUAL_REF, &LUAL_REF_RAWSETI);
+        calls(LUAL_UNREF, &[LUAL_UNREF_INDEX2ADR, LUAL_UNREF_GETNUM, LUAL_UNREF_RAWSETI[0], LUAL_UNREF_RAWSETI[1]]);
+        calls(LUA_RAWGETI, &[LUA_RAWGETI_INDEX2ADR, LUA_RAWGETI_GETNUM]);
+        calls(LUA_PCALL, &[LUA_PCALL_INDEX2ADR]);
+        assert_eq!(tok(LUA_PCALL)[LUA_PCALL_F_CALL], "68");
+        // Whole functions, entry to the last `ret` (pc-v10 0x85FD50..0x85FE29, 0x85FE30..0x85FE97,
+        // 0x85DBB0..0x85DBD8, 0x85DF50..0x85DFB7).
+        for (p, len) in [(LUAL_REF, 0xd9), (LUAL_UNREF, 0x67), (LUA_RAWGETI, 0x28), (LUA_PCALL, 0x67)] {
+            let b = body(p);
+            assert_eq!((b.len(), b[b.len() - 1]), (len, 0xc3));
+            Pattern::parse(p).unwrap();
+        }
+    }
+
+    /// `.text` at 0x401000 holding the four functions, their calls aimed at `index2adr`, `luaH_getnum`,
+    /// `lua_rawseti` and `f_call`, each a `ret` in the same section; `rawgeti_index2adr` overrides the
+    /// one call of `lua_rawgeti` to `index2adr`.
+    fn ref_image(rawgeti_index2adr: Option<u32>) -> (Vec<u8>, RefSites) {
+        const TEXT: u32 = 0x401000;
+        let (index2adr, getnum, rawseti, f_call) = (TEXT, TEXT + 1, TEXT + 2, TEXT + 3);
+        let mut text = vec![0xc3, 0xc3, 0xc3, 0xc3];
+        let mut place = |pattern: &str, calls: &[(usize, u32)], push: Option<(usize, u32)>| {
+            text.resize(text.len().next_multiple_of(16), 0xcc);
+            let at = TEXT + text.len() as u32;
+            let mut b = body(pattern);
+            for &(off, to) in calls {
+                let rel = to.wrapping_sub(at + off as u32 + 5);
+                b[off + 1..off + 5].copy_from_slice(&rel.to_le_bytes());
+            }
+            if let Some((off, v)) = push {
+                b[off + 1..off + 5].copy_from_slice(&v.to_le_bytes());
+            }
+            text.extend(b);
+            at
+        };
+        let lual_ref = place(
+            LUAL_REF,
+            &[
+                (LUAL_REF_INDEX2ADR[0], index2adr),
+                (LUAL_REF_INDEX2ADR[1], index2adr),
+                (LUAL_REF_GETNUM[0], getnum),
+                (LUAL_REF_GETNUM[1], getnum),
+                (LUAL_REF_RAWSETI[0], rawseti),
+                (LUAL_REF_RAWSETI[1], rawseti),
+                (LUAL_REF_RAWSETI[2], rawseti),
+            ],
+            None,
+        );
+        let lual_unref = place(
+            LUAL_UNREF,
+            &[
+                (LUAL_UNREF_INDEX2ADR, index2adr),
+                (LUAL_UNREF_GETNUM, getnum),
+                (LUAL_UNREF_RAWSETI[0], rawseti),
+                (LUAL_UNREF_RAWSETI[1], rawseti),
+            ],
+            None,
+        );
+        let lua_rawgeti = place(
+            LUA_RAWGETI,
+            &[(LUA_RAWGETI_INDEX2ADR, rawgeti_index2adr.unwrap_or(index2adr)), (LUA_RAWGETI_GETNUM, getnum)],
+            None,
+        );
+        let lua_pcall = place(LUA_PCALL, &[(LUA_PCALL_INDEX2ADR, index2adr)], Some((LUA_PCALL_F_CALL, f_call)));
+        (synth::pe(0x400000, &[(".text", 0x1000, text)]), RefSites { lual_ref, lual_unref, lua_rawgeti, lua_pcall })
+    }
+
+    #[test]
+    fn the_ref_sites_resolve_when_their_calls_agree() {
+        let (file, want) = ref_image(None);
+        assert_eq!(resolve_refs(&Image::from_file(&file).unwrap()), Ok(want));
+    }
+
+    #[test]
+    fn a_ref_site_calling_another_index2adr_is_refused() {
+        let (file, _) = ref_image(Some(0x401002));
+        let e = resolve_refs(&Image::from_file(&file).unwrap()).unwrap_err();
+        assert!(e.contains("call different index2adr") && e.contains("lua_rawgeti -> 0x401002"), "{e}");
+    }
+
+    #[test]
+    fn an_image_without_the_ref_code_names_every_count() {
+        let file = synth::pe(0x400000, &[(".text", 0x1000, vec![0xcc; 64])]);
+        let e = resolve_refs(&Image::from_file(&file).unwrap()).unwrap_err();
+        for name in ["luaL_ref", "luaL_unref", "lua_rawgeti", "lua_pcall"] {
+            assert!(e.contains(&format!("{name} matched 0 time(s), not once")), "{e}");
+        }
     }
 
     #[test]
