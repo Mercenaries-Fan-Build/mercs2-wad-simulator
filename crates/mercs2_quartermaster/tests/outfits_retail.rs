@@ -45,8 +45,10 @@ fn dlc01() -> RetailLevel {
     let pkg = mercs2_formats::game_paths::local_config_ps3_dlc_biua_pkg(start()).unwrap_or_else(|e| panic!("{e}"));
     let overrides = mercs2_quartermaster::package::Overrides::from([("biua_ps3".to_string(), pkg)]);
     let cache = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("qm-package-cache");
-    let s = mercs2_quartermaster::package::materialize(&opened, &vz_wad(), &cache, &overrides, &mut Vec::new())
+    let vz_sha256 = mercs2_quartermaster::package::file_sha256(&vz_wad()).unwrap_or_else(|e| panic!("{e}"));
+    let staged = mercs2_quartermaster::package::materialize(&opened, &vz_wad(), &vz_sha256, &cache, &overrides, &mut Vec::new())
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    let s = &staged.shipment;
     let assets = mercs2_quartermaster::level::assets_of(&s.manifest, "dlc01");
     let chunk = |name: &str| {
         let a = assets
