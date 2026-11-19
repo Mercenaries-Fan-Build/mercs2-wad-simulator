@@ -1399,6 +1399,12 @@ pub enum Contribution {
         /// `src/`-relative `.pws` files, one per streamed wavebank of the level, named for its entry.
         #[serde(default)]
         streams: Vec<PathBuf>,
+        /// The `fetch_package` whose conversion is the whole level: every asset it carries becomes a
+        /// `level_asset` row of this level and its streams the level's streams, at build
+        /// ([`crate::package::materialize`]). With it, `streams` is empty and no `level_asset` row of this
+        /// level is written by hand (M0316).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
     },
     /// Data. One asset of an `add_level` of this Shipment, or of the main campaign (`level: vz`), in the
     /// PC container form of its type: every byte the asset has, so any type the engine loads can be
@@ -1414,7 +1420,13 @@ pub enum Contribution {
         asset_type: String,
         /// The asset name, or a bare `0xHHHHHHHH` hash.
         name: String,
+        /// Its rungs, coarsest first. Empty exactly when `from` is set.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         rungs: Vec<LevelRung>,
+        /// The `fetch_package` whose conversion holds this asset: its rungs are that asset's rungs in the
+        /// conversion, at build ([`crate::package::materialize`]). Without it, `rungs` lists them (M0316).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
         /// `level: vz` and `type: world_entity_data` only, and required there: the templates of the
         /// container to append to the game's worldentity, each under the key it has in the container.
         /// The container itself is never shipped.
@@ -1424,6 +1436,23 @@ pub enum Contribution {
         /// template name, then class, then field (`crate::template::TemplateForm::edit`).
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         edits: std::collections::BTreeMap<String, crate::template::FieldEdits>,
+    },
+    /// Data. A package the player's machine downloads and converts at build, never shipped in the
+    /// Shipment: `from:` on an `add_level` or a `level_asset` names it by `id`
+    /// ([`crate::package::materialize`]). The file is kept in qm's cache under its sha256 and checked
+    /// against `size` and `sha256` on every build; a mismatch fails the build. `qm lint` checks the
+    /// fields and never touches the network (M0316).
+    FetchPackage {
+        /// What `from:` names: a lowercase `[a-z0-9_]` token, unique in the Shipment.
+        id: String,
+        /// The converter that reads it ([`crate::package::PackageFormat`]).
+        format: crate::package::PackageFormat,
+        /// Where it is downloaded from: `http://` or `https://`.
+        url: String,
+        /// The file's sha256, 64 lowercase hex digits.
+        sha256: String,
+        /// The file's size in bytes.
+        size: u64,
     },
     /// Code. Retail: a prebuilt ASI placed in `pmc_bb.dll`'s search path. To DEPEND on someone
     /// else's ASI, require the Shipment that ships it in `load.requires` — never vendor a
@@ -1592,6 +1621,7 @@ impl Contribution {
         "add_language",
         "add_level",
         "level_asset",
+        "fetch_package",
         "native_hook",
         "place_file",
         "add_runtime_dll",
@@ -1655,6 +1685,7 @@ impl Contribution {
             Contribution::AddLanguage { .. } => "add_language",
             Contribution::AddLevel { .. } => "add_level",
             Contribution::LevelAsset { .. } => "level_asset",
+            Contribution::FetchPackage { .. } => "fetch_package",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",
             Contribution::AddRuntimeDll { .. } => "add_runtime_dll",
