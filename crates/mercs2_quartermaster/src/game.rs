@@ -335,6 +335,28 @@ pub struct ModelEditInputs {
     pub source_block_index: u32,
 }
 
+/// The ASET rows of `archive` that name block `b` as their `_P000`.
+fn rows_of(archive: &FfcsArchive, b: usize) -> Vec<&mercs2_formats::ffcs::AsetEntry> {
+    archive.aset.iter().filter(|e| e.block_index() as usize == b).collect()
+}
+
+/// The rung closure of block `idx` of `archive` (`path` names the WAD in errors): the blocks its
+/// rows name as `_P001`..`_P003` rungs, and the blocks THEIR rows name, without `idx` itself.
+fn rung_closure(archive: &FfcsArchive, idx: usize, path: &str) -> Result<std::collections::BTreeSet<usize>, String> {
+    let mut todo: Vec<usize> = rows_of(archive, idx).iter().flat_map(|e| e.lod_chain()[1..].to_vec()).map(usize::from).collect();
+    let mut carried: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    while let Some(b) = todo.pop() {
+        if b == idx || !carried.insert(b) {
+            continue;
+        }
+        if b >= archive.indx.len() {
+            return Err(format!("{path}: a row names block {b}, past its {} blocks", archive.indx.len()));
+        }
+        todo.extend(rows_of(archive, b).iter().flat_map(|e| e.lod_chain()[1..].to_vec()).map(usize::from));
+    }
+    Ok(carried)
+}
+
 /// A block to re-emit whole, with what keeps its rows' LOD chains ([`GameStack::block_for_reemit`]).
 pub struct ReemitBlock {
     /// The decompressed block.
@@ -645,11 +667,29 @@ impl GameStack {
     /// sentinelling them. `None` when no WAD of the stack has the block; an error when its WAD cannot
     /// be read.
     pub fn block_for_reemit(&mut self, needle: &str) -> Option<Result<ReemitBlock, String>> {
-        let needle = needle.to_lowercase();
-        let (wi, idx) = self.wads.iter().enumerate().rev().find_map(|(wi, wad)| {
-            wad.archive.paths.iter().position(|p| p.to_lowercase().contains(&needle)).map(|idx| (wi, idx))
-        })?;
+        let (wi, idx) = self.locate(needle)?;
         Some(self.reemit_at(wi, idx))
+    }
+
+    /// The PTHS paths of the blocks [`Self::block_for_reemit`] carries with the block at `needle`
+    /// (its `rung_blocks`), read from the INDX and ASET alone. `None` when no WAD of the stack has the
+    /// block.
+    pub fn rung_paths(&self, needle: &str) -> Option<Result<Vec<String>, String>> {
+        let (wi, idx) = self.locate(needle)?;
+        let wad = &self.wads[wi];
+        Some(
+            rung_closure(&wad.archive, idx, &wad.path.display().to_string())
+                .map(|carried| carried.into_iter().map(|b| wad.archive.paths[b].clone()).collect()),
+        )
+    }
+
+    /// The last-mounted WAD with a PTHS path containing `needle` (case-insensitive), and the block's
+    /// index in it.
+    fn locate(&self, needle: &str) -> Option<(usize, usize)> {
+        let needle = needle.to_lowercase();
+        self.wads.iter().enumerate().rev().find_map(|(wi, wad)| {
+            wad.archive.paths.iter().position(|p| p.to_lowercase().contains(&needle)).map(|idx| (wi, idx))
+        })
     }
 
     fn reemit_at(&mut self, wi: usize, idx: usize) -> Result<ReemitBlock, String> {
@@ -657,25 +697,11 @@ impl GameStack {
         let path = wad.path.display().to_string();
         let raw = mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, idx as u16)
             .map_err(|m| format!("{path}: {}: {m}", wad.archive.paths[idx]))?;
-        fn rows_of(archive: &FfcsArchive, b: usize) -> Vec<&mercs2_formats::ffcs::AsetEntry> {
-            archive.aset.iter().filter(|e| e.block_index() as usize == b).collect()
-        }
         let rows = rows_of(&wad.archive, idx)
             .into_iter()
             .map(|e| (e.asset_hash, (e.packed_block_ref, e.secondary_ref, e.type_id)))
             .collect();
-        // The rung closure: the blocks this block's rows name, and the blocks THEIR rows name.
-        let mut todo: Vec<usize> = rows_of(&wad.archive, idx).iter().flat_map(|e| e.lod_chain()[1..].to_vec()).map(usize::from).collect();
-        let mut carried: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-        while let Some(b) = todo.pop() {
-            if b == idx || !carried.insert(b) {
-                continue;
-            }
-            if b >= wad.archive.indx.len() {
-                return Err(format!("{path}: a row names block {b}, past its {} blocks", wad.archive.indx.len()));
-            }
-            todo.extend(rows_of(&wad.archive, b).iter().flat_map(|e| e.lod_chain()[1..].to_vec()).map(usize::from));
-        }
+        let carried = rung_closure(&wad.archive, idx, &path)?;
         let mut rung_blocks = Vec::with_capacity(carried.len());
         for b in carried {
             let x = wad.archive.indx[b].clone();

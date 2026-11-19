@@ -59,6 +59,18 @@ fn game() -> GameStack {
     GameStack::open(&[vz]).expect("open the game stack")
 }
 
+/// `blocks` and the blocks vz's resident block carries as LOD rungs, which ship wherever it is
+/// re-emitted ([`build::LoadedScriptBlock::rung_blocks`]), in path order.
+fn with_resident_rungs(game: &mut GameStack, blocks: &[&str]) -> Vec<String> {
+    let loaded = build::load_script_blocks(game, mercs2_quartermaster::link::SCRIPT_BLOCKS, "test").expect("the scripts blocks load");
+    let resident = loaded.iter().find(|lb| lb.path == RESIDENT).expect("the stack has vz's resident block");
+    assert!(!resident.rung_blocks.is_empty(), "vz's resident block carries rungs");
+    let mut out: Vec<String> =
+        blocks.iter().map(|b| b.to_string()).chain(resident.rung_blocks.iter().map(|b| b.path_string.clone())).collect();
+    out.sort();
+    out
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fx").join(name)
 }
@@ -213,8 +225,8 @@ fn building_qm_fx_a_emits_the_effects_and_resident_blocks_with_its_edits_and_add
     let out = scratch("build-a");
     let rep = build::build(&s, Some(&mut game), None, Some(&out), None, None).unwrap_or_else(|e| panic!("{e}"));
     let blocks = blocks_of(rep.wad.as_ref().expect("an overlay"));
-    let paths: Vec<&String> = blocks.keys().collect();
-    assert_eq!(paths, vec![fx::EFFECTS_BLOCK.1, RESIDENT], "the effects block and the resident block");
+    let paths: Vec<String> = blocks.keys().cloned().collect();
+    assert_eq!(paths, with_resident_rungs(&mut game, &[fx::EFFECTS_BLOCK.1, RESIDENT]), "the effects block and the resident block, with its rungs");
 
     // The effects block: the game's entries in order, the C4 effect magenta, the new effect last.
     let (raw, eb) = &blocks[fx::EFFECTS_BLOCK.1];
@@ -308,10 +320,11 @@ fn linking_qm_fx_a_and_qm_fx_b_merges_both_in_either_order() {
     let carhood = fx::template_effect(&base.worldentity, fx::template_keys(&base.worldentity, "global_particle_fire_carhood").unwrap()[0]).unwrap();
     let c4 = pandemic_hash_m2("global_explosion_c4");
     let mut contents = Vec::new();
+    let want = with_resident_rungs(&mut g, &[fx::EFFECTS_BLOCK.1, RESIDENT, SCRIPTS_VZ]);
     for (label, set) in [("link-ab", [&a, &b]), ("link-ba", [&b, &a])] {
         let (blocks, promised) = link(label, &set);
-        let paths: Vec<&String> = blocks.keys().collect();
-        assert_eq!(paths, vec![fx::EFFECTS_BLOCK.1, RESIDENT, SCRIPTS_VZ], "{label}");
+        let paths: Vec<String> = blocks.keys().cloned().collect();
+        assert_eq!(paths, want, "{label}");
         assert!(paths.iter().all(|p| promised.contains(p)), "{label}: {promised:?}");
         let effects = ScriptsBlock::parse(&blocks[fx::EFFECTS_BLOCK.1].0).unwrap();
         recoloured(&effect_of(&effects, c4), &effect_of(&base.effects, c4), [255, 0, 255]);
@@ -575,11 +588,12 @@ fn a_sprites_only_shipment_emits_no_effects_block() {
         "  - kind: add_fx_sprite\n    name: qm_only_ring\n    image: src/ring.png\n",
         &[("ring.png", ring)],
     );
-    let rep = build::build(&s, Some(&mut game()), None, Some(&scratch("sprites-only-build")), None, None).unwrap_or_else(|e| panic!("{e}"));
+    let mut g = game();
+    let rep = build::build(&s, Some(&mut g), None, Some(&scratch("sprites-only-build")), None, None).unwrap_or_else(|e| panic!("{e}"));
     let blocks = blocks_of(rep.wad.as_ref().expect("an overlay"));
-    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT]);
+    assert_eq!(blocks.keys().cloned().collect::<Vec<_>>(), with_resident_rungs(&mut g, &[RESIDENT]));
     let (blocks, promised) = link("sprites-only-link", &[&s]);
-    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT, SCRIPTS_VZ]);
+    assert_eq!(blocks.keys().cloned().collect::<Vec<_>>(), with_resident_rungs(&mut g, &[RESIDENT, SCRIPTS_VZ]));
     assert!(blocks.keys().all(|p| promised.contains(p)), "{promised:?}");
     assert!(!promised.iter().any(|p| p == fx::EFFECTS_BLOCK.1), "{promised:?}");
 }
@@ -640,9 +654,10 @@ fn a_repaint_is_the_base_the_sprites_are_drawn_on_and_two_repaints_conflict() {
         "  - kind: replace_texture\n    target: vfx\n    image: src/vfx.png\n  - kind: add_fx_sprite\n    name: qm_painted_ring\n    image: src/ring.png\n",
         &[("vfx.png", painted.clone()), ("ring.png", ring)],
     );
-    let rep = build::build(&s, Some(&mut game()), None, Some(&scratch("repaint-build")), None, None).unwrap_or_else(|e| panic!("{e}"));
+    let mut g = game();
+    let rep = build::build(&s, Some(&mut g), None, Some(&scratch("repaint-build")), None, None).unwrap_or_else(|e| panic!("{e}"));
     let blocks = blocks_of(rep.wad.as_ref().expect("an overlay"));
-    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT], "the repaint goes into the resident block");
+    assert_eq!(blocks.keys().cloned().collect::<Vec<_>>(), with_resident_rungs(&mut g, &[RESIDENT]), "the repaint goes into the resident block");
     let resident = ScriptsBlock::parse(&blocks[RESIDENT].0).unwrap();
     let built = parse_texture_container(&resident.entries[fx::atlas_entry(&resident).unwrap()].bytes).unwrap().all_mips;
     let px: Vec<f32> = (0..2048 * 2048).flat_map(|i| repaint_texel(i % 2048, i / 2048)).map(|v| v as f32).collect();

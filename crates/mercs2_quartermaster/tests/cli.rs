@@ -14,6 +14,7 @@
 
 mod common {
     pub mod cli;
+    pub mod game;
 }
 
 use common::cli::{code, fixture, link, qm, read_json, scratch, shipment, EXIT_FINDINGS};
@@ -242,6 +243,12 @@ fn the_name_table_is_found_by_walking_up_not_by_a_compiled_in_path() {
 // `qm preflight` — exit codes and the plan file
 // ---------------------------------------------------------------------------
 
+/// The `--game` a hermetic preflight plans against: a folder holding what `game-clean` holds, a
+/// `data/vz.wad`, with WADs that open ([`common::game::empty_game`]).
+fn game() -> String {
+    common::game::empty_game().to_string_lossy().into_owned()
+}
+
 fn preflight(args: &[&str], out: &Path) -> Output {
     let mut all = vec!["preflight", "--out", out.to_str().unwrap()];
     all.extend_from_slice(args);
@@ -253,7 +260,7 @@ fn preflight(args: &[&str], out: &Path) -> Output {
 fn preflight_ok_exits_0_and_writes_the_plan() {
     let out = scratch("pf-ok");
     let o = preflight(
-        &["--request", &fixture("request.chain.json"), "--game", &fixture("game-clean")],
+        &["--request", &fixture("request.chain.json"), "--game", &game()],
         &out,
     );
     assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
@@ -268,7 +275,7 @@ fn preflight_ok_exits_0_and_writes_the_plan() {
 fn preflight_findings_exit_1_and_still_write_the_plan() {
     let out = scratch("pf-findings");
     let o = preflight(
-        &["--request", &fixture("request.chain-old-ess.json"), "--game", &fixture("game-clean")],
+        &["--request", &fixture("request.chain-old-ess.json"), "--game", &game()],
         &out,
     );
     assert_eq!(code(&o), EXIT_FINDINGS, "stderr: {}", String::from_utf8_lossy(&o.stderr));
@@ -284,7 +291,7 @@ fn preflight_findings_exit_1_and_still_write_the_plan() {
 fn preflight_takes_shipment_directories() {
     let out = scratch("pf-dirs");
     let o = preflight(
-        &[&fixture("shipments/my-mod"), &fixture("shipments/ess-0.7.0"), &fixture("shipments/lua-bridge"), "--game", &fixture("game-clean")],
+        &[&fixture("shipments/my-mod"), &fixture("shipments/ess-0.7.0"), &fixture("shipments/lua-bridge"), "--game", &game()],
         &out,
     );
     assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
@@ -298,7 +305,7 @@ fn preflight_takes_shipment_directories() {
 fn the_plan_names_the_running_qm() {
     let out = scratch("pf-version");
     preflight(
-        &["--request", &fixture("request.chain.json"), "--game", &fixture("game-clean")],
+        &["--request", &fixture("request.chain.json"), "--game", &game()],
         &out,
     );
     let plan: serde_json::Value =

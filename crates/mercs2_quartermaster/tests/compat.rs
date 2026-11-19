@@ -5,6 +5,10 @@
 //! used by `tests/cli.rs`; the golden plans are compared as parsed JSON with `quartermaster`
 //! replaced by the running version. The rest build small Shipments in a scratch directory.
 
+mod common {
+    pub mod game;
+}
+
 use mercs2_quartermaster::compat::{self, CompatError, PlanInput};
 use mercs2_quartermaster::discover::{self, LoadedShipment};
 use mercs2_quartermaster::link::{self, UiRegistration};
@@ -43,7 +47,7 @@ fn ship(root: &Path, name: &str, version: &str, load: &str) -> LoadedShipment {
 }
 
 /// Plan over `shipments`, ids `shipment:<name>` (or `shipment:<name>#<n>` for a repeated name).
-fn plan_of(shipments: &[&LoadedShipment], game_root: Option<&Path>) -> LoadPlan {
+fn plan_of(shipments: &[&LoadedShipment], game_root: &Path) -> LoadPlan {
     let ids = ids_of(shipments);
     let inputs: Vec<PlanInput<'_>> = shipments
         .iter()
@@ -155,9 +159,8 @@ fn fixture_plan(request: &str, game: &str) -> LoadPlan {
             shipment: s,
         })
         .collect();
-    let vz = compat::resolve_vz_wad(Some(&f.join(game))).expect("fixture vz.wad");
-    let root = compat::game_root_of(&vz).expect("fixture game root");
-    compat::plan(&inputs, Producer::Preflight, Some(&root)).expect("plan")
+    let root = common::game::game_folder(game, Some(&f.join(game)));
+    compat::plan(&inputs, Producer::Preflight, &root).expect("plan")
 }
 
 /// Compare against a golden plan as parsed JSON, with `quartermaster` taken as the running version.
@@ -261,7 +264,7 @@ fn duplicate_name_fails() {
     let a = ship(&d, "ess", "0.7.0", "");
     let b = ship(&d, "ess", "0.6.1", "");
     let consumer = ship(&d, "my-mod", "1.0.0", "load: { requires: [ess] }\n");
-    let p = plan_of(&[&a, &b, &consumer], None);
+    let p = plan_of(&[&a, &b, &consumer], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0203"]);
     assert_eq!(p.findings[0].items, vec!["shipment:ess", "shipment:ess#2"]);
     assert_eq!(p.requirements[0].status, RequirementStatus::Ambiguous);
@@ -274,7 +277,7 @@ fn duplicate_name_fails() {
 fn shipment_missing_fails() {
     let d = scratch("missing");
     let consumer = ship(&d, "my-mod", "1.0.0", "load: { requires: [ess] }\n");
-    let p = plan_of(&[&consumer], None);
+    let p = plan_of(&[&consumer], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0204"]);
     assert_eq!(p.requirements[0].status, RequirementStatus::Missing);
     assert!(p.edges.is_empty(), "a missing requirement orders nothing");
@@ -291,7 +294,7 @@ fn older_than_range_fails() {
         "1.0.0",
         "load: { requires: [{ shipment: ess, version: \">=0.7, <1\" }] }\n",
     );
-    let p = plan_of(&[&ess, &consumer], None);
+    let p = plan_of(&[&ess, &consumer], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0204"]);
     let msg = &p.findings[0].message;
     assert!(
@@ -314,7 +317,7 @@ fn satisfying_version_passes() {
         "1.0.0",
         "load: { requires: [{ shipment: ess, version: \">=0.7, <1\" }] }\n",
     );
-    let p = plan_of(&[&ess, &consumer], None);
+    let p = plan_of(&[&ess, &consumer], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
     assert_eq!(p.requirements[0].resolved_version.as_deref(), Some("0.7.3"));
 }
@@ -324,7 +327,7 @@ fn bare_name_any_version() {
     let d = scratch("bare");
     let ess = ship(&d, "ess", "9.9.9", "");
     let consumer = ship(&d, "my-mod", "1.0.0", "load: { requires: [ess] }\n");
-    let p = plan_of(&[&ess, &consumer], None);
+    let p = plan_of(&[&ess, &consumer], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
     assert_eq!(p.requirements[0].range, None);
 }
@@ -340,7 +343,7 @@ fn caret_zero_major_excludes_next_minor() {
         "1.0.0",
         "load: { requires: [{ shipment: ess, version: \"^0.6\" }] }\n",
     );
-    let p = plan_of(&[&ess, &consumer], None);
+    let p = plan_of(&[&ess, &consumer], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0204"]);
 }
 
@@ -353,7 +356,7 @@ fn capability_unprovided_fails() {
         "1.0.0",
         "load: { requires: [{ capability: widescreen }] }\n",
     );
-    let p = plan_of(&[&consumer], None);
+    let p = plan_of(&[&consumer], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0204"]);
     assert_eq!(p.capabilities.len(), 1);
     assert!(p.capabilities[0].providers.is_empty());
@@ -371,7 +374,7 @@ fn two_capability_providers_pass() {
     );
     let a = ship(&d, "wide-a", "1.0.0", "load: { provides: [widescreen] }\n");
     let b = ship(&d, "wide-b", "1.0.0", "load: { provides: [widescreen] }\n");
-    let p = plan_of(&[&consumer, &a, &b], None);
+    let p = plan_of(&[&consumer, &a, &b], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
     assert_eq!(p.edges.len(), 2);
     assert_eq!(
@@ -400,7 +403,7 @@ fn declared_conflict_fails() {
     let d = scratch("declared");
     let hostile = ship(&d, "hostile", "1.0.0", "load: { conflicts: [victim] }\n");
     let victim = ship(&d, "victim", "2.0.0", "");
-    let p = plan_of(&[&hostile, &victim], None);
+    let p = plan_of(&[&hostile, &victim], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0206"]);
     match &p.conflicts[0] {
         ConflictRow::Declared(r) => assert_eq!(r.status, DeclaredStatus::Conflict),
@@ -418,7 +421,7 @@ fn declared_conflict_outside_range_passes() {
         "load: { conflicts: [{ shipment: victim, version: \"<2\" }] }\n",
     );
     let victim = ship(&d, "victim", "2.0.0", "");
-    let p = plan_of(&[&hostile, &victim], None);
+    let p = plan_of(&[&hostile, &victim], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
     match &p.conflicts[0] {
         ConflictRow::Declared(r) => assert_eq!(r.status, DeclaredStatus::OutsideRange),
@@ -431,7 +434,7 @@ fn declared_conflict_outside_range_passes() {
 fn declared_conflict_not_installed_passes() {
     let d = scratch("declared-absent");
     let hostile = ship(&d, "hostile", "1.0.0", "load: { conflicts: [victim] }\n");
-    let p = plan_of(&[&hostile], None);
+    let p = plan_of(&[&hostile], common::game::empty_game());
     assert!(p.ok);
     match &p.conflicts[0] {
         ConflictRow::Declared(r) => assert_eq!(r.status, DeclaredStatus::NotInstalled),
@@ -456,7 +459,7 @@ fn two_shipments_minting_one_script_name_conflict() {
     };
     let a = shipment_at(&d.join("a"), &body("fork-a"));
     let b = shipment_at(&d.join("b"), &body("fork-b"));
-    let p = plan_of(&[&a, &b], None);
+    let p = plan_of(&[&a, &b], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0207"]);
     match &p.conflicts[0] {
         ConflictRow::Claims(r) => {
@@ -497,7 +500,7 @@ fn two_shipments_minting_one_novel_shop_module_conflict() {
     };
     let a = shipment_at(&d.join("a"), &body("strike-a", &novel_shop_item("strike_a", "mystrike", "src/a.lua")));
     let b = shipment_at(&d.join("b"), &body("strike-b", &novel_shop_item("strike_b", "MyStrike", "src/b.lua")));
-    let p = plan_of(&[&a, &b], None);
+    let p = plan_of(&[&a, &b], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0207"], "{:?}", p.findings);
     match &p.conflicts[0] {
         ConflictRow::Claims(r) => {
@@ -511,7 +514,7 @@ fn two_shipments_minting_one_novel_shop_module_conflict() {
         &d.join("s"),
         &body("helpers", "  - { kind: add_script, name: mystrike, source: src/s.lua }\n"),
     );
-    assert_eq!(codes(&plan_of(&[&a, &s], None)), vec!["M0207"]);
+    assert_eq!(codes(&plan_of(&[&a, &s], common::game::empty_game())), vec!["M0207"]);
 
     // One Shipment's two items sharing the module and its script mint it once: no conflict.
     let shared = shipment_at(
@@ -525,7 +528,7 @@ fn two_shipments_minting_one_novel_shop_module_conflict() {
             ),
         ),
     );
-    let p = plan_of(&[&shared], None);
+    let p = plan_of(&[&shared], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
 }
 
@@ -548,9 +551,9 @@ fn add_layer_claims_its_template_layer() {
         &d.join("o"),
         &body("other-minter", "  - { kind: add_layer, name: vz_state_theirs, template: layers_static, entities: src/e.yaml }\n"),
     );
-    assert_eq!(codes(&plan_of(&[&minter, &placer], None)), vec!["M0207"]);
-    assert_eq!(codes(&plan_of(&[&minter, &other], None)), vec!["M0207"]);
-    let p = plan_of(&[&minter], None);
+    assert_eq!(codes(&plan_of(&[&minter, &placer], common::game::empty_game())), vec!["M0207"]);
+    assert_eq!(codes(&plan_of(&[&minter, &other], common::game::empty_game())), vec!["M0207"]);
+    let p = plan_of(&[&minter], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
 }
 
@@ -574,7 +577,8 @@ fn superseded_present_fails() {
     let game = d.join("game");
     std::fs::create_dir_all(game.join("scripts/OnLoad")).unwrap();
     std::fs::write(game.join("scripts/OnLoad/1_Ess.lua"), "--").unwrap();
-    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], Some(&game));
+    common::game::write_wads(&game);
+    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], &game);
     assert_eq!(codes(&p), vec!["M0208"]);
     assert!(p.supersedes[0].present);
 }
@@ -584,7 +588,8 @@ fn superseded_absent_passes() {
     let d = scratch("sup-absent");
     let game = d.join("game");
     std::fs::create_dir_all(&game).unwrap();
-    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], Some(&game));
+    common::game::write_wads(&game);
+    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], &game);
     assert!(p.ok);
     assert!(!p.supersedes[0].present);
     assert_eq!(p.supersedes[0].relative, "scripts/OnLoad/1_Ess.lua");
@@ -597,7 +602,8 @@ fn superseded_file_matches_case_insensitively() {
     let game = d.join("game");
     std::fs::create_dir_all(game.join("scripts/OnLoad")).unwrap();
     std::fs::write(game.join("scripts/OnLoad/1_ESS.LUA"), "--").unwrap();
-    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], Some(&game));
+    common::game::write_wads(&game);
+    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], &game);
     assert_eq!(codes(&p), vec!["M0208"]);
 }
 
@@ -609,43 +615,9 @@ fn a_dangling_symlink_counts_as_present() {
     let game = d.join("game");
     std::fs::create_dir_all(game.join("scripts/OnLoad")).unwrap();
     std::os::unix::fs::symlink(d.join("nowhere"), game.join("scripts/OnLoad/1_Ess.lua")).unwrap();
-    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], Some(&game));
+    common::game::write_wads(&game);
+    let p = plan_of(&[&superseder(&d, "1_Ess.lua")], &game);
     assert_eq!(codes(&p), vec!["M0208"]);
-}
-
-/// With no game folder, a Shipment that declares `supersedes` cannot be checked — never skipped.
-#[test]
-fn supersedes_without_a_game_root_is_an_error() {
-    let d = scratch("sup-noroot");
-    let s = superseder(&d, "1_Ess.lua");
-    let inputs = [PlanInput {
-        id: "shipment:ess",
-        shipment: &s,
-    }];
-    match compat::plan(&inputs, Producer::Preflight, None) {
-        Err(CompatError::GameRootRequired { id }) => assert_eq!(id, "shipment:ess"),
-        other => panic!("expected GameRootRequired, got {other:?}"),
-    }
-}
-
-/// With no game folder, a Shipment that replaces a line cannot have its merged banks planned: the
-/// banks that play a line are read from the game's WADs, so the plan refuses, naming the item.
-#[test]
-fn a_replaced_line_without_a_game_root_is_an_error() {
-    let d = scratch("line-noroot");
-    let s = shipment_at(
-        &d,
-        "shipment: { name: line, version: 1.0.0, target: retail }\ncontributions:\n  - kind: replace_sound_wave\n    wavebank: vo_stream\n    language: english\n    line: \"0x96FFDF9F\"\n    wave: src/a.wav\n",
-    );
-    assert!(compat::needs_game_root([&s.manifest]));
-    let inputs = [PlanInput { id: "shipment:line", shipment: &s }];
-    match compat::plan(&inputs, Producer::Preflight, None) {
-        Err(CompatError::Item { id, message }) => {
-            assert_eq!(id, "shipment:line");
-            assert!(message.contains("replace_sound_wave"), "{message}");
-        }
-        other => panic!("expected the item's error, got {other:?}"),
-    }
 }
 
 /// The game folder is the parent of the `data` directory holding `vz.wad`; anything else is refused.
@@ -676,7 +648,7 @@ fn quartermaster_range_unsatisfied_fails() {
         &d.join("s"),
         "shipment: { name: s, version: 1.0.0, target: retail, quartermaster: \">=99\" }\ncontributions: []\n",
     );
-    let p = plan_of(&[&s], None);
+    let p = plan_of(&[&s], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0210"]);
     assert_eq!(p.items[0].quartermaster_range.as_deref(), Some(">=99"));
 }
@@ -691,7 +663,7 @@ fn quartermaster_range_satisfied_passes() {
             env!("CARGO_PKG_VERSION")
         ),
     );
-    assert!(plan_of(&[&s], None).ok);
+    assert!(plan_of(&[&s], common::game::empty_game()).ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -712,10 +684,10 @@ fn outfit_in(dir: &Path, levels: &str) -> LoadedShipment {
 #[test]
 fn an_outfit_in_a_level_the_set_does_not_have_is_m0263() {
     let d = scratch("outfit-level");
-    let p = plan_of(&[&outfit_in(&d.join("s"), "[vz, dlc01]")], None);
+    let p = plan_of(&[&outfit_in(&d.join("s"), "[vz, dlc01]")], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0263"]);
     assert!(p.findings[0].message.contains("level \"dlc01\""), "{}", p.findings[0].message);
-    assert!(plan_of(&[&outfit_in(&d.join("v"), "[vz]")], None).ok, "the main campaign is always there");
+    assert!(plan_of(&[&outfit_in(&d.join("v"), "[vz]")], common::game::empty_game()).ok, "the main campaign is always there");
 }
 
 #[test]
@@ -725,7 +697,7 @@ fn an_outfit_in_a_level_another_shipment_adds_passes() {
         &d.join("l"),
         "shipment: { name: lvl, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_level\n    name: dlc01\n    display: DLC\n",
     );
-    let p = plan_of(&[&level, &outfit_in(&d.join("s"), "[dlc01]")], None);
+    let p = plan_of(&[&level, &outfit_in(&d.join("s"), "[dlc01]")], common::game::empty_game());
     assert!(!codes(&p).contains(&"M0263"), "{:?}", codes(&p));
 }
 
@@ -745,7 +717,7 @@ fn chatter_outfit(dir: &Path) -> LoadedShipment {
 #[test]
 fn a_chatter_outfit_with_no_shipment_adding_the_binding_is_m0264() {
     let d = scratch("chatter-binding");
-    let p = plan_of(&[&chatter_outfit(&d.join("s"))], None);
+    let p = plan_of(&[&chatter_outfit(&d.join("s"))], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0264"]);
     assert!(p.findings[0].message.contains("Human.SetChatterSet"), "{}", p.findings[0].message);
     let binding = shipment_at(
@@ -753,7 +725,7 @@ fn a_chatter_outfit_with_no_shipment_adding_the_binding_is_m0264() {
         "shipment: { name: binding, version: 1.0.0, target: retail }\ncontributions:\n  - kind: native_hook\n    \
          target: retail\n    symbol: chatter\n    touches: [\"Human.SetChatterSet\"]\n",
     );
-    assert!(!codes(&plan_of(&[&binding, &chatter_outfit(&d.join("s2"))], None)).contains(&"M0264"));
+    assert!(!codes(&plan_of(&[&binding, &chatter_outfit(&d.join("s2"))], common::game::empty_game())).contains(&"M0264"));
 }
 
 // ---------------------------------------------------------------------------
@@ -777,7 +749,7 @@ fn with_plugin(root: &Path, file: &str, bytes: &[u8]) -> LoadedShipment {
 fn a_plugin_that_is_not_i386_is_m0178() {
     let d = scratch("amd64");
     let s = with_plugin(&d, "hook.asi", &pe_image(0x8664, 0x2022));
-    let p = plan_of(&[&s], None);
+    let p = plan_of(&[&s], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0178"]);
     assert_eq!(
         p.items[0].plugins.len(),
@@ -790,7 +762,7 @@ fn a_plugin_that_is_not_i386_is_m0178() {
 fn a_plugin_that_is_not_an_asi_is_m0162() {
     let d = scratch("not-asi");
     let s = with_plugin(&d, "hook.dll", &minimal_i386_dll());
-    let p = plan_of(&[&s], None);
+    let p = plan_of(&[&s], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0162"]);
     assert_eq!(p.items[0].plugins[0].relative, "scripts/hook.dll");
 }
@@ -809,7 +781,7 @@ fn a_missing_plugin_is_an_error() {
         id: "shipment:hook",
         shipment: &s,
     }];
-    match compat::plan(&inputs, Producer::Preflight, None) {
+    match compat::plan(&inputs, Producer::Preflight, common::game::empty_game()) {
         Err(CompatError::Item { id, message }) => {
             assert_eq!(id, "shipment:hook");
             assert!(
@@ -836,7 +808,7 @@ fn order_present_despite_non_cycle_errors() {
         "1.0.0",
         "load: { requires: [{ shipment: ess, version: \">=0.7\" }, lua-bridge] }\n",
     );
-    let p = plan_of(&[&consumer, &ess], None);
+    let p = plan_of(&[&consumer, &ess], common::game::empty_game());
     assert!(!p.ok);
     assert_eq!(codes(&p), vec!["M0204", "M0204"]);
     assert!(p.order.is_some(), "only a cycle removes the order");
@@ -852,7 +824,7 @@ fn a_requires_cycle_has_no_order() {
     let x = ship(&d, "x", "1.0.0", "load: { requires: [z] }\n");
     let y = ship(&d, "y", "1.0.0", "load: { requires: [x] }\n");
     let z = ship(&d, "z", "1.0.0", "load: { requires: [y] }\n");
-    let p = plan_of(&[&a, &b, &x, &y, &z], None);
+    let p = plan_of(&[&a, &b, &x, &y, &z], common::game::empty_game());
     assert_eq!(p.order, None);
     assert!(p
         .items
@@ -878,8 +850,8 @@ fn with_no_edges_the_order_is_the_request_order() {
     let a = ship(&d, "a", "1.0.0", "");
     let b = ship(&d, "b", "1.0.0", "");
     let c = ship(&d, "c", "1.0.0", "");
-    let fwd = plan_of(&[&b, &c, &a], None);
-    let rev = plan_of(&[&a, &c, &b], None);
+    let fwd = plan_of(&[&b, &c, &a], common::game::empty_game());
+    let rev = plan_of(&[&a, &c, &b], common::game::empty_game());
     assert_eq!(
         fwd.order.unwrap(),
         vec!["shipment:b", "shipment:c", "shipment:a"]
@@ -897,7 +869,7 @@ fn a_consumer_listed_before_ess_is_baked_after_it() {
     let d = scratch("consumer-before-ess");
     let consumer = ship(&d, "a-consumer", "1.0.0", "load: { requires: [ess] }\n");
     let ess = ship(&d, "ess", "0.7.0", "");
-    let p = plan_of(&[&consumer, &ess], None);
+    let p = plan_of(&[&consumer, &ess], common::game::empty_game());
     assert!(p.ok);
     let names: Vec<String> = p
         .order
@@ -934,7 +906,7 @@ fn a_consumer_listed_before_ess_is_baked_after_it() {
 fn plan_findings_carry_a_null_fix() {
     let d = scratch("fix");
     let consumer = ship(&d, "my-mod", "1.0.0", "load: { requires: [ess] }\n");
-    let p = plan_of(&[&consumer], None);
+    let p = plan_of(&[&consumer], common::game::empty_game());
     let v = serde_json::to_value(&p).unwrap();
     assert!(v["findings"][0].get("fix").is_some_and(|f| f.is_null()));
     assert!(p
@@ -952,7 +924,7 @@ fn plan_findings_carry_a_null_fix() {
 fn a_runtime_dll_is_described_in_runtime_dlls() {
     let f = fixtures();
     let sdk = discover::open(&f.join("shipments/m2-sdk")).unwrap();
-    let p = plan_of(&[&sdk], None);
+    let p = plan_of(&[&sdk], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
     let dlls = &p.items[0].runtime_dlls;
     assert_eq!(dlls.len(), 1);
@@ -985,7 +957,7 @@ fn a_runtime_dll_that_is_not_i386_is_m0178() {
         "shipment: { name: rt, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_runtime_dll\n    dll: src/rt.dll\n",
     );
     std::fs::write(s.root.join("src/rt.dll"), pe_image(0x8664, 0x230E)).unwrap();
-    let p = plan_of(&[&s], None);
+    let p = plan_of(&[&s], common::game::empty_game());
     assert_eq!(codes(&p), vec!["M0178"]);
     assert_eq!(p.findings[0].refs[0].section, Section::Items);
     assert_eq!(p.items[0].runtime_dlls.len(), 1);
@@ -1000,7 +972,7 @@ fn a_missing_runtime_dll_is_an_error() {
         "shipment: { name: rt, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_runtime_dll\n    dll: src/rt.dll\n",
     );
     let inputs = [PlanInput { id: "shipment:rt", shipment: &s }];
-    match compat::plan(&inputs, Producer::Preflight, None) {
+    match compat::plan(&inputs, Producer::Preflight, common::game::empty_game()) {
         Err(CompatError::Item { id, message }) => {
             assert_eq!(id, "shipment:rt");
             assert!(message.contains("add_runtime_dll") && message.contains("src/rt.dll"), "{message}");
@@ -1041,7 +1013,7 @@ fn stringdb_editors_of_one_table_compose() {
 fn link_block_paths_without_string_tables_are_the_script_blocks() {
     let root = scratch("lbp-none");
     let a = ship(&root, "plain", "1.0.0", "");
-    let p = plan_of(&[&a], None);
+    let p = plan_of(&[&a], common::game::empty_game());
     let scripts: Vec<String> =
         link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
     assert_eq!(p.link_block_paths, scripts);
@@ -1083,11 +1055,11 @@ contributions:
     );
     let scripts: Vec<String> =
         link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
-    assert_eq!(plan_of(&[&plain], None).link_block_paths, scripts);
+    assert_eq!(plan_of(&[&plain], common::game::empty_game()).link_block_paths, scripts);
     let mut with_fx = scripts.clone();
     with_fx.push("blocks\\VZ\\effects_P000_Q3.block".to_string());
     for set in [vec![&add], vec![&edit], vec![&plain, &add, &edit]] {
-        let p = plan_of(&set, None);
+        let p = plan_of(&set, common::game::empty_game());
         assert!(p.ok, "{:?}", p.findings);
         assert_eq!(p.link_block_paths, with_fx);
     }
@@ -1129,10 +1101,10 @@ contributions:
     let (a, b, painted) = (sprites("ring", "qm_ring"), sprites("star", "qm_star"), repaint("painted"));
     let scripts: Vec<String> =
         link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
-    let p = plan_of(&[&a, &b, &painted], None);
+    let p = plan_of(&[&a, &b, &painted], common::game::empty_game());
     assert!(p.ok, "{:?}", p.findings);
     assert_eq!(p.link_block_paths, scripts);
-    let p = plan_of(&[&painted, &repaint("painted-again")], None);
+    let p = plan_of(&[&painted, &repaint("painted-again")], common::game::empty_game());
     assert!(!p.ok);
     assert!(p.findings.iter().any(|f| f.code == "M0207" && f.message.contains("the repaint of the vfx atlas")), "{:?}", p.findings);
 }

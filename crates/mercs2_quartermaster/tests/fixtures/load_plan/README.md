@@ -39,8 +39,9 @@ Golden plans are compared as parsed JSON, with `quartermaster` replaced by the r
 
 ## Game layouts
 
-- `game-clean/data/vz.wad` and `game-legacy/data/vz.wad` are empty: preflight only needs the file to
-  exist, and never opens it.
+- `game-clean/data/vz.wad` and `game-legacy/data/vz.wad` are empty: they make the folders game
+  folders for `--game` resolution. A plan opens the game's `vz.wad` and `shell.wad`, so the tests plan
+  against a copy of the folder with block-less WADs written into its `data` (`tests/common/game.rs`).
 - `game-legacy/scripts/OnLoad/1_Ess.lua` is the legacy OnLoad install Ess supersedes.
 - `game-bad/vz.wad` is not in a `data` directory, so no game folder can be derived (exit 2).
 
