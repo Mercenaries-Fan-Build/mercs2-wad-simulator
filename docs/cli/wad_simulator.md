@@ -123,7 +123,9 @@ reported but excluded from the verdict.
 list as the exit code: `VERDICT: PASS — no fatal findings (<checks run>)` on exit 0, or
 `VERDICT: FAILED — <reason>; <reason>; …` on exit 1, one reason per failing check, e.g.
 `1 block never installed (blocks\VZ\resident_P000_Q3.block: 7022 entries, ring 7018)`,
-`ASET: 2 misrouted, 1 ghost`, `simulation: 1 decode error, 2 texture buffers too small`. A check
+`ASET: 2 misrouted, 1 ghost`, `simulation: 1 decode error, 2 texture buffers too small`. The
+install-ring reason names at most the 3 largest blocks, then `+N more`; every block is listed on
+its own `NEVER INSTALLED` line above. A check
 or input that could not be read is named there too (`install-ring check could not run: <error>`,
 `ASET check could not run: <error>`, `simulation could not run: <error>`,
 `rainbow table <path>: <error>`, `JSON report not written: <path>: <error>`). The consumption
