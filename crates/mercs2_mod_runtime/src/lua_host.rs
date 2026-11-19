@@ -24,13 +24,14 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicUsiz
 use mercs2_formats::lua_exec::{self, MAX_CHUNK, MAX_RESULTS};
 use mercs2_formats::lua_sites::{HOST_INITIALISED, HOST_LUA_STATE, LuaSites, Site};
 use mercs2_formats::mod_runtime::lua::type_name;
-use mercs2_formats::mod_runtime::{LastError, PCALL_REFUSED};
+use mercs2_formats::mod_runtime::{LastError, PCALL_REFUSED, RefTable};
 use mercs2_formats::lua_stack::{
     self, LUA_REGISTRYINDEX, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUA_TTHREAD, Mem,
     OFF_BASE, OFF_BASE_CI, OFF_CI, OFF_GLOBAL, OFF_STACK, OFF_TOP, TVALUE_SIZE, TVALUE_TT,
 };
 use std::ffi::CString;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 pub type LuaCFunction = unsafe extern "C" fn(l: *mut c_void) -> c_int;
 pub type StateCb = unsafe extern "C" fn(l: *mut c_void, is_new_cycle: c_int, ud: *mut c_void);
@@ -106,6 +107,25 @@ thread_local! {
 fn fail(msg: String) {
     rt_log::line(&format!("ERROR {msg}"));
     LAST_ERROR.set(&msg);
+}
+
+/// [`fail`] for the function-reference calls, which a mod can make every frame: the line is written
+/// without flushing the log to disk each time.
+fn fail_unflushed(msg: String) {
+    rt_log::line_unflushed(&format!("ERROR {msg}"));
+    LAST_ERROR.set(&msg);
+}
+
+/// The refs `m2_lua_ref` issued, and the thread each global state's scripts run on ([`walker`] and
+/// [`capture`] record it).
+static REF_TABLE: Mutex<RefTable> = Mutex::new(RefTable::new());
+
+fn ref_table() -> MutexGuard<'static, RefTable> {
+    REF_TABLE.lock().expect("ref table lock")
+}
+
+fn current_thread() -> u32 {
+    unsafe { GetCurrentThreadId() }
 }
 
 /// Record a failure for [`m2_lua_last_error`] (and the log) from another part of the runtime.
@@ -312,6 +332,7 @@ fn capture(l: u32) {
         return;
     }
     CURRENT.store(l, Ordering::Relaxed);
+    ref_table().state_seen(read_u32(l + OFF_GLOBAL), current_thread());
     let slot = SEEN_NEXT.fetch_add(1, Ordering::Relaxed) % SEEN_SLOTS;
     SEEN[slot].store(l, Ordering::Relaxed);
     SEEN_REG[slot].store(0, Ordering::Release);
@@ -373,6 +394,12 @@ unsafe extern "stdcall" fn walker(host: u32) {
         fail(format!("the script host {host:#x} has no lua_State at +{HOST_LUA_STATE:#x} after its namespaces were registered"));
         return;
     }
+    // A state the host just built: a new life of its global state, whose registry holds no earlier ref.
+    let g = read_u32(l + OFF_GLOBAL);
+    let held = ref_table().state_created(g, current_thread());
+    if held > 0 {
+        rt_log::line(&format!("global state {g:#x} was rebuilt; {held} ref(s) taken before it are no longer usable"));
+    }
     register_from(l, 0);
 }
 
@@ -424,6 +451,11 @@ fn install() -> Result<(), String> {
         return Ok(());
     }
     let s = sites::wait()?;
+    // Here, on the mod's thread, so the scan never stalls the game thread. A failure does not stop the
+    // install: it is logged and every ref call returns it.
+    if let Err(e) = sites::resolve_refs() {
+        rt_log::line(&format!("ERROR m2_lua_ref, m2_lua_unref, m2_lua_push_ref and m2_lua_pcall are unavailable: {e}"));
+    }
     attach(s, Site::RegisterNamespaces, walker as *mut c_void, &ORIG_WALKER)?;
     attach(s, Site::LuaBType, type_detour as *mut c_void, &ORIG_TYPE)?;
     attach(s, Site::CreateTextWidget, widget_detour as *mut c_void, &ORIG_WIDGET)?;
@@ -754,6 +786,14 @@ fn usable(l: u32) -> Result<(), String> {
     }
 }
 
+/// `L` is usable and the calling thread is the one its global state's scripts run on; its global state.
+fn on_owner_thread(l: u32) -> Result<u32, String> {
+    usable(l)?;
+    let g = read_u32(l + OFF_GLOBAL);
+    ref_table().check_thread(g, current_thread())?;
+    Ok(g)
+}
+
 /// `luaL_ref(L, LUA_REGISTRYINDEX)` on the value at the top: `L` in `EAX`, `t` pushed, the ref in `EAX`.
 fn call_lual_ref(f: u32, l: u32) -> c_int {
     let r: u32;
@@ -833,7 +873,7 @@ fn call_lua_pcall(f: u32, l: u32, nargs: c_int, nresults: c_int) -> c_int {
 
 fn lua_ref(l: u32, idx: c_int) -> Result<c_int, String> {
     let s = sites::refs()?;
-    usable(l)?;
+    let g = on_owner_thread(l)?;
     let slot = lua_stack::stack_slot(&luastack::Process, l, idx)?;
     if !lua_stack::has_room(&luastack::Process, l, 2)? {
         return Err(format!("lua_State {l:#x} has no room for the copy and luaL_ref's free-list read"));
@@ -844,19 +884,25 @@ fn lua_ref(l: u32, idx: c_int) -> Result<c_int, String> {
     if r <= 0 {
         return Err(format!("luaL_ref returned {r} for the {} at stack index {idx}", type_name(tt as i32)));
     }
-    Ok(r)
+    ref_table().issue(g, r).map_err(|e| {
+        // luaL_ref popped the copy, so the room checked above holds luaL_unref's free-list read.
+        call_lual_unref(s.lual_unref, l, r);
+        format!("{e}; registry slot {r} released")
+    })
 }
 
 /// Keep a reference to the value at Lua stack index `idx` of `L` (1 is the first value of the running
 /// function's frame, -1 the top) in the registry: `luaL_ref(L, LUA_REGISTRYINDEX)` on a copy, so the stack
-/// is unchanged. The ref (> 0), or 0 when there is none to take (a nil value, an index naming no value, an
-/// unusable state, the sites unresolved), logged and kept for [`m2_lua_last_error`].
+/// is unchanged. The ref (> 0) is a handle of the runtime's own for that registry slot, usable on `L`'s
+/// global state until it is released or the state is rebuilt. 0 when there is none to take (a nil value,
+/// an index naming no value, an unusable state, a call off the state's thread, the sites unresolved),
+/// logged and kept for [`m2_lua_last_error`].
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_lua_ref(l: *mut c_void, idx: c_int) -> c_int {
     match lua_ref(l as u32, idx) {
         Ok(r) => r,
         Err(e) => {
-            fail(format!("m2_lua_ref: {e}"));
+            fail_unflushed(format!("m2_lua_ref: {e}"));
             0
         }
     }
@@ -864,66 +910,76 @@ pub extern "C" fn m2_lua_ref(l: *mut c_void, idx: c_int) -> c_int {
 
 fn lua_unref(l: u32, r: c_int) -> Result<(), String> {
     let s = sites::refs()?;
-    usable(l)?;
-    if r <= 0 {
-        return Err(format!("ref {r} is not one m2_lua_ref returns (unref of 0 would overwrite the registry's free list)"));
-    }
+    let g = on_owner_thread(l)?;
+    let lua_ref = {
+        let mut table = ref_table();
+        table.lua_ref(g, r).inspect_err(|_| {
+            table.forget_earlier_life(r);
+        })?
+    };
     if !lua_stack::has_room(&luastack::Process, l, 1)? {
         return Err(format!("lua_State {l:#x} has no room for luaL_unref's free-list read"));
     }
-    call_lual_unref(s.lual_unref, l, r);
+    call_lual_unref(s.lual_unref, l, lua_ref);
+    ref_table().release(r);
     Ok(())
 }
 
-/// Release `ref` (`luaL_unref(L, LUA_REGISTRYINDEX, ref)`); the registry reuses its slot. Once per ref: a
-/// second release corrupts the registry's free list. A ref <= 0 is refused and logged.
+/// Release `ref` (`luaL_unref(L, LUA_REGISTRYINDEX, <its slot>)`); the registry reuses the slot. 1 when
+/// released; 0 when refused (a ref not live on `L`'s global state: never issued, already released, taken
+/// on another global state or before this one was rebuilt; an unusable state; a call off the state's
+/// thread; the sites unresolved), logged and kept for [`m2_lua_last_error`]. A ref from before a rebuild
+/// is forgotten as it is refused: its registry is gone, so there is nothing to release.
 #[unsafe(no_mangle)]
-pub extern "C" fn m2_lua_unref(l: *mut c_void, r: c_int) {
-    if let Err(e) = lua_unref(l as u32, r) {
-        fail(format!("m2_lua_unref: {e}"));
+pub extern "C" fn m2_lua_unref(l: *mut c_void, r: c_int) -> c_int {
+    match lua_unref(l as u32, r) {
+        Ok(()) => 1,
+        Err(e) => {
+            fail_unflushed(format!("m2_lua_unref: {e}"));
+            0
+        }
     }
 }
 
 fn lua_push_ref(l: u32, r: c_int) -> Result<(), String> {
     let s = sites::refs()?;
-    usable(l)?;
+    let g = on_owner_thread(l)?;
+    let lua_ref = ref_table().lua_ref(g, r)?;
     if !lua_stack::has_room(&luastack::Process, l, 1)? {
         return Err(format!("lua_State {l:#x} has no room for the value"));
     }
-    call_lua_rawgeti(s.lua_rawgeti, l, r);
+    call_lua_rawgeti(s.lua_rawgeti, l, lua_ref);
     Ok(())
 }
 
-/// Push the value `ref` holds (`lua_rawgeti(L, LUA_REGISTRYINDEX, ref)`). A released ref's slot holds the
-/// registry's free-list link, not nil. Nothing is pushed when the state is unusable or the sites did not
-/// resolve; that is logged and kept for [`m2_lua_last_error`].
+/// Push the value `ref` holds (`lua_rawgeti(L, LUA_REGISTRYINDEX, <its slot>)`). 1 when pushed; 0 when
+/// nothing was pushed (a ref not live on `L`'s global state, no stack room, an unusable state, a call off
+/// the state's thread, the sites unresolved), logged and kept for [`m2_lua_last_error`].
 #[unsafe(no_mangle)]
-pub extern "C" fn m2_lua_push_ref(l: *mut c_void, r: c_int) {
-    if let Err(e) = lua_push_ref(l as u32, r) {
-        fail(format!("m2_lua_push_ref: {e}"));
+pub extern "C" fn m2_lua_push_ref(l: *mut c_void, r: c_int) -> c_int {
+    match lua_push_ref(l as u32, r) {
+        Ok(()) => 1,
+        Err(e) => {
+            fail_unflushed(format!("m2_lua_push_ref: {e}"));
+            0
+        }
     }
 }
 
 fn lua_pcall(l: u32, nargs: c_int, nresults: c_int) -> Result<c_int, String> {
     let s = sites::refs()?;
-    usable(l)?;
-    if nargs < 0 || nresults < -1 {
-        return Err(format!("nargs {nargs} / nresults {nresults}: nargs must be >= 0 and nresults >= -1 (LUA_MULTRET)"));
-    }
-    let depth = lua_stack::frame_depth(&luastack::Process, l)?;
-    if depth < nargs as u32 + 1 {
-        return Err(format!("the frame holds {depth} value(s), fewer than the function and its {nargs} argument(s)"));
-    }
-    let callee = read_u32(l + OFF_TOP) - (nargs as u32 + 1) * TVALUE_SIZE;
+    on_owner_thread(l)?;
+    let callee = lua_stack::pcall_callee(&luastack::Process, l, nargs, nresults)?;
     let callee_tt = read_u32(callee + TVALUE_TT);
     let _guard = ExecGuard::enter();
     let status = call_lua_pcall(s.lua_pcall, l, nargs, nresults);
     if status != 0 {
         let top = read_u32(l + OFF_TOP) - TVALUE_SIZE;
+        // At most a log line of the message: the log cuts the line there, and a script can raise megabytes.
         let mut msg = Vec::new();
-        lua_exec::format_value(&luastack::Process, top, &mut msg);
+        lua_exec::format_value_max(&luastack::Process, top, &mut msg, crate::log::LINE_MAX as u32);
         write_u32(l + OFF_TOP, top);
-        fail(format!(
+        fail_unflushed(format!(
             "m2_lua_pcall: calling the {} failed with Lua status {status}: {}",
             type_name(callee_tt as i32),
             String::from_utf8_lossy(&msg)
@@ -933,17 +989,19 @@ fn lua_pcall(l: u32, nargs: c_int, nresults: c_int) -> Result<c_int, String> {
 }
 
 /// `lua_pcall(L, nargs, nresults, 0)`: call the function at `-(nargs + 1)` with the `nargs` values above
-/// it, which are popped with it. 0 when it returned, with `nresults` results pushed; else the Lua status
-/// (2 a runtime error, 4 out of memory, 5 an error in the error handler), with the error logged and kept
-/// for [`m2_lua_last_error`], and popped. -1 when it refused to call (an unusable state, a frame without
-/// the function and its arguments, the sites unresolved): nothing was called and the stack is unchanged.
-/// Ticks do not run on this thread while the call does, and [`m2_lua_in_exec`] reports 1.
+/// it, which are popped with it. 0 when it returned, with `nresults` results pushed from the function's
+/// slot (all of them for `LUA_MULTRET`, -1); else the Lua status (2 a runtime error, 4 out of memory, 5 an
+/// error in the error handler), with the error logged and kept for [`m2_lua_last_error`], and popped. -1
+/// when it refused to call (an unusable state, a call off the state's thread, a frame without the function
+/// and its arguments, `nresults` below -1 or more results than fit below `ci->top`, the sites unresolved):
+/// nothing was called and the stack is unchanged. Ticks do not run on this thread while the call does, and
+/// [`m2_lua_in_exec`] reports 1.
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_lua_pcall(l: *mut c_void, nargs: c_int, nresults: c_int) -> c_int {
     match lua_pcall(l as u32, nargs, nresults) {
         Ok(status) => status,
         Err(e) => {
-            fail(format!("m2_lua_pcall: {e}"));
+            fail_unflushed(format!("m2_lua_pcall: {e}"));
             PCALL_REFUSED
         }
     }
