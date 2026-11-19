@@ -384,6 +384,7 @@ fn materialize(
     packages: &[String],
 ) -> Result<Vec<mercs2_quartermaster::package::Staged>, ExitCode> {
     use mercs2_quartermaster::package;
+    use std::io::Write;
     let unusable = |e: String| {
         eprintln!("error: {e}");
         ExitCode::from(EXIT_UNUSABLE)
@@ -396,6 +397,15 @@ fn materialize(
     }
     let vz = compat::resolve_vz_wad(game_dir).map_err(|e| unusable(e.to_string()))?;
     let cache = package::cache_dir().map_err(unusable)?;
+    // Each line is printed and flushed as materialize logs it, so a caller reading stdout (Modkit) can
+    // show the download and conversion while they run.
+    let mut print = |line: &str| {
+        let mut out = std::io::stdout().lock();
+        if let Err(e) = writeln!(out, "{line}").and_then(|()| out.flush()) {
+            panic!("failed printing to stdout: {e}");
+        }
+    };
+    print(&format!("hashing {} (sha256)", vz.display()));
     let vz_sha256 = package::file_sha256(&vz).map_err(unusable)?;
     let mut staged = Vec::with_capacity(shipments.len());
     for shipment in shipments {
@@ -404,11 +414,7 @@ fn materialize(
             continue;
         }
         let name = shipment.manifest.shipment.name.clone();
-        let mut log = Vec::new();
-        let result = package::materialize(&shipment, &vz, &vz_sha256, &cache, &overrides, &mut log);
-        for line in &log {
-            println!("{line}");
-        }
+        let result = package::materialize(&shipment, &vz, &vz_sha256, &cache, &overrides, &mut print);
         staged.push(result.map_err(|e| unusable(format!("{name}: {e}")))?);
     }
     Ok(staged)
