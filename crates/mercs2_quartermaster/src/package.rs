@@ -36,6 +36,10 @@ pub enum PackageFormat {
     Ps3DlcPkg,
 }
 
+/// Where this module's steps send their lines: one call per line, made when the step it describes starts
+/// or ends.
+pub type Log<'a> = dyn FnMut(&str) + 'a;
+
 /// Local copies given for package ids (`--package <id>=<path>`), used instead of downloading. They are
 /// checked against the row's size and sha256 like a download.
 pub type Overrides = BTreeMap<String, PathBuf>;
@@ -220,16 +224,16 @@ pub fn download_deadline(size: u64) -> Duration {
 /// the body unencoded and refuses any other encoding but gzip, which ureq decodes itself, dropping the
 /// `Content-Encoding` and `Content-Length` (ureq `response.rs`, "automatic decompression"); so the decoded
 /// bytes are what is counted and hashed. A `Content-Length` must be `size`. On any failure the `.part` is
-/// deleted.
-fn download(url: &str, size: u64, sha256: &str, to: &Path, deadline: Duration, log: &mut Vec<String>) -> Result<(), String> {
+/// deleted. `id` is the `fetch_package` the lines it logs name.
+fn download(id: &str, url: &str, size: u64, sha256: &str, to: &Path, deadline: Duration, log: &mut Log) -> Result<(), String> {
     let dir = to.parent().ok_or("a cache file has a parent")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let part = dir.join(format!("{sha256}.{}.part", unique()));
-    let result = download_to(url, size, sha256, &part, deadline, log)
+    let result = download_to(id, url, size, sha256, &part, deadline, log)
         .and_then(|n| std::fs::rename(&part, to).map(|_| n).map_err(|e| format!("{} -> {}: {e}", part.display(), to.display())));
     match result {
         Ok(n) => {
-            log.push(format!("downloaded {url} ({n} bytes)"));
+            log(&format!("downloaded {url} ({n} bytes)"));
             Ok(())
         }
         Err(e) => match std::fs::remove_file(&part) {
@@ -240,8 +244,19 @@ fn download(url: &str, size: u64, sha256: &str, to: &Path, deadline: Duration, l
     }
 }
 
-/// [`download`]'s transfer into `part`, which it creates; the bytes written.
-fn download_to(url: &str, size: u64, sha256: &str, part: &Path, deadline: Duration, log: &mut Vec<String>) -> Result<u64, String> {
+/// Whole MiB in `bytes`, for the download's progress lines.
+fn whole_mb(bytes: u64) -> u64 {
+    bytes >> 20
+}
+
+/// How often at most [`download_to`] logs how much it has received.
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+
+/// [`download`]'s transfer into `part`, which it creates; the bytes written. It logs a line when it
+/// starts, `fetch_package <id>: downloaded <n> of <total> MB` at most once per [`PROGRESS_EVERY`] while
+/// the body arrives, and that line for the whole body when it has arrived.
+fn download_to(id: &str, url: &str, size: u64, sha256: &str, part: &Path, deadline: Duration, log: &mut Log) -> Result<u64, String> {
+    log(&format!("fetch_package {id}: downloading {url} ({} MB)", whole_mb(size)));
     let end = Instant::now() + deadline;
     let agent = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).redirects(0).build();
     let mut current = web_url(url).map_err(|why| format!("downloading {url}: the url {why}"))?;
@@ -269,7 +284,7 @@ fn download_to(url: &str, size: u64, sha256: &str, part: &Path, deadline: Durati
             .ok_or_else(|| format!("downloading {current}: status {} with no Location", response.status()))?;
         let next = current.join(location).map_err(|e| format!("downloading {current}: redirect to {location:?}: {e}"))?;
         web_url(next.as_str()).map_err(|why| format!("downloading {current}: it redirects to {next}, which {why}"))?;
-        log.push(format!("{current} redirects to {next}"));
+        log(&format!("{current} redirects to {next}"));
         current = next;
     };
     if response.status() != 200 {
@@ -290,6 +305,7 @@ fn download_to(url: &str, size: u64, sha256: &str, part: &Path, deadline: Durati
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     let mut written = 0u64;
+    let mut reported = Instant::now();
     loop {
         let n = body.read(&mut buf).map_err(|e| format!("downloading {current}: {e}"))?;
         if n == 0 {
@@ -301,10 +317,15 @@ fn download_to(url: &str, size: u64, sha256: &str, part: &Path, deadline: Durati
         }
         hasher.update(&buf[..n]);
         file.write_all(&buf[..n]).map_err(|e| format!("{}: {e}", part.display()))?;
+        if reported.elapsed() >= PROGRESS_EVERY {
+            log(&format!("fetch_package {id}: downloaded {} of {} MB", whole_mb(written), whole_mb(size)));
+            reported = Instant::now();
+        }
     }
     if written != size {
         return Err(format!("downloading {current}: {written} bytes, the manifest says {size}"));
     }
+    log(&format!("fetch_package {id}: downloaded {} of {} MB", whole_mb(written), whole_mb(size)));
     let actual = hex(&hasher.finalize());
     if actual != sha256 {
         return Err(format!("downloading {current}: sha256 {actual}, the manifest says {sha256}"));
@@ -317,17 +338,22 @@ fn download_to(url: &str, size: u64, sha256: &str, part: &Path, deadline: Durati
 /// (`<cache>/packages/<sha256>.pkg`, fetched when absent). A `--package` copy or a cached file is checked
 /// against `size` and `sha256`; a cached file that fails is an error naming it. `package` has passed
 /// [`row_problems`].
-fn package_file(package: &Package, cache: &Path, overrides: &Overrides, log: &mut Vec<String>) -> Result<PathBuf, String> {
+fn package_file(package: &Package, cache: &Path, overrides: &Overrides, log: &mut Log) -> Result<PathBuf, String> {
     let id = package.id;
     if let Some(p) = overrides.get(id) {
+        log(&format!("fetch_package {id}: verifying {} (sha256)", p.display()));
         verify(p, package.size, package.sha256).map_err(|e| format!("fetch_package {id}: --package {e}"))?;
         return Ok(p.clone());
     }
     let p = cache.join("packages").join(format!("{}.pkg", package.sha256));
     match std::fs::symlink_metadata(&p) {
-        Ok(_) => verify(&p, package.size, package.sha256)
-            .map_err(|e| format!("fetch_package {id}: the cached package {e}; delete it so the next build downloads it again"))?,
+        Ok(_) => {
+            log(&format!("fetch_package {id}: verifying {} (sha256)", p.display()));
+            verify(&p, package.size, package.sha256)
+                .map_err(|e| format!("fetch_package {id}: the cached package {e}; delete it so the next build downloads it again"))?
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => download(
+            id,
             package.url,
             package.size,
             package.sha256,
@@ -518,7 +544,7 @@ fn read_complete(dir: &Path) -> Result<Converted, String> {
 
 /// Converts one package file into a folder: `(format, package file, output root, log)`. The output root
 /// gets `src/level/...`.
-pub type Converter<'a> = dyn FnMut(PackageFormat, &Path, &Path, &mut Vec<String>) -> Result<Converted, String> + 'a;
+pub type Converter<'a> = dyn FnMut(PackageFormat, &Path, &Path, &mut Log) -> Result<Converted, String> + 'a;
 
 /// One package's converted folder, converting it on a miss ([`converted_key`]). The conversion runs under
 /// `converted/<key>.lock` into a temporary folder renamed to `converted/<key>` once `.complete.json` is
@@ -529,7 +555,7 @@ fn converted_package(
     cache: &Path,
     overrides: &Overrides,
     convert: &mut Converter,
-    log: &mut Vec<String>,
+    log: &mut Log,
 ) -> Result<(PathBuf, Converted), String> {
     let id = package.id;
     let root = cache.join("converted");
@@ -540,18 +566,19 @@ fn converted_package(
     if dir.exists() {
         // A `--package` copy is checked even when its conversion is cached: a path given is never ignored.
         if let Some(local) = overrides.get(id) {
+            log(&format!("fetch_package {id}: verifying {} (sha256)", local.display()));
             verify(local, package.size, package.sha256).map_err(|e| format!("fetch_package {id}: --package {e}"))?;
         }
-        log.push(format!("fetch_package {id}: reusing the conversion in {}", dir.display()));
+        log(&format!("fetch_package {id}: reusing the conversion in {}", dir.display()));
         return Ok((dir.clone(), read_complete(&dir)?));
     }
     let file = package_file(package, cache, overrides, log)?;
     let tmp = root.join(format!("{key}.{}.tmp", unique()));
     let result = (|| {
         std::fs::create_dir(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        log.push(format!("converting {} (fetch_package {id})", file.display()));
-        let converted = convert(package.format, &file, &tmp, log).map_err(|e| format!("fetch_package {id}: {e}"))?;
-        log.push(format!("fetch_package {id}: {} assets, {} streams", converted.assets.len(), converted.streams.len()));
+        log(&format!("converting {} (fetch_package {id})", file.display()));
+        let converted = convert(package.format, &file, &tmp, &mut *log).map_err(|e| format!("fetch_package {id}: {e}"))?;
+        log(&format!("fetch_package {id}: {} assets, {} streams", converted.assets.len(), converted.streams.len()));
         let text = serde_json::to_string(&StoredConverted::from(&converted)).map_err(|e| e.to_string())?;
         let complete = tmp.join(".complete.json");
         std::fs::write(&complete, text).map_err(|e| format!("{}: {e}", complete.display()))?;
@@ -569,7 +596,7 @@ fn converted_package(
 }
 
 /// Delete every staging copy in `dir` but `keep` whose lock no other qm holds.
-fn remove_old_staging(dir: &Path, keep: &str, log: &mut Vec<String>) -> Result<(), String> {
+fn remove_old_staging(dir: &Path, keep: &str, log: &mut Log) -> Result<(), String> {
     let mut runs = BTreeSet::new();
     for entry in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -592,7 +619,7 @@ fn remove_old_staging(dir: &Path, keep: &str, log: &mut Vec<String>) -> Result<(
             Ok(()) => {
                 let old = dir.join(&run);
                 match std::fs::remove_dir_all(&old) {
-                    Ok(()) => log.push(format!("removed the older staging copy {}", old.display())),
+                    Ok(()) => log(&format!("removed the older staging copy {}", old.display())),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => return Err(format!("{}: {e}", old.display())),
                 }
@@ -621,23 +648,26 @@ impl From<LoadedShipment> for Staged {
 /// `shipment` with every `fetch_package` resolved ([`expand`]), rooted at a fresh staging copy that holds
 /// its `src/` (minus any `src/level`) and the converted components. A Shipment without `fetch_package` is
 /// returned as it is. `vz_wad` is the player's, and `vz_sha256` its sha256: the conversion reads its class
-/// layouts and leaves to it what it already holds.
+/// layouts and leaves to it what it already holds. `log` gets each line as the step it describes starts or
+/// ends, so a caller can show it while the download and conversion run.
 pub fn materialize(
     shipment: &LoadedShipment,
     vz_wad: &Path,
     vz_sha256: &str,
     cache: &Path,
     overrides: &Overrides,
-    log: &mut Vec<String>,
+    log: &mut Log,
 ) -> Result<Staged, String> {
     materialize_with(shipment, vz_sha256, cache, overrides, log, &mut |format, file, out, log| match format {
         PackageFormat::Ps3DlcPkg => {
             check_format(file, format)?;
             let (doh, _, package_files) =
                 mercs2_formats::dlc_stfs::load_stfs_or_doh_with_streams(file).map_err(|e| format!("{}: {e}", file.display()))?;
+            log(&format!("converting against {}", vz_wad.display()));
             let ported = dlc_port::components::port(&doh, &package_files, vz_wad, None)?;
+            log(&format!("writing components to {}", out.display()));
             let written = dlc_port::components::write_components(out, &ported.chunks, &ported.streams)?;
-            log.push(format!("wrote {} asset rungs and {} streams", ported.chunks.len(), written.streams.len()));
+            log(&format!("wrote {} asset rungs and {} streams", ported.chunks.len(), written.streams.len()));
             Ok(Converted { assets: written.assets, streams: written.streams })
         }
     })
@@ -649,7 +679,7 @@ fn materialize_with(
     vz_sha256: &str,
     cache: &Path,
     overrides: &Overrides,
-    log: &mut Vec<String>,
+    log: &mut Log,
     convert: &mut Converter,
 ) -> Result<Staged, String> {
     let packages = packages_of(shipment);
@@ -670,7 +700,7 @@ fn materialize_with(
     let mut converted = BTreeMap::new();
     let mut folders = Vec::new();
     for p in &packages {
-        let (dir, c) = converted_package(p, vz_sha256, cache, overrides, convert, log)?;
+        let (dir, c) = converted_package(p, vz_sha256, cache, overrides, convert, &mut *log)?;
         folders.push(dir);
         converted.insert(p.id.to_string(), c);
     }
@@ -700,7 +730,7 @@ fn materialize_with(
     // file exists only once its owner holds it.
     let guard = lock(&cache.join("staging").join(format!("{shipment_key}.lock")))?;
     let held = lock(&runs.join(format!("{run}.lock")))?;
-    remove_old_staging(&runs, &run, log)?;
+    remove_old_staging(&runs, &run, &mut *log)?;
     drop(guard);
     let staging = runs.join(&run);
     std::fs::create_dir(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
@@ -711,7 +741,7 @@ fn materialize_with(
     for dir in &folders {
         link_tree(&dir.join("src"), &staging.join("src"))?;
     }
-    log.push(format!("staging copy {}", staging.display()));
+    log(&format!("staging copy {}", staging.display()));
 
     let mut manifest = shipment.manifest.clone();
     manifest.contributions = expand(&shipment.manifest.contributions, &converted)?;
@@ -853,9 +883,9 @@ mod tests {
         assert!(verify(&dir, 3, ABC).unwrap_err().contains("not a regular file"));
         let package = Package { id: "biua", format: PackageFormat::Ps3DlcPkg, url: "http://127.0.0.1:9/", sha256: ABC, size: 3 };
         let overrides = Overrides::from([("biua".to_string(), file.clone())]);
-        assert_eq!(package_file(&package, &dir, &overrides, &mut Vec::new()).unwrap(), file);
+        assert_eq!(package_file(&package, &dir, &overrides, &mut |_: &str| {}).unwrap(), file);
         let folder = Overrides::from([("biua".to_string(), dir.clone())]);
-        assert!(package_file(&package, &dir, &folder, &mut Vec::new()).unwrap_err().contains("not a regular file"));
+        assert!(package_file(&package, &dir, &folder, &mut |_: &str| {}).unwrap_err().contains("not a regular file"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -964,6 +994,19 @@ mod tests {
                     }
                 }
             }
+            "/three-mb" => {
+                if head(s, "200 OK", &format!("Content-Length: {}\r\n", 3 << 20)) {
+                    let mb = vec![0u8; 1 << 20];
+                    for i in 0..3 {
+                        if i > 0 {
+                            std::thread::sleep(Duration::from_millis(1500));
+                        }
+                        if s.write_all(&mb).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
             "/to-file" => _ = head(s, "302 Found", "Location: file:///etc/passwd\r\nContent-Length: 0\r\n"),
             "/to-abc" => _ = head(s, "302 Found", "Location: /abc\r\nContent-Length: 0\r\n"),
             "/loop" => _ = head(s, "302 Found", "Location: /loop\r\nContent-Length: 0\r\n"),
@@ -976,7 +1019,7 @@ mod tests {
         let base = serve();
         let dir = temp("download");
         let to = dir.join("packages").join(format!("{ABC}.pkg"));
-        let get = |path: &str, deadline: Duration| download(&format!("{base}{path}"), 3, ABC, &to, deadline, &mut Vec::new());
+        let get = |path: &str, deadline: Duration| download("pkg", &format!("{base}{path}"), 3, ABC, &to, deadline, &mut |_: &str| {});
         let minute = Duration::from_secs(60);
         for (path, deadline, says) in [
             ("/abd", minute, "sha256"),
@@ -995,10 +1038,40 @@ mod tests {
             assert_eq!(names_in(&dir.join("packages")), Vec::<String>::new(), "{path} left a file");
         }
         let mut log = Vec::new();
-        download(&format!("{base}/to-abc"), 3, ABC, &to, minute, &mut log).unwrap();
+        download("pkg", &format!("{base}/to-abc"), 3, ABC, &to, minute, &mut |l: &str| log.push(l.to_string())).unwrap();
         assert!(log.iter().any(|l| l.contains("redirects to") && l.ends_with("/abc")), "{log:?}");
         assert_eq!(std::fs::read(&to).unwrap(), b"abc");
         assert_eq!(names_in(&dir.join("packages")), [format!("{ABC}.pkg")]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_download_logs_its_progress_while_the_body_arrives() {
+        let base = serve();
+        let dir = temp("progress");
+        let size = 3u64 << 20;
+        let sha = hex(&Sha256::digest(vec![0u8; 3 << 20]));
+        let to = dir.join("packages").join(format!("{sha}.pkg"));
+        let url = format!("{base}/three-mb");
+        let start = Instant::now();
+        let mut lines: Vec<(Duration, String)> = Vec::new();
+        download("biua", &url, size, &sha, &to, Duration::from_secs(60), &mut |l: &str| lines.push((start.elapsed(), l.to_string()))).unwrap();
+        let text: Vec<&str> = lines.iter().map(|(_, l)| l.as_str()).collect();
+        let n = text.len();
+        assert!(n >= 4, "{text:?}");
+        assert_eq!(text[0], format!("fetch_package biua: downloading {url} (3 MB)"), "{text:?}");
+        assert_eq!(text[n - 2], "fetch_package biua: downloaded 3 of 3 MB", "{text:?}");
+        assert_eq!(text[n - 1], format!("downloaded {url} (3145728 bytes)"), "{text:?}");
+        let progress = &lines[1..n - 2];
+        let partial = |l: &str| (0..3).any(|mb| l == format!("fetch_package biua: downloaded {mb} of 3 MB"));
+        assert!(progress.iter().any(|(_, l)| partial(l)), "no progress line before the body ended: {text:?}");
+        assert!(progress.iter().all(|(_, l)| partial(l) || l == "fetch_package biua: downloaded 3 of 3 MB"), "{text:?}");
+        // Each line reached the sink when it was logged, not at the end: the server spends 3 s sending.
+        assert!(lines[n - 1].0 - lines[0].0 >= Duration::from_millis(2500), "{lines:?}");
+        for pair in progress.windows(2) {
+            assert!(pair[1].0 - pair[0].0 >= PROGRESS_EVERY, "two progress lines within {PROGRESS_EVERY:?}: {lines:?}");
+        }
+        assert_eq!(std::fs::read(&to).unwrap().len(), 3 << 20);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1009,7 +1082,7 @@ mod tests {
         let to = dir.join("packages").join(format!("{ABC}.pkg"));
         std::thread::scope(|scope| {
             let runs: Vec<_> = (0..4)
-                .map(|_| scope.spawn(|| download(&format!("{base}/abc"), 3, ABC, &to, Duration::from_secs(60), &mut Vec::new())))
+                .map(|_| scope.spawn(|| download("pkg", &format!("{base}/abc"), 3, ABC, &to, Duration::from_secs(60), &mut |_: &str| {})))
                 .collect();
             for r in runs {
                 r.join().unwrap().unwrap();
@@ -1025,9 +1098,9 @@ mod tests {
         let base = serve();
         let cache = temp("poison");
         let hostile = Package { id: "evil", format: PackageFormat::Ps3DlcPkg, url: &format!("{base}/abd"), sha256: ABC, size: 3 };
-        assert!(package_file(&hostile, &cache, &Overrides::new(), &mut Vec::new()).unwrap_err().contains("sha256"));
+        assert!(package_file(&hostile, &cache, &Overrides::new(), &mut |_: &str| {}).unwrap_err().contains("sha256"));
         let honest = Package { id: "biua", format: PackageFormat::Ps3DlcPkg, url: &format!("{base}/abc"), sha256: ABC, size: 3 };
-        let file = package_file(&honest, &cache, &Overrides::new(), &mut Vec::new()).unwrap();
+        let file = package_file(&honest, &cache, &Overrides::new(), &mut |_: &str| {}).unwrap();
         assert_eq!(std::fs::read(file).unwrap(), b"abc");
         std::fs::remove_dir_all(&cache).unwrap();
     }
@@ -1065,7 +1138,7 @@ mod tests {
     }
 
     /// A converter that writes one model rung and counts its calls.
-    fn fake(calls: &std::cell::Cell<usize>) -> impl FnMut(PackageFormat, &Path, &Path, &mut Vec<String>) -> Result<Converted, String> + '_ {
+    fn fake(calls: &std::cell::Cell<usize>) -> impl FnMut(PackageFormat, &Path, &Path, &mut Log) -> Result<Converted, String> + '_ {
         move |_, _, out, _| {
             calls.set(calls.get() + 1);
             Ok(model_rung(out))
@@ -1085,12 +1158,12 @@ mod tests {
             let runs: Vec<_> = (0..4)
                 .map(|_| {
                     scope.spawn(|| {
-                        let mut convert = |_: PackageFormat, _: &Path, out: &Path, _: &mut Vec<String>| -> Result<Converted, String> {
+                        let mut convert = |_: PackageFormat, _: &Path, out: &Path, _: &mut Log| -> Result<Converted, String> {
                             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             std::thread::sleep(Duration::from_millis(300));
                             Ok(model_rung(out))
                         };
-                        materialize_with(&s, "v", &cache, &overrides, &mut Vec::new(), &mut convert).unwrap()
+                        materialize_with(&s, "v", &cache, &overrides, &mut |_: &str| {}, &mut convert).unwrap()
                     })
                 })
                 .collect();
@@ -1121,7 +1194,7 @@ mod tests {
         let mut convert = fake(&calls);
         let mut stage = |lua: &str| {
             let s = shipment(&dir, &[("pkg", ABC)], lua);
-            materialize_with(&s, "v", &cache, &overrides, &mut Vec::new(), &mut convert).unwrap()
+            materialize_with(&s, "v", &cache, &overrides, &mut |_: &str| {}, &mut convert).unwrap()
         };
         let read = |s: &Staged, rel: &str| std::fs::read_to_string(s.shipment.root.join(rel)).unwrap();
 
@@ -1162,8 +1235,58 @@ mod tests {
         // Another vz.wad is another conversion.
         drop(fourth);
         let s = shipment(&dir, &[("pkg", ABC)], "five");
-        materialize_with(&s, "w", &cache, &overrides, &mut Vec::new(), &mut fake(&calls)).unwrap();
+        materialize_with(&s, "w", &cache, &overrides, &mut |_: &str| {}, &mut fake(&calls)).unwrap();
         assert_eq!(calls.get(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    #[test]
+    fn materialize_logs_each_step_as_it_starts() {
+        let dir = temp("log");
+        let cache = temp("log-cache");
+        let pkg = dir.join("p.pkg");
+        std::fs::write(&pkg, b"abc").unwrap();
+        let overrides = Overrides::from([("pkg".to_string(), pkg.clone())]);
+        let s = shipment(&dir, &[("pkg", ABC)], "one");
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let mut sink = |l: &str| lines.borrow_mut().push(l.to_string());
+        let verifying = format!("fetch_package pkg: verifying {} (sha256)", pkg.display());
+        let mut convert = |_: PackageFormat, file: &Path, out: &Path, log: &mut Log| -> Result<Converted, String> {
+            // The lines before the conversion reached the sink before it runs.
+            assert_eq!(*lines.borrow(), [verifying.clone(), format!("converting {} (fetch_package pkg)", file.display())]);
+            log("converter line");
+            assert_eq!(lines.borrow().last().map(String::as_str), Some("converter line"));
+            Ok(model_rung(out))
+        };
+        let first = materialize_with(&s, "v", &cache, &overrides, &mut sink, &mut convert).unwrap();
+        assert_eq!(
+            *lines.borrow(),
+            [
+                verifying.clone(),
+                format!("converting {} (fetch_package pkg)", pkg.display()),
+                "converter line".to_string(),
+                "fetch_package pkg: 1 assets, 0 streams".to_string(),
+                format!("staging copy {}", first.shipment.root.display()),
+            ]
+        );
+        let first_root = first.shipment.root.clone();
+        drop(first);
+        lines.borrow_mut().clear();
+        let calls = std::cell::Cell::new(0);
+        let second = materialize_with(&s, "v", &cache, &overrides, &mut sink, &mut fake(&calls)).unwrap();
+        let converted = cache.join("converted").join(converted_key(ABC, "v"));
+        assert_eq!(
+            *lines.borrow(),
+            [
+                verifying.clone(),
+                format!("fetch_package pkg: reusing the conversion in {}", converted.display()),
+                format!("removed the older staging copy {}", first_root.display()),
+                format!("staging copy {}", second.shipment.root.display()),
+            ]
+        );
+        assert_eq!(calls.get(), 0);
+        drop(second);
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&cache).unwrap();
     }
@@ -1176,17 +1299,17 @@ mod tests {
         std::fs::write(&pkg, b"abc").unwrap();
         let overrides = Overrides::from([("pkg".to_string(), pkg)]);
         let s = shipment(&dir, &[("pkg", ABC)], "one");
-        let mut failing = |_: PackageFormat, _: &Path, out: &Path, _: &mut Vec<String>| -> Result<Converted, String> {
+        let mut failing = |_: PackageFormat, _: &Path, out: &Path, _: &mut Log| -> Result<Converted, String> {
             std::fs::write(out.join("half"), b"x").unwrap();
             Err("the converter failed".to_string())
         };
-        let e = materialize_with(&s, "v", &cache, &overrides, &mut Vec::new(), &mut failing).err().unwrap();
+        let e = materialize_with(&s, "v", &cache, &overrides, &mut |_: &str| {}, &mut failing).err().unwrap();
         assert!(e.contains("the converter failed"), "{e}");
         let key = converted_key(ABC, "v");
         assert_eq!(names_in(&cache.join("converted")), [format!("{key}.lock")]);
         std::fs::create_dir_all(cache.join("converted").join(&key)).unwrap();
         let calls = std::cell::Cell::new(0);
-        let e = materialize_with(&s, "v", &cache, &overrides, &mut Vec::new(), &mut fake(&calls)).err().unwrap();
+        let e = materialize_with(&s, "v", &cache, &overrides, &mut |_: &str| {}, &mut fake(&calls)).err().unwrap();
         assert!(e.contains("incomplete") && e.contains(&key), "{e}");
         assert_eq!(calls.get(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1200,11 +1323,11 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         for sha in ["../../escape_target/relative_escape", "/tmp/absolute_escape", "D62081DE"] {
             let s = shipment(&dir, &[("pkg", sha)], "one");
-            let e = materialize_with(&s, "v", &cache, &Overrides::new(), &mut Vec::new(), &mut fake(&calls)).err().unwrap();
+            let e = materialize_with(&s, "v", &cache, &Overrides::new(), &mut |_: &str| {}, &mut fake(&calls)).err().unwrap();
             assert!(e.contains("64 lowercase hex"), "{e}");
         }
         let s = shipment(&dir, &[("pkg", ABC), ("pkg", ABC)], "one");
-        assert!(materialize_with(&s, "v", &cache, &Overrides::new(), &mut Vec::new(), &mut fake(&calls)).err().unwrap().contains("more than one"));
+        assert!(materialize_with(&s, "v", &cache, &Overrides::new(), &mut |_: &str| {}, &mut fake(&calls)).err().unwrap().contains("more than one"));
         assert!(!cache.exists());
         assert_eq!(calls.get(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1220,14 +1343,14 @@ mod tests {
         let overrides = Overrides::from([("a".to_string(), a), ("b".to_string(), b)]);
         let s = shipment(&dir, &[("a", ABC), ("b", ABD)], "one");
         let n = std::cell::Cell::new(0u32);
-        let mut convert = |_: PackageFormat, _: &Path, out: &Path, _: &mut Vec<String>| -> Result<Converted, String> {
+        let mut convert = |_: PackageFormat, _: &Path, out: &Path, _: &mut Log| -> Result<Converted, String> {
             n.set(n.get() + 1);
             let stream = "src/level/Audios/x.pws";
             std::fs::create_dir_all(out.join("src/level/Audios")).unwrap();
             std::fs::write(out.join(stream), b"pws").unwrap();
             Ok(Converted { assets: BTreeMap::from([(("model".to_string(), n.get()), Vec::new())]), streams: vec![stream.to_string()] })
         };
-        let e = materialize_with(&s, "v", &cache, &overrides, &mut Vec::new(), &mut convert).err().unwrap();
+        let e = materialize_with(&s, "v", &cache, &overrides, &mut |_: &str| {}, &mut convert).err().unwrap();
         assert!(e.contains("both convert the stream src/level/Audios/x.pws"), "{e}");
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&cache).unwrap();
@@ -1248,7 +1371,7 @@ mod tests {
         for (name, target) in [("leak.txt", outside.join("secret")), ("dirlink", outside.clone())] {
             let link = dir.join("src").join(name);
             std::os::unix::fs::symlink(&target, &link).unwrap();
-            let e = materialize_with(&s, "v", &cache, &overrides, &mut Vec::new(), &mut fake(&calls)).err().unwrap();
+            let e = materialize_with(&s, "v", &cache, &overrides, &mut |_: &str| {}, &mut fake(&calls)).err().unwrap();
             assert!(e.contains("a symlink") && e.contains(&link.display().to_string()), "{e}");
             std::fs::remove_file(&link).unwrap();
         }
