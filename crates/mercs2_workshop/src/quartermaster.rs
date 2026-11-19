@@ -759,7 +759,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddLevel { name, .. }
         | Contribution::LevelAsset { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
-        Contribution::AddShopItem { id, .. } => id.clone(),
+        Contribution::AddShopItem { id, .. } | Contribution::FetchPackage { id, .. } => id.clone(),
         Contribution::AddSound { bank, .. } => bank.clone(),
         Contribution::ReplaceSoundBank { bank, language, .. } => {
             mercs2_quartermaster::sound::entry_name(bank, *language)
@@ -882,7 +882,9 @@ fn row_of(ui: &mut egui::Ui, key: &str, value: &str, hover: &str, colour: Color3
             theme::font(&egui::TextStyle::Small),
             theme::FAINT,
         );
-        let max_chars = ((ui.available_width() / 6.2).floor() as usize).max(12);
+        // The value's own monospace advance, so a long value is cut to the width it really takes.
+        let glyph = ui.fonts_mut(|f| f.glyph_width(&theme::font(&egui::TextStyle::Monospace), '0'));
+        let max_chars = ((ui.available_width() / glyph).floor() as usize).max(12);
         let n = value.chars().count();
         let shown = if n <= max_chars {
             value.to_string()
@@ -935,6 +937,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_language", "New language", "Add a new selectable language (new base WAD)"),
             ("add_level", "New level", "Add a level the game boots by name (new base WAD)"),
             ("level_asset", "Level asset", "One asset of a level, in its PC form"),
+            ("fetch_package", "Fetched package", "A package the player's machine downloads and converts at build"),
         ],
     ),
     (
@@ -1299,6 +1302,14 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             from: None,
             templates: Vec::new(),
             edits: Default::default(),
+        },
+        // The url, sha256 and size name one file, so they start empty (M0316) until they are entered.
+        "fetch_package" => Contribution::FetchPackage {
+            id: format!("my_package_{n}"),
+            format: mercs2_quartermaster::package::PackageFormat::Ps3DlcPkg,
+            url: String::new(),
+            sha256: String::new(),
+            size: 0,
         },
         "add_shop_item" => Contribution::AddShopItem {
             id: format!("my_item_{n}"),
@@ -1742,6 +1753,27 @@ fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, requ
         theme::field_note(ui, theme::FieldState::Bad, "required");
     }
     r.lost_focus()
+}
+
+/// A field row whose value the form does not edit: the field's caption, and the value in the value
+/// column.
+fn derived_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        theme::field_label(ui, label);
+        ui.add(egui::Label::new(egui::RichText::new(value).monospace().color(theme::DIM)).truncate());
+    });
+}
+
+/// The optional `from:` of an `add_level` / `level_asset`: the id of the `fetch_package` its streams or
+/// rungs come from. Empty is no `from:`.
+fn from_row(ui: &mut egui::Ui, from: &mut Option<String>) -> bool {
+    let mut f = from.clone().unwrap_or_default();
+    if text_row(ui, "From", &mut f, "fetch_package id", false) {
+        *from = (!f.trim().is_empty()).then_some(f);
+        return true;
+    }
+    false
 }
 
 /// An editable list of blast-radius entries (`raw.touches`, `native_hook.touches`).
@@ -2639,25 +2671,50 @@ fn contribution_form(
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
-        Contribution::LevelAsset { level, asset_type, name, rungs, .. } => {
+        Contribution::LevelAsset { level, asset_type, name, rungs, from, .. } => {
             commit |= theme::text_field(ui, "Level", level, "dlc01", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Type", asset_type, "model", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Name", name, "0x00000000", theme::FieldState::Neutral).lost_focus();
-            for r in rungs.iter_mut() {
-                commit |= source_row(ui, "Rung", &mut r.file, root, &["ucfx"]);
+            commit |= from_row(ui, from);
+            match from {
+                Some(id) => derived_row(ui, "Rungs", &format!("from {id}")),
+                None => {
+                    for r in rungs.iter_mut() {
+                        commit |= source_row(ui, "Rung", &mut r.file, root, &["ucfx"]);
+                    }
+                }
             }
         }
-        Contribution::AddLevel { name, display, streams, .. } => {
+        Contribution::AddLevel { name, display, streams, from } => {
             commit |= theme::text_field(ui, "Level", name, "dlc01", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Display", display, "My Level", theme::FieldState::Neutral).lost_focus();
-            for s in streams.iter_mut() {
-                commit |= source_row(ui, "Stream", s, root, &["pws"]);
+            commit |= from_row(ui, from);
+            match from {
+                Some(id) => derived_row(ui, "Streams", &format!("from {id}")),
+                None => {
+                    for s in streams.iter_mut() {
+                        commit |= source_row(ui, "Stream", s, root, &["pws"]);
+                    }
+                }
             }
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
                 "ships as `.\\Data\\<name>-patch.wad` above a copy of vz.wad.",
             );
+        }
+        Contribution::FetchPackage { id, format, url, sha256, size } => {
+            commit |= text_row(ui, "Id", id, "biua_ps3", false);
+            commit |= theme::combo_field(
+                ui,
+                "Format",
+                format,
+                &[(mercs2_quartermaster::package::PackageFormat::Ps3DlcPkg, "ps3_dlc_pkg")],
+                theme::FieldState::Neutral,
+            );
+            commit |= text_row(ui, "URL", url, "http://…/package.pkg", false);
+            commit |= text_row(ui, "sha256", sha256, "64 lowercase hex digits", false);
+            commit |= number_row(ui, "Size", size, "bytes", |v| v.to_string(), |t| parse_whole(t, u64::MAX));
         }
         Contribution::NativeHook { target, plugin, symbol, touches, signature_guard: _ } => {
             // `both` is reserved and rejected in v1, so it is not offered.
@@ -3403,6 +3460,12 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::LevelAsset { level, asset_type, .. } => vec![
             ("Adds".to_string(), format!("{asset_type} to level {level}")),
             ("Merge".to_string(), "compiled into its level's patch".to_string()),
+        ],
+        // `blast::claims` gives a fetch_package none: what it converts is claimed by the rows that
+        // name it with `from:`.
+        Contribution::FetchPackage { id, url, .. } => vec![
+            ("Downloads".to_string(), url.clone()),
+            ("Used by".to_string(), format!("from: {id}")),
         ],
         // Discovery is filesystem order, so two plugins on one address have no load order that
         // resolves them — it has to be exclusive.
