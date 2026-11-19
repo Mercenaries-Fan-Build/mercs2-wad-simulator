@@ -218,9 +218,27 @@ pub struct Written {
     pub streams: Vec<String>,
 }
 
+/// Why a stream's name, which comes from the package's file table, cannot be a file name in one folder:
+/// empty, `.` or `..`, or holding a `/`, `\`, `:` or NUL, on any host.
+pub fn stream_name_refusal(name: &str) -> Option<&'static str> {
+    if name.is_empty() || name == "." || name == ".." {
+        Some("not a file name")
+    } else if name.contains(['/', '\\', ':', '\0']) {
+        Some("holds a path separator, `:` or NUL")
+    } else {
+        None
+    }
+}
+
 /// Write `chunks` and `streams` under `root`: one file per asset rung at
-/// `src/level/<type>/0x<name>.<rung>.ucfx`, and each stream at `src/level/Audios/<name>`.
+/// `src/level/<type>/0x<name>.<rung>.ucfx`, and each stream at `src/level/Audios/<name>`. A stream name
+/// [`stream_name_refusal`] refuses fails the call before anything is written.
 pub fn write_components(root: &Path, chunks: &[Chunk], streams: &StreamTable) -> Result<Written, String> {
+    for (name, _) in streams.streams() {
+        if let Some(why) = stream_name_refusal(name) {
+            return Err(format!("stream {name:?}: {why}"));
+        }
+    }
     let mut assets: BTreeMap<(String, u32), Rungs> = BTreeMap::new();
     for c in chunks {
         let ty = type_name_from_hash(c.ty);
@@ -323,6 +341,14 @@ mod tests {
         let after = with_generated_rows(&before, "  - kind: level_asset\n    name: new\n").unwrap();
         assert_eq!(after, format!("{head}\ncontributions:\n{authored}{GENERATED_MARKER}\n  - kind: level_asset\n    name: new\n"));
         assert_eq!(with_generated_rows(&after, "  - kind: level_asset\n    name: new\n").unwrap(), after);
+    }
+
+    #[test]
+    fn a_stream_name_is_one_file_name_on_every_host() {
+        assert_eq!(stream_name_refusal("vo_stream_dlctest.english.pws"), None);
+        for name in ["", ".", "..", "../../x.pws", "a/b.pws", r"..\..\x.pws", r"C:\x.pws", "c:x.pws", "/x.pws", "x\0.pws"] {
+            assert!(stream_name_refusal(name).is_some(), "{name:?}");
+        }
     }
 
     #[test]
