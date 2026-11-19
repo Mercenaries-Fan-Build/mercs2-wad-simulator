@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_quartermaster"
-version = "7.0.0"
+version = "7.1.0"
 edition = "2021"
 description = "Mercenaries 2 Shipment format: reads a manifest.yaml/.json/.toml, lints it against the engine's HANG-class traps, and builds it into an overlay WAD. Ships the `qm` CLI."
 license.workspace = true
@@ -52,6 +52,10 @@ semver = "1"
 # WAVs (`wav::read_pcm16_wav`) with the codecs that re-encode every retail bank byte-identically.
 # Decode/encode side only: no device output, so no `cpal` / ALSA in the CLI.
 mercs2_audio = { path = "../mercs2_audio", version = "3.0.1", default-features = false }
+# `fetch_package` (`package.rs`): the console DLC converter runs on the player's machine at build, and
+# the package is downloaded once into qm's cache. `ureq` is the blocking client the Workshop already uses.
+dlc_port = { workspace = true }
+ureq = "2"
 
 [dev-dependencies]
 # Only to BUILD a compressed `CFX` movie fixture. The `add_movie` lowering must accept one and ship
