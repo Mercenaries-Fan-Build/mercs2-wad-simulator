@@ -1440,7 +1440,7 @@ pub enum Contribution {
     /// Data. A package the player's machine downloads and converts at build, never shipped in the
     /// Shipment: `from:` on an `add_level` or a `level_asset` names it by `id`
     /// ([`crate::package::materialize`]). The file is kept in qm's cache under its sha256 and checked
-    /// against `size` and `sha256` on every build; a mismatch fails the build. `qm lint` checks the
+    /// against `size` and `sha256` before it is converted; a mismatch fails the build. `qm lint` checks the
     /// fields and never touches the network (M0316).
     FetchPackage {
         /// What `from:` names: a lowercase `[a-z0-9_]` token, unique in the Shipment.
