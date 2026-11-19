@@ -151,6 +151,10 @@ enum Command {
         /// kinds read the stores only from here; required when any is present.
         #[arg(long, value_name = "DIR")]
         original_data: Option<PathBuf>,
+        /// A local copy of a `fetch_package`, used instead of downloading it: `<id>=<path>`.
+        /// Checked against the row's size and sha256 like a download. Repeatable.
+        #[arg(long = "package", value_name = "ID=PATH")]
+        packages: Vec<String>,
     },
     /// Check a set of Shipments before building: requirements, versions, conflicts, superseded
     /// legacy files and the load order. Writes <out>/load-plan.json. No WAD is opened.
@@ -200,6 +204,10 @@ enum Command {
         /// kinds read the stores only from here; required when any is present.
         #[arg(long, value_name = "DIR")]
         original_data: Option<PathBuf>,
+        /// A local copy of a `fetch_package`, used instead of downloading it: `<id>=<path>`.
+        /// Checked against the row's size and sha256 like a download. Repeatable.
+        #[arg(long = "package", value_name = "ID=PATH")]
+        packages: Vec<String>,
     },
     /// Extract a destructible's state machine as an editable `states:` file.
     ///
@@ -300,6 +308,7 @@ fn main() -> ExitCode {
             workshop_data,
             names,
             original_data,
+            packages,
         } => cmd_build(
             &shipment,
             game.as_deref(),
@@ -308,6 +317,7 @@ fn main() -> ExitCode {
             workshop_data.as_deref(),
             names.as_deref(),
             original_data.as_deref(),
+            &packages,
         ),
         Command::Preflight {
             shipments,
@@ -323,6 +333,7 @@ fn main() -> ExitCode {
             corpus,
             workshop_data,
             original_data,
+            packages,
         } => cmd_link(
             &shipments,
             request.as_deref(),
@@ -331,6 +342,7 @@ fn main() -> ExitCode {
             corpus.as_deref(),
             workshop_data.as_deref(),
             original_data.as_deref(),
+            &packages,
         ),
         Command::ExtractStates {
             target,
@@ -359,6 +371,42 @@ fn load(root: &Path) -> Result<LoadedShipment, ExitCode> {
         eprintln!("error: {}: {e}", root.display());
         ExitCode::from(EXIT_UNUSABLE)
     })
+}
+
+/// `shipment` with its `fetch_package` rows resolved against the game's `vz.wad`
+/// ([`mercs2_quartermaster::package::materialize`]); a Shipment without one is returned as it is,
+/// without resolving the game. `packages` are the `--package <id>=<path>` copies.
+fn materialize(shipment: LoadedShipment, game_dir: Option<&Path>, packages: &[String]) -> Result<LoadedShipment, ExitCode> {
+    use mercs2_quartermaster::package;
+    let unusable = |name: &str, e: String| {
+        eprintln!("error: {name}: {e}");
+        ExitCode::from(EXIT_UNUSABLE)
+    };
+    let name = shipment.manifest.shipment.name.clone();
+    let has_package = shipment
+        .manifest
+        .contributions
+        .iter()
+        .any(|c| matches!(c, mercs2_quartermaster::Contribution::FetchPackage { .. }));
+    if !has_package {
+        if !packages.is_empty() {
+            return Err(unusable(&name, "--package was given, and the Shipment has no fetch_package".to_string()));
+        }
+        return Ok(shipment);
+    }
+    let mut overrides = package::Overrides::new();
+    for arg in packages {
+        let (id, path) = package::parse_override(arg).map_err(|e| unusable(&name, e))?;
+        overrides.insert(id, path);
+    }
+    let vz = compat::resolve_vz_wad(game_dir).map_err(|e| unusable(&name, e.to_string()))?;
+    let cache = package::cache_dir().map_err(|e| unusable(&name, e))?;
+    let mut log = Vec::new();
+    let result = package::materialize(&shipment, &vz, &cache, &overrides, &mut log);
+    for line in &log {
+        println!("{line}");
+    }
+    result.map_err(|e| unusable(&name, e))
 }
 
 /// Load the name lookup, or explain what is lost without it.
@@ -685,8 +733,17 @@ fn cmd_build(
     workshop_data: Option<&Path>,
     names_path: Option<&Path>,
     original_data: Option<&Path>,
+    packages: &[String],
 ) -> ExitCode {
     let shipment = match load(root) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    // A `fetch_package` Shipment builds from a staging copy; its output still defaults to the
+    // Shipment's own `_build`.
+    let default_out = root.join("_build");
+    let out = Some(out.unwrap_or(&default_out));
+    let shipment = match materialize(shipment, game_dir, packages) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -1013,6 +1070,7 @@ fn cmd_link(
     corpus: Option<&Path>,
     workshop_data: Option<&Path>,
     original_data: Option<&Path>,
+    packages: &[String],
 ) -> ExitCode {
     // The stale plan goes first, so every exit-2 path below leaves no plan behind.
     if let Err(e) = plan::remove_stale(out) {
@@ -1027,6 +1085,16 @@ fn cmd_link(
         Ok(o) => o,
         Err(code) => return code,
     };
+    // The link reads every `level: vz` row's rung files, so a `fetch_package` Shipment links from its
+    // staging copy.
+    let mut materialized = Vec::with_capacity(opened.len());
+    for s in opened {
+        match materialize(s, game_dir, packages) {
+            Ok(s) => materialized.push(s),
+            Err(code) => return code,
+        }
+    }
+    let opened = materialized;
     let mut stack = match resolve_game(game_dir, opened.iter().map(|s| &s.manifest)) {
         Ok(s) => s,
         Err(code) => return code,
