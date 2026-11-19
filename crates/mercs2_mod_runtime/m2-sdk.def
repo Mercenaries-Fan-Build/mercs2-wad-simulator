@@ -42,6 +42,10 @@ EXPORTS
     m2_lua_push_bool
     m2_lua_push_number
     m2_lua_push_string
+    m2_lua_ref
+    m2_lua_unref
+    m2_lua_push_ref
+    m2_lua_pcall
     m2_lua_debug_set_sink
     m2_lua_debug_on_paused
     m2_lua_debug_paused
