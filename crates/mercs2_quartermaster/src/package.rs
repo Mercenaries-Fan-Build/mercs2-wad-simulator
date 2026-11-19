@@ -1055,16 +1055,59 @@ mod tests {
 
     const MODEL: &str = "src/level/model/0x786ADB07.0.ucfx";
 
+    /// Write one model rung under `out`, as a conversion does.
+    fn model_rung(out: &Path) -> Converted {
+        let file = out.join(MODEL);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"model").unwrap();
+        let key = ("model".to_string(), mercs2_formats::hash::pandemic_hash_m2("pmc_hum_obama"));
+        Converted { assets: BTreeMap::from([(key, vec![("pmc_hum_obama_P000_Q3".to_string(), MODEL.to_string())])]), streams: Vec::new() }
+    }
+
     /// A converter that writes one model rung and counts its calls.
     fn fake(calls: &std::cell::Cell<usize>) -> impl FnMut(PackageFormat, &Path, &Path, &mut Vec<String>) -> Result<Converted, String> + '_ {
         move |_, _, out, _| {
             calls.set(calls.get() + 1);
-            let file = out.join(MODEL);
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, b"model").unwrap();
-            let key = ("model".to_string(), mercs2_formats::hash::pandemic_hash_m2("pmc_hum_obama"));
-            Ok(Converted { assets: BTreeMap::from([(key, vec![("pmc_hum_obama_P000_Q3".to_string(), MODEL.to_string())])]), streams: Vec::new() })
+            Ok(model_rung(out))
         }
+    }
+
+    #[test]
+    fn builds_at_once_convert_once_and_each_keeps_its_own_staging_copy() {
+        let dir = temp("parallel");
+        let cache = temp("parallel-cache");
+        let pkg = dir.join("p.pkg");
+        std::fs::write(&pkg, b"abc").unwrap();
+        let overrides = Overrides::from([("pkg".to_string(), pkg)]);
+        let s = shipment(&dir, &[("pkg", ABC)], "one");
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let staged: Vec<Staged> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut convert = |_: PackageFormat, _: &Path, out: &Path, _: &mut Vec<String>| -> Result<Converted, String> {
+                            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(300));
+                            Ok(model_rung(out))
+                        };
+                        materialize_with(&s, "v", &cache, &overrides, &mut Vec::new(), &mut convert).unwrap()
+                    })
+                })
+                .collect();
+            runs.into_iter().map(|r| r.join().unwrap()).collect()
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let roots: BTreeSet<&Path> = staged.iter().map(|s| s.shipment.root.as_path()).collect();
+        assert_eq!(roots.len(), 4);
+        for s in &staged {
+            assert_eq!(std::fs::read(s.shipment.root.join(MODEL)).unwrap(), b"model");
+            assert_eq!(std::fs::read_to_string(s.shipment.root.join("src/lua/a.lua")).unwrap(), "one");
+        }
+        let key = converted_key(ABC, "v");
+        assert_eq!(names_in(&cache.join("converted")), [key.clone(), format!("{key}.lock")]);
+        drop(staged);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&cache).unwrap();
     }
 
     #[test]
