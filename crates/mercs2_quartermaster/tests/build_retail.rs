@@ -1860,6 +1860,39 @@ fn a_built_wad_is_read_back_and_self_checked() {
 // add_movie
 // ---------------------------------------------------------------------------
 
+/// ★ Replacing SHELL, the front end's menu, ships in the shell patch: `shell.wad` holds the movie and
+/// the front end mounts only it and `shell-patch.wad`. No overlay is written, and the patch carries
+/// `shell.wad`'s CSUM row.
+#[test]
+fn replacing_shell_ships_in_the_shell_patch() {
+    let mut game = retail_game();
+    let dir = scratch("add_movie_shell");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let movie = tiny_gfx_movie();
+    std::fs::write(dir.join("src/ui.gfx"), &movie).unwrap();
+    let s = shipment(&dir, "  - kind: add_movie\n    name: SHELL\n    movie: src/ui.gfx\n");
+    let out = dir.join("_build");
+    let report = build::build(&s, Some(&mut game), None, Some(&out), None, None).expect("builds");
+    assert!(report.wad.is_none(), "no overlay: gameplay never shows SHELL");
+    assert!(!report.placements.iter().any(|p| p.destination == Destination::Overlay));
+    let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+    let shell_file = out.join(&shell.name);
+    let (hash, carried) = read_back_movie(&std::fs::read(&shell_file).unwrap());
+    assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("SHELL"));
+    assert_eq!(carried, movie);
+    let vz = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let shell_wad = mercs2_quartermaster::sound::sibling_wad(&vz, "shell.wad").unwrap();
+    assert_eq!(
+        mercs2_formats::donor::base_csum(&shell_file).unwrap(),
+        mercs2_formats::donor::base_csum(&shell_wad).unwrap(),
+        "the shell patch carries shell.wad's CSUM row"
+    );
+    assert!(
+        !mercs2_quartermaster::lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0192"),
+        "SHELL is a shipped movie, so replacing it is no M0192"
+    );
+}
+
 /// ★ `add_movie` end to end against the retail WADs — the injector the Scaleform work was missing.
 #[test]
 fn add_movie_builds_end_to_end() {
