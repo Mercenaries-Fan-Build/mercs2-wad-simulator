@@ -40,6 +40,7 @@ pub mod outfits;
 pub mod package;
 pub mod pe;
 pub mod plan;
+pub mod retail_movies;
 pub mod shader;
 pub mod shader_import;
 pub mod sound;
