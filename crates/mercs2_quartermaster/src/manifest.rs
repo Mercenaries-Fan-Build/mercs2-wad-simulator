@@ -613,6 +613,10 @@ fn default_shop_max_stock() -> u32 {
     99
 }
 
+fn default_shop_levels() -> Vec<String> {
+    vec![crate::level::VZ.to_string()]
+}
+
 /// Where an [`Contribution::AddModel`] prop's static collision comes from.
 ///
 /// The rigid `add_model` path injects a novel mesh into a donor container but keeps the donor's
@@ -1405,6 +1409,17 @@ pub enum Contribution {
         /// level is written by hand (M0316).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<String>,
+        /// The Extras ▸ Downloadable Content page lists every installed level: `display` is its map
+        /// name, `mission` the line under it and `details` its description, literal text. Omitted, the
+        /// page shows an empty line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mission: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<String>,
+        /// `YYYY-MM-DD`: the date the page shows (`month/day/year`) and sorts the list by. Omitted, the
+        /// page shows `//`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        date: Option<String>,
     },
     /// Data. One asset of an `add_level` of this Shipment, or of the main campaign (`level: vz`), in the
     /// PC container form of its type: every byte the asset has, so any type the engine loads can be
@@ -1563,6 +1578,13 @@ pub enum Contribution {
         /// The equipment `nType` (equipment catalog). Omit for support.
         #[serde(default)]
         equipment_type: Option<ShopEquipmentType>,
+        /// The levels the item is sold in: `vz`, the main campaign, and any custom level an
+        /// installed Shipment's `add_level` names. Default `[vz]`. Each level runs its own
+        /// worldentity, so a support item's `behaviour.cargo` and `behaviour.delivery_vehicle` must
+        /// name templates of the worldentity of every level listed: `qm link` refuses the set
+        /// otherwise, naming the item, the level and the template.
+        #[serde(default = "default_shop_levels")]
+        levels: Vec<String>,
     },
     /// The OPEN LOWER BOUND — opaque payload plus a DECLARED blast radius, so the linter and the
     /// conflict system can reason without understanding the bytes.
