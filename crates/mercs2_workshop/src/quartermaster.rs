@@ -911,6 +911,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_model", "New model", "A new model on a donor's rig"),
             ("add_texture", "New texture", "A new texture under a name you choose"),
             ("add_sound", "New sound bank", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
+            ("load_sound", "Load sound", "Load a soundbank, wavebank or stream from the mod loader"),
             ("replace_sound_bank", "Replace sound bank", "Replace every cue of a shipped sound bank, same entry name"),
             ("replace_sound_cue", "Replace sound cue", "Replace one cue of a shipped sound bank with a new WAV"),
             ("replace_sound_wave", "Replace a line", "Replace one line of a shipped wavebank wherever it plays"),
@@ -1112,6 +1113,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             cues: Vec::new(),
             load_in: Vec::new(),
         },
+        "load_sound" => Contribution::LoadSound { soundbank: None, wavebank: None, stream: None, sessions: Vec::new() },
         // The bank names a bank the game ships, so it starts empty (M0215) until it is entered.
         "replace_sound_bank" => Contribution::ReplaceSoundBank {
             bank: String::new(),
