@@ -157,7 +157,8 @@ enum Command {
         packages: Vec<String>,
     },
     /// Check a set of Shipments before building: requirements, versions, conflicts, superseded
-    /// legacy files and the load order. Writes <out>/load-plan.json. No WAD is opened.
+    /// legacy files and the load order. Writes <out>/load-plan.json. Reads the link's blocks
+    /// from the game's WADs.
     ///
     /// Exit 0: the plan is ok. Exit 1: the plan has error findings (it is still written, with the
     /// load order unless the requirements form a cycle). Exit 2: nothing could be checked, and no
