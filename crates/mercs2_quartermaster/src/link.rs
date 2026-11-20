@@ -752,6 +752,9 @@ pub struct SupportRegistration {
     pub delivery_vehicle: Option<String>,
     /// Vendor faction keys (Capitalized) for the deferred reward rows.
     pub shops: Vec<String>,
+    /// The levels the item is sold in (`add_shop_item`'s `levels`). Every level mints the module;
+    /// only these bake its row into their loader.
+    pub levels: Vec<String>,
 }
 
 /// One sound bank a loader must load: an `add_sound` bank (its wavebank and soundbank), or the
@@ -887,7 +890,8 @@ pub fn qm_modloader_library() -> crate::loader::Library {
     }
 }
 
-/// The `qm_shell_modloader` library, when any registration loads a bank in the front end.
+/// The `qm_shell_modloader` library, when any registration loads a bank in the front end or the set
+/// adds a level.
 pub fn qm_shell_modloader_library() -> crate::loader::Library {
     crate::loader::Library {
         module: QM_SHELL_MODLOADER_NAME.to_string(),
@@ -1075,6 +1079,159 @@ pub fn qm_shell_modloader_source(sounds: &[SoundBankRegistration], order: &[Stri
          {subs}",
         name = QM_SHELL_MODLOADER_NAME,
         subs = sound_subscriptions("shell.open", "shell.sound_exit", &sounds),
+    ))
+}
+
+/// One installed level on the Extras ▸ Downloadable Content page: an `add_level` of `shipment`
+/// ([`extras_page_source`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelEntry {
+    pub shipment: String,
+    /// The level's name, which the engine boots it by (`Sys.StartSingleplayer(name, name)`).
+    pub level: String,
+    /// The page's map name: the `add_level`'s `display`.
+    pub display: String,
+    pub mission: Option<String>,
+    pub details: Option<String>,
+    /// `(year, month, day)` ([`crate::level::parse_level_date`]).
+    pub date: Option<(u32, u32, u32)>,
+}
+
+/// The Extras ▸ Downloadable Content page's half of `qm_shell_modloader`: every installed level listed,
+/// in load `order`, then by level name. Empty without levels.
+///
+/// SHELL.gfx shows its DLC button while the movie's `DLCVisibleVar` is true when the Extras page is
+/// built; `DLCAvailable(true)` sets it and the movie clears it when it starts, so the loader sets it on
+/// every frame the shell movie is loaded (the shell Flash widget's `GuiUpdate`). Opening the page empties
+/// `DLCArray` and sends FSCommand `onlineListDLCMaps`; the next frame's update calls `addDLC` once per
+/// level (`Event.TimerRelative` never fires in the front end, live 2026-11-20), and an `addDLC` once the
+/// page is up sorts and redraws the list. Choosing an entry sends `onlineSelectDLC` with the level's
+/// name: the loader starts it as a single-player game of that level and master script. A name it did not
+/// list fails, naming it. qm edits SHELL so the page is reachable on PC and its hero pick starts the
+/// level (`data/shell_extras.tsv`).
+pub fn extras_page_source(levels: &[LevelEntry], order: &[String]) -> Result<String, LinkError> {
+    if levels.is_empty() {
+        return Ok(String::new());
+    }
+    let mut ordered: Vec<&LevelEntry> = levels.iter().collect();
+    sort_by_order(&mut ordered, order, |l| l.shipment.as_str(), |l| l.level.clone())?;
+    let mut rows = String::new();
+    for l in ordered {
+        let (y, m, d) = match l.date {
+            Some((y, m, d)) => (y.to_string(), m.to_string(), d.to_string()),
+            None => ("\"\"".to_string(), "\"\"".to_string(), "\"\"".to_string()),
+        };
+        rows.push_str(&format!(
+            "  {{ sOwner = {owner}, tEntry = {{ {level}, {y}, {m}, {d}, {display}, {mission}, \"\", {details}, true }} }},\n",
+            owner = lua_string(&l.shipment),
+            level = lua_string(&l.level),
+            display = lua_string(&l.display),
+            mission = lua_string(l.mission.as_deref().unwrap_or("")),
+            details = lua_string(l.details.as_deref().unwrap_or("")),
+        ));
+    }
+    Ok(format!(
+        "-- The Extras ▸ Downloadable Content page: every installed level.\n\
+         import(\"MrxGuiBase\")\n\
+         import(\"MrxGuiShellBootstrap\")\n\
+         -- addDLC(internalName, year, month, day, mapName, missionName, screenshot, missionDetails, isGood):\n\
+         -- SHELL.gfx's parameter order. The page draws mapName, month/day/year, missionName, missionDetails.\n\
+         local tLevels = {{\n{rows}}}\n\
+         local bLoadedSeen = false\n\
+         local bEntriesPending = false\n\
+         local function guarded(sOwner, sWhere, fn, ...)\n\
+         \x20 local ok, err = pcall(fn, ...)\n\
+         \x20 if not ok then\n\
+         \x20   QM.fail(sOwner, sWhere, err)\n\
+         \x20 end\n\
+         end\n\
+         local function shellFlash()\n\
+         \x20 if type(_GuiInternal) ~= \"table\" or type(_GuiInternal.SetFlashCallback) ~= \"function\" or type(_GuiInternal.CallFlashScriptFunction) ~= \"function\" then\n\
+         \x20   error(\"_GuiInternal.SetFlashCallback or CallFlashScriptFunction is missing from the front end's Lua state\")\n\
+         \x20 end\n\
+         \x20 local oShell = MrxGuiBase.GetWidgetByName(\"Shell\")\n\
+         \x20 if oShell == nil then\n\
+         \x20   error(\"the Shell widget does not exist\")\n\
+         \x20 end\n\
+         \x20 local oFlash = oShell.CustomData.oFlash\n\
+         \x20 if oFlash == nil then\n\
+         \x20   error(\"the Shell widget has no Flash widget (CustomData.oFlash)\")\n\
+         \x20 end\n\
+         \x20 return oFlash\n\
+         end\n\
+         local function levelNamed(sName)\n\
+         \x20 for _, t in ipairs(tLevels) do\n\
+         \x20   if t.tEntry[1] == sName then\n\
+         \x20     return t\n\
+         \x20   end\n\
+         \x20 end\n\
+         end\n\
+         local function addEntries(oFlash)\n\
+         \x20 for _, t in ipairs(tLevels) do\n\
+         \x20   local tArgs = {{}}\n\
+         \x20   for i = 1, #t.tEntry do\n\
+         \x20     tArgs[i] = t.tEntry[i]\n\
+         \x20   end\n\
+         \x20   guarded(t.sOwner, \"Extras level \" .. t.tEntry[1], function()\n\
+         \x20     oFlash:CallActionScriptCallback(\"addDLC\", tArgs)\n\
+         \x20   end)\n\
+         \x20   print(\"[qm] Extras: \" .. t.tEntry[1] .. \" listed\")\n\
+         \x20 end\n\
+         end\n\
+         local function onListDLCMaps(oFlash, sArg)\n\
+         \x20 bEntriesPending = true\n\
+         end\n\
+         local function startLevel(t)\n\
+         \x20 for _, sName in ipairs({{\"SetLevelName\", \"SetMasterScriptName\", \"StartSingleplayer\"}}) do\n\
+         \x20   if type(Sys[sName]) ~= \"function\" then\n\
+         \x20     error(\"Sys.\" .. sName .. \" is missing from the front end's Lua state\")\n\
+         \x20   end\n\
+         \x20 end\n\
+         \x20 local sLevel = t.tEntry[1]\n\
+         \x20 MrxGuiShellBootstrap.nPlayersSelected = 1\n\
+         \x20 Sys.SetLevelName(sLevel)\n\
+         \x20 Sys.SetMasterScriptName(sLevel)\n\
+         \x20 print(\"[qm] Extras: Sys.StartSingleplayer(\" .. sLevel .. \", \" .. sLevel .. \")\")\n\
+         \x20 Sys.StartSingleplayer(sLevel, sLevel)\n\
+         \x20 MrxGuiShellBootstrap.bNeedsReloading = true\n\
+         end\n\
+         local function onSelectDLC(oFlash, sArg)\n\
+         \x20 local t = levelNamed(sArg)\n\
+         \x20 if t == nil then\n\
+         \x20   QM.fail({qm}, \"onlineSelectDLC\", \"the Extras page chose \" .. tostring(sArg) .. \", and no installed Shipment adds a level of that name\")\n\
+         \x20   return\n\
+         \x20 end\n\
+         \x20 guarded(t.sOwner, \"Extras level \" .. sArg, startLevel, t)\n\
+         end\n\
+         local function register(oFlash)\n\
+         \x20 oFlash:SetFlashEventHandler(\"onlineListDLCMaps\", onListDLCMaps, {{}})\n\
+         \x20 oFlash:SetFlashEventHandler(\"onlineSelectDLC\", onSelectDLC, {{}})\n\
+         end\n\
+         local function update(oFlash, nDeltaTime)\n\
+         \x20 guarded({qm}, \"Extras page update\", function()\n\
+         \x20   if oFlash.CustomData.bLoaded ~= true then\n\
+         \x20     bLoadedSeen = false\n\
+         \x20     return\n\
+         \x20   end\n\
+         \x20   if not bLoadedSeen then\n\
+         \x20     bLoadedSeen = true\n\
+         \x20     register(oFlash)\n\
+         \x20   end\n\
+         \x20   oFlash:CallActionScriptCallback(\"DLCAvailable\", {{true}})\n\
+         \x20   if bEntriesPending then\n\
+         \x20     bEntriesPending = false\n\
+         \x20     addEntries(oFlash)\n\
+         \x20   end\n\
+         \x20 end)\n\
+         end\n\
+         QM.on(\"shell.open\", function()\n\
+         \x20 local oFlash = shellFlash()\n\
+         \x20 register(oFlash)\n\
+         \x20 bLoadedSeen = false\n\
+         \x20 oFlash:SetEventHandler(\"GuiUpdate\", update)\n\
+         \x20 print(\"[qm] Extras: \" .. #tLevels .. \" level(s) on the Downloadable Content page\")\n\
+         end, {qm})\n",
+        qm = lua_string(crate::loader::QM_OWNER),
     ))
 }
 
@@ -1384,14 +1541,16 @@ fn link_session_hooks(
 /// `hooks` says.
 ///
 /// Each `add_script` library that loads in the front end is minted into the block that carries
-/// `shellbootstrap`, in load order. When any of `sound_regs` loads a bank in the front end,
-/// `qm_shell_modloader` ([`qm_shell_modloader_source`]) is minted beside them and loads as qm's own
-/// library. Then the front end's hooks are spliced onto their hosts ([`link_session_hooks`]): the entry
-/// `shell.boot` onto `shellbootstrap`, which loads the libraries. Nothing is recompiled from the corpus.
-/// Every touched block must still CSUM-verify.
+/// `shellbootstrap`, in load order. When any of `sound_regs` loads a bank in the front end, or the set
+/// adds a level (`levels`, the Extras page's entries, [`extras_page_source`]), `qm_shell_modloader`
+/// ([`qm_shell_modloader_source`]) is minted beside them and loads as qm's own library. Then the front
+/// end's hooks are spliced onto their hosts ([`link_session_hooks`]): the entry `shell.boot` onto
+/// `shellbootstrap`, which loads the libraries. Nothing is recompiled from the corpus. Every touched
+/// block must still CSUM-verify.
 pub fn link_front_end(
     blocks: &mut [TargetBlock<'_>],
     sound_regs: &[SoundBankRegistration],
+    levels: &[LevelEntry],
     additions: &[ScriptAddition],
     order: &[String],
     hooks: QmHooks,
@@ -1399,9 +1558,10 @@ pub fn link_front_end(
     let session = crate::manifest::LoadSession::FrontEnd;
     let sounds = session_sounds(sound_regs, session, order)?;
     let shipment_libraries = session_libraries(additions, session, order)?;
+    let loader = !sounds.is_empty() || !levels.is_empty();
     let splice = match hooks {
         QmHooks::Always => true,
-        QmHooks::ForLibraries => !sounds.is_empty() || !shipment_libraries.is_empty(),
+        QmHooks::ForLibraries => loader || !shipment_libraries.is_empty(),
     };
     if !splice {
         return Ok(LinkOutput { scripts: Vec::new(), findings: Vec::new(), modules: Vec::new() });
@@ -1427,8 +1587,8 @@ pub fn link_front_end(
             block: bi,
         });
     }
-    if !sounds.is_empty() {
-        let source = qm_shell_modloader_source(sound_regs, order)?;
+    if loader {
+        let source = format!("{}{}", qm_shell_modloader_source(sound_regs, order)?, extras_page_source(levels, order)?);
         refuse_taken(blocks, QM_SHELL_MODLOADER_NAME, MODLOADER_CONTRIBUTOR)?;
         let bytecode = mercs2_luac::compile(&source, QM_SHELL_MODLOADER_NAME).map_err(|e| LinkError::Compile {
             target: QM_SHELL_MODLOADER_NAME.to_string(),
@@ -1438,8 +1598,10 @@ pub fn link_front_end(
             target: QM_SHELL_MODLOADER_NAME.to_string(),
             message: m,
         })?;
-        let mut names: Vec<&String> = sounds.iter().map(|r| &r.shipment).collect();
+        let mut names: Vec<&String> = sounds.iter().map(|r| &r.shipment).chain(levels.iter().map(|l| &l.shipment)).collect();
+        names.sort();
         names.dedup();
+        sort_by_order(&mut names, order, |n| n.as_str(), |_| ())?;
         linked.push(LinkedScript {
             target: QM_SHELL_MODLOADER_NAME.to_string(),
             contributors: names.into_iter().cloned().collect(),
@@ -1450,7 +1612,7 @@ pub fn link_front_end(
         });
     }
     // qm's own loader loads first.
-    let qm = (!sounds.is_empty()).then(qm_shell_modloader_library);
+    let qm = loader.then(qm_shell_modloader_library);
     let libraries: Vec<crate::loader::Library> = qm.iter().chain(&shipment_libraries).cloned().collect();
     linked.extend(link_session_hooks(blocks, &libraries, session, None)?);
     for b in linked.iter().map(|l| l.block).collect::<BTreeSet<_>>() {
@@ -1764,7 +1926,9 @@ pub fn link_into_level_blocks(
             imported.push(imported_module(&r.module, &r.shipment, session));
         }
 
-        let source = qm_modloader_source(ui_regs, layer_regs, support_regs, sound_regs, order)?;
+        // A novel item's row goes into the loader of each level it is sold in.
+        let sold: Vec<SupportRegistration> = support_regs.iter().filter(|r| r.levels.iter().any(|l| l == level)).cloned().collect();
+        let source = qm_modloader_source(ui_regs, layer_regs, &sold, sound_regs, order)?;
         refuse_taken(blocks, QM_MODLOADER_NAME, MODLOADER_CONTRIBUTOR)?;
         // BARE chunk name, like every other script here — see the module note.
         let bytecode =
@@ -2480,6 +2644,105 @@ function UnloadSoundBank(n, cb) table.insert(calls, "UnloadSoundBank " .. n .. (
         );
     }
 
+    /// ★ The Extras page, run against a stand-in for the shell movie: `shell.open` registers the page's
+    /// handlers and the shell Flash widget's per-frame update, which asserts `DLCAvailable(true)` on
+    /// every frame the movie is loaded. A list request adds every level on the next frame, in load order,
+    /// with its date (or empty fields without one); choosing a level starts it as a single-player game of
+    /// that level and master script; a name no Shipment adds a level of fails, naming it.
+    #[test]
+    fn the_extras_page_lists_every_level_and_starts_the_one_chosen() {
+        let order = names(&["b-maps", "a-maps"]);
+        let levels = [
+            LevelEntry {
+                shipment: "a-maps".into(),
+                level: "qm_a".into(),
+                display: "A \"map\"".into(),
+                mission: None,
+                details: None,
+                date: None,
+            },
+            LevelEntry {
+                shipment: "b-maps".into(),
+                level: "qm_b".into(),
+                display: "B".into(),
+                mission: Some("B pack".into()),
+                details: Some("four missions".into()),
+                date: Some((2008, 11, 25)),
+            },
+        ];
+        let hosts = session_hosts(
+            LoadSession::FrontEnd,
+            &[qm_shell_modloader_library()],
+            &[("mrxsound", "function EnterShellState() table.insert(calls, \"retail EnterShellState\") end\n")],
+        );
+        let gui = r#"
+__handlers = {}
+__flash = { CustomData = { bLoaded = true } }
+function __flash:SetFlashEventHandler(name, fn, args) __handlers[name] = fn end
+function __flash:SetEventHandler(name, fn) __handlers[name] = fn end
+function __flash:CallActionScriptCallback(name, args)
+  local t = {}
+  for i = 1, #args do t[i] = tostring(args[i]) end
+  table.insert(calls, name .. " " .. table.concat(t, "|"))
+end
+function GetWidgetByName(name) if name == "Shell" then return { CustomData = { oFlash = __flash } } end end
+"#;
+        let lua = module_vm(&[
+            ("mrxsound", hosts["mrxsound"].clone()),
+            ("shellbootstrap", hosts["shellbootstrap"].clone()),
+            ("MrxSoundBanks", BANKS.to_string()),
+            ("MrxGuiBase", gui.to_string()),
+            ("MrxGuiShellBootstrap", String::new()),
+            (
+                QM_SHELL_MODLOADER_NAME,
+                format!("{}{}", qm_shell_modloader_source(&[], &order).unwrap(), extras_page_source(&levels, &order).unwrap()),
+            ),
+        ]);
+        lua.load(
+            r#"
+_GuiInternal = { SetFlashCallback = function() end, CallFlashScriptFunction = function() end }
+Sys.SetLevelName = function(s) table.insert(calls, "SetLevelName " .. s) end
+Sys.SetMasterScriptName = function(s) table.insert(calls, "SetMasterScriptName " .. s) end
+Sys.StartSingleplayer = function(a, b) table.insert(calls, "StartSingleplayer " .. a .. " " .. b) end
+import("mrxsound")
+import("shellbootstrap")
+mrxsound.EnterShellState()
+local f = _MODULES.MrxGuiBase.GetWidgetByName("Shell").CustomData.oFlash
+_MODULES.MrxGuiBase.__handlers.GuiUpdate(f, 0)
+_MODULES.MrxGuiBase.__handlers.onlineListDLCMaps(f, true)
+_MODULES.MrxGuiBase.__handlers.GuiUpdate(f, 0)
+_MODULES.MrxGuiBase.__handlers.onlineSelectDLC(f, "qm_b")
+table.insert(calls, "nPlayersSelected " .. tostring(_MODULES.MrxGuiShellBootstrap.nPlayersSelected))
+"#,
+        )
+        .exec()
+        .expect("the front end runs");
+        let got = calls(&lua);
+        let at = got.iter().position(|c| c == "[qm] Extras: 2 level(s) on the Downloadable Content page").expect("shell.open set the page up");
+        assert_eq!(
+            got[at + 1..],
+            [
+                "DLCAvailable true",
+                "DLCAvailable true",
+                "addDLC qm_b|2008|11|25|B|B pack||four missions|true",
+                "[qm] Extras: qm_b listed",
+                "addDLC qm_a||||A \"map\"||||true",
+                "[qm] Extras: qm_a listed",
+                "SetLevelName qm_b",
+                "SetMasterScriptName qm_b",
+                "[qm] Extras: Sys.StartSingleplayer(qm_b, qm_b)",
+                "StartSingleplayer qm_b qm_b",
+                "nPlayersSelected 1",
+            ]
+        );
+        lua.load("_MODULES.MrxGuiBase.__handlers.onlineSelectDLC(nil, \"qm_none\")").exec().unwrap_or(());
+        let failed = calls(&lua);
+        assert!(
+            failed.iter().any(|c| c.contains("qm_none") && c.contains("no installed Shipment adds a level of that name")),
+            "{failed:?}"
+        );
+    }
+
     /// ★ A gameplay session, run: the world entry loads `qm_modloader`; `world.begin` (after retail's
     /// `_StartPlayerVisibleGameplay`, not on a retry, when the same wrapper dispatches `world.retry`)
     /// runs each registration once per VM and loads the banks; `world.sound_exit` (after retail's
@@ -2733,6 +2996,7 @@ function UnloadSoundBank(n, cb) table.insert(calls, "UnloadSoundBank " .. n .. (
             cargo: None,
             delivery_vehicle: None,
             shops: vec!["Pmc".into()],
+            levels: vec![crate::level::VZ.into()],
         }
     }
 
