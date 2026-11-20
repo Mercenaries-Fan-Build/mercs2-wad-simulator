@@ -88,6 +88,11 @@ contributions:
         cue_16: 0
         clip_hash: 0x0
 
+  - kind: load_sound
+    soundbank: vo_mattias
+    wavebank: ui_hud
+    in: [gameplay]
+
   - kind: replace_sound_bank
     bank: vo_mattias
     language: english
@@ -383,6 +388,12 @@ const JSON: &str = r#"
       "category": "ambience",
       "load_in": ["gameplay", "front_end"],
       "cues": [{ "name": "my_jungle_birds", "wave": "src/audio/birds.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }]
+    },
+    {
+      "kind": "load_sound",
+      "soundbank": "vo_mattias",
+      "wavebank": "ui_hud",
+      "in": ["gameplay"]
     },
     {
       "kind": "replace_sound_bank",
@@ -687,6 +698,12 @@ load_in = ["gameplay", "front_end"]
 cues = [{ name = "my_jungle_birds", wave = "src/audio/birds.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }]
 
 [[contributions]]
+kind = "load_sound"
+soundbank = "vo_mattias"
+wavebank = "ui_hud"
+in = ["gameplay"]
+
+[[contributions]]
 kind = "replace_sound_bank"
 bank = "vo_mattias"
 language = "english"
@@ -944,6 +961,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_model",
             "add_texture",
             "add_sound",
+            "load_sound",
             "replace_sound_bank",
             "replace_sound_cue",
             "replace_sound_wave",
@@ -1511,6 +1529,8 @@ fn the_fixtures_exercise_every_kind_the_format_knows() {
         "kinds in the format with no conformance fixture: {missing:?} — add one to YAML, JSON and \
          TOML, or remove the kind"
     );
+    let unlisted: Vec<&&str> = present.iter().filter(|k| !Contribution::ALL_KINDS.contains(*k)).collect();
+    assert!(unlisted.is_empty(), "kinds the fixtures exercise that ALL_KINDS does not list: {unlisted:?}");
 }
 
 /// The two string-table kinds are spelled `add_stringdb_keys` and `replace_stringdb_text` — the tag
