@@ -1613,6 +1613,7 @@ impl Contribution {
         "add_model",
         "add_texture",
         "add_sound",
+        "load_sound",
         "replace_sound_bank",
         "replace_sound_cue",
         "replace_sound_wave",
