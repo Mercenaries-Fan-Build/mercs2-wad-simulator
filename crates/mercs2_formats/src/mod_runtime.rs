@@ -8,7 +8,7 @@
 //! target only. The C contract is the Shipment's `m2/*.h`; the semantics are documented there and on the
 //! safe wrappers below.
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 
 pub type Hmodule = *mut c_void;
 /// `int f(void* L)`, cdecl: a Lua C function, returning how many values it pushed.
@@ -247,6 +247,22 @@ impl RefTable {
     }
 }
 
+/// Why `m2_lua_add_namespace(table, fields)` is refused, given every `(table, field)` added before it. Several
+/// mods may add to one table, the engine's own `Net` say (`luaL_register` adds to the table already there), but
+/// each field of a table only once: a second add of a field would silently replace another mod's function.
+pub fn namespace_add_refused(earlier: &[(&CStr, &CStr)], table: &CStr, fields: &[&CStr]) -> Option<String> {
+    for (i, field) in fields.iter().enumerate() {
+        let name = || format!("{}.{}", table.to_string_lossy(), field.to_string_lossy());
+        if earlier.iter().any(|(t, f)| *t == table && f == field) {
+            return Some(format!("{} is already added", name()));
+        }
+        if fields[..i].contains(field) {
+            return Some(format!("{} is named twice in one table", name()));
+        }
+    }
+    None
+}
+
 /// `M2_VERSION_NUM` of a version: `major * 10000 + minor * 100 + patch` (`m2_version.h`).
 pub fn version_num(major: i32, minor: i32, patch: i32) -> i32 {
     major * 10000 + minor * 100 + patch
@@ -310,7 +326,8 @@ mod safe {
         if unsafe { ffi::m2_lua_install() } == 1 { Ok(()) } else { Err(last_error()) }
     }
 
-    /// Add the global table `name` of `fns` (ending with a NULL-name row) to every state.
+    /// Add `fns` (ending with a NULL-name row) to the global table `name` on every state; other mods may add
+    /// other functions to the same table ([`namespace_add_refused`](super::namespace_add_refused)).
     pub fn lua_add_namespace(name: &'static CStr, fns: &'static [LuaReg]) -> Result<(), String> {
         match fns.last() {
             Some(last) if last.name.is_null() => {}
@@ -726,6 +743,28 @@ mod tests {
         assert!(t.check_thread(G, 9).is_err(), "a script seen on another thread does not move a known state");
         t.state_created(G, 9);
         assert_eq!(t.check_thread(G, 9), Ok(()), "a rebuilt state runs where it was built");
+    }
+
+    /// multiplayer-restored adds `Net.GetUserName` and the leaderboard functions, blow-it-up-again adds
+    /// `Net.DLCGetMountPoint`: both reach the engine's `Net`.
+    #[test]
+    fn two_mods_add_different_functions_to_one_table() {
+        let earlier = [(c"Mp", c"GetRoomKey"), (c"Net", c"GetUserName"), (c"Net", c"LeaderboardPushScore"), (c"Pg", c"SetCheatsUsed")];
+        assert_eq!(namespace_add_refused(&earlier, c"Net", &[c"DLCGetMountPoint"]), None);
+        assert_eq!(namespace_add_refused(&earlier, c"Gui", &[c"GetUserName"]), None, "the same field in another table");
+    }
+
+    #[test]
+    fn a_function_already_added_to_a_table_is_refused() {
+        let earlier = [(c"Net", c"GetUserName"), (c"Net", c"LeaderboardPushScore")];
+        assert_eq!(
+            namespace_add_refused(&earlier, c"Net", &[c"DLCGetMountPoint", c"LeaderboardPushScore"]),
+            Some("Net.LeaderboardPushScore is already added".into())
+        );
+        assert_eq!(
+            namespace_add_refused(&[], c"M2Smoke", &[c"Ping", c"Echo", c"Ping"]),
+            Some("M2Smoke.Ping is named twice in one table".into())
+        );
     }
 
     #[test]
