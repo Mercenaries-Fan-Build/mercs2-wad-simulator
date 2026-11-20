@@ -30,7 +30,9 @@
 //! `add_movie` needs NO game stack: a Scaleform movie is self-contained, so unlike a texture
 //! replacement (whose dimensions come from the target) or a model (whose rig comes from a donor)
 //! there is nothing to read out of retail. It therefore lowers with `game: None`, as `add_texture`,
-//! `add_animation` and `add_sound` do.
+//! `add_animation` and `add_sound` do. Where its block goes comes from `data/retail_movies.tsv`
+//! ([`crate::retail_movies`]): a `shell.wad` movie's block goes to the shell patch, which carries
+//! `shell.wad`'s CSUM row, so only that case needs the game.
 //!
 //! `native_hook` and `place_file` are the kinds that produce no WAD content at all — a file placed
 //! in the game folder, plus the [`Placement`] record that makes the drop reversible. `native_hook`
@@ -837,6 +839,9 @@ enum Lowering {
     /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
     /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
     Blocks(Vec<PatchBlock>),
+    /// An `add_movie` / `add_ui` block, bound for the patch of the level that mounts the WAD retail ships
+    /// the movie in ([`crate::retail_movies::route`]).
+    Movie(PatchBlock, crate::retail_movies::MovieRoute),
     /// A NEW language's base WAD placed in `data/`. The engine mounts
     /// `.\Data\<language>.wad` in its language slot, above the level WAD (`FUN_004BFE20`), so its
     /// string table, fonts and voice-over tables resolve from there. `stream_copy` is the voice
@@ -3487,7 +3492,8 @@ fn lower(
         }
 
         Contribution::AddMovie { name, movie } => {
-            Ok(Lowering::Block(lower_movie(root, name, movie, index, kind, log)?))
+            let route = crate::retail_movies::route(name).map_err(|message| BuildError::Lower { index, kind, message })?;
+            Ok(Lowering::Movie(lower_movie(root, name, movie, index, kind, log)?, route))
         }
 
         // add_ui = the Data half of add_movie (this cfx_pack) + a Script half the linker bakes into
@@ -3495,7 +3501,8 @@ fn lower(
         // same primary cfx_pack ASET row — so a hand-authored `add_movie` + trampoline and an `add_ui`
         // ship byte-identical Data. The composition, not a new format, is what makes the movie appear.
         Contribution::AddUi { name, movie } => {
-            Ok(Lowering::Block(lower_movie(root, name, movie, index, kind, log)?))
+            let route = crate::retail_movies::route(name).map_err(|message| BuildError::Lower { index, kind, message })?;
+            Ok(Lowering::Movie(lower_movie(root, name, movie, index, kind, log)?, route))
         }
 
         // Contributes no block: its whole effect is a declared mutation, collected by
@@ -4781,6 +4788,8 @@ pub fn build(
     // the first conflict, hiding the rest.
 
     let mut blocks = Vec::new();
+    // add_movie / add_ui blocks of `shell.wad` movies: they join the shell patch below.
+    let mut shell_movies: Vec<PatchBlock> = Vec::new();
     let mut files = Vec::new();
     let mut lang_wads: Vec<(String, String, Vec<PatchBlock>, (String, String))> = Vec::new();
     let mut level_wads: Vec<(String, String, crate::level::Level)> = Vec::new();
@@ -4798,6 +4807,17 @@ pub fn build(
             Lowering::Nothing => {}
             Lowering::Block(b) => blocks.push(b),
             Lowering::Blocks(bs) => blocks.extend(bs),
+            Lowering::Movie(b, route) => {
+                use crate::retail_movies::MovieRoute;
+                match route {
+                    MovieRoute::Overlay => blocks.push(b),
+                    MovieRoute::Shell => shell_movies.push(b),
+                    MovieRoute::ShellAndOverlay => {
+                        shell_movies.push(b.clone());
+                        blocks.push(b);
+                    }
+                }
+            }
             Lowering::LanguageWad {
                 language,
                 display,
@@ -4850,6 +4870,7 @@ pub fn build(
     let engine_banks = lowered.engine_banks;
     blocks.extend(lowered.overlay);
     let mut shell_blocks: Vec<PatchBlock> = lowered.shell;
+    shell_blocks.extend(shell_movies);
     let language_blocks = lowered.language;
     let sound_regs = lowered.registrations;
     let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
