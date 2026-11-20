@@ -52,7 +52,7 @@ fn run(game_wad: &Path, out_dir: &Path, mark: Option<&Path>, shipments: &[PathBu
                 return Err(format!("{}: contributions[{i}] is {}; the forge handles add_script and patch_lua only", dir.display(), c.kind()));
             }
         }
-        mutations.extend(build::script_mutations(&s.manifest, &s.root).map_err(|e| format!("{}: {e}", dir.display()))?);
+        mutations.extend(build::script_mutations(&s.manifest, &s.root, mercs2_quartermaster::level::VZ).map_err(|e| format!("{}: {e}", dir.display()))?);
         additions.extend(build::script_additions(&s.manifest, &s.root).map_err(|e| format!("{}: {e}", dir.display()))?);
         order.push(s.manifest.shipment.name.clone());
     }
