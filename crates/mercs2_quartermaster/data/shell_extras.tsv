@@ -1,0 +1,22 @@
+# qm's edit of retail SHELL (sha256 ca06957d6184d6f460b9549844fed999779f53d1ca825d86c13436269015c851) so the Extras page
+# lists the installed levels on PC and starts the one chosen (crate::shell_extras). The result's sha256 is
+# 7a35577c6393d9c5c000db119a5ed7cd4d0e4d3bf1ff7fc25c5df4b9827afa1e.
+#
+# swap	<targets, comma-separated>	<from>	<to>: mercs2_formats::gfx_actions::swap_constant.
+# Root frame 1828 (_extras) and sprite 771 (extraspage_mc) frame 0 lay out the Extras page by Platform; the PC
+# (and Xbox) layout hides button 1, DOWNLOADABLE CONTENT, and only "PS3" shows it. PC's setPlatform("PC") is
+# FUN_0061bf80 (v1.1).
+swap	root:1828,sprite:771:0	PS3	PC
+#
+# patch	<target>	<find>	<replace>	<count>: mercs2_formats::gfx_actions::patch_actions, bytes as hex.
+# Sprite 694 (characters_mc, the shared hero clip) ButtonClicked, frames 299/419/539: before
+# saveCheck("newGame", "save"), go to _DLCStart when _root.DLCPageSelected is true (set at _DLCtrans, cleared before
+# _DLCback):
+#   Push r1, "DLCPageSelected"; GetMember; Push true; Equals2; Not; If +41
+#   Push "_DLCStart", 1, r1, "gotoAndPlay"; CallMethod; Pop; Jump +18 (over the saveCheck call)
+patch	sprite:694:299	96 0d 00 08 20 08 1e 07 02 00 00 00 04 01 08 1f 52 17	96 13 00 04 01 00 44 4c 43 50 61 67 65 53 65 6c 65 63 74 65 64 00 4e 96 02 00 05 01 49 12 9d 02 00 29 00 96 1f 00 00 5f 44 4c 43 53 74 61 72 74 00 07 01 00 00 00 04 01 00 67 6f 74 6f 41 6e 64 50 6c 61 79 00 52 17 99 02 00 12 00 96 0d 00 08 20 08 1e 07 02 00 00 00 04 01 08 1f 52 17	1
+patch	sprite:694:419	96 0d 00 08 20 08 1e 07 02 00 00 00 04 01 08 1f 52 17	96 13 00 04 01 00 44 4c 43 50 61 67 65 53 65 6c 65 63 74 65 64 00 4e 96 02 00 05 01 49 12 9d 02 00 29 00 96 1f 00 00 5f 44 4c 43 53 74 61 72 74 00 07 01 00 00 00 04 01 00 67 6f 74 6f 41 6e 64 50 6c 61 79 00 52 17 99 02 00 12 00 96 0d 00 08 20 08 1e 07 02 00 00 00 04 01 08 1f 52 17	1
+patch	sprite:694:539	96 0d 00 08 20 08 1e 07 02 00 00 00 04 01 08 1f 52 17	96 13 00 04 01 00 44 4c 43 50 61 67 65 53 65 6c 65 63 74 65 64 00 4e 96 02 00 05 01 49 12 9d 02 00 29 00 96 1f 00 00 5f 44 4c 43 53 74 61 72 74 00 07 01 00 00 00 04 01 00 67 6f 74 6f 41 6e 64 50 6c 61 79 00 52 17 99 02 00 12 00 96 0d 00 08 20 08 1e 07 02 00 00 00 04 01 08 1f 52 17	1
+# Root frame 2278, the DLC hero page's NewGameCharacterSelectMouse: a click goes to _DLCStart, as the page's keys do,
+# not to the New Game agreement.
+patch	root:2278	8c 12 00 5f 6e 65 77 67 61 6d 65 61 67 72 65 65 6d 65 6e 74 00	8c 0a 00 5f 44 4c 43 53 74 61 72 74 00	3
