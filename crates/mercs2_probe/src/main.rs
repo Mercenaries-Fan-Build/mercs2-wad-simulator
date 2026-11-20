@@ -86,6 +86,7 @@ mod shaderforge;
 mod survey_frankenstein;
 mod terrain_cell;
 mod gfx_golden;
+mod retail_movies;
 mod prof_samples;
 mod splice_emu;
 mod stockpile_restore;
@@ -119,6 +120,7 @@ fn usage() -> ! {
          \x20 gfx-shell <out.png> <width>x<height> [wait:<frames>|down:<button>|up:<button>|mouse:<x>,<y>,<buttons>|call:<name>|key:<id>|pad:<vendor>,<product>,<name>|held:<input>,...|get:<path>]... <wad, last mounted first>...   (boot the shipped shell headless, movies from the last WAD's Movies folder)\n\
          \x20 gfx-actions <movie.gfx> <out.txt>   (write a movie's ActionScript as text)\n\
          \x20 gfx-tags <movie.gfx> <out.txt>   (write a movie's display lists as text: places, removes, scripts, labels per frame)\n\
+         \x20 retail-movies <out.tsv> <wad>...   (every cfx_pack movie the vanilla WADs ship, by WAD: the table qm routes add_movie with)\n\
          \x20 bink-audio <movie.bik> <track index> <out.s16> [<other.s16>]   (decode a track; compare with another decode)\n\
          \x20 bink-video <movie.bik> <frames> <reference.yuv>   (decode the first frames; compare with a yuv420p decode)\n\
          \x20 splice-emulate <image.bin> <start VA> [--reg name=value]... [--arg value]... [--byte address=value]... [--dword address=value]... [--steps N]   (run a SecuROM splice through a decrypted dump with sentinel registers; report what it read, wrote, called and returned)\n\
@@ -1203,6 +1205,13 @@ fn main() {
         };
         if let Err(e) = gfx_golden::gfx_actions(std::path::Path::new(movie), std::path::Path::new(out)) {
             eprintln!("gfx-actions failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "retail-movies" {
+        if let Err(e) = retail_movies::run(&args) {
+            eprintln!("retail-movies failed: {e}");
             std::process::exit(1);
         }
         return;
