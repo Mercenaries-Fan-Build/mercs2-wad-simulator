@@ -43,6 +43,7 @@ pub mod plan;
 pub mod retail_movies;
 pub mod shader;
 pub mod shader_import;
+pub mod shell_extras;
 pub mod sound;
 pub mod sprite;
 pub mod states;
