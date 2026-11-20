@@ -3045,7 +3045,7 @@ pub fn lint(
                     package(format!("fetch_package {id}: no add_level or level_asset names it with `from:`"));
                 }
             }
-            Contribution::AddLevel { name, streams, from, .. } => {
+            Contribution::AddLevel { name, streams, from, date, .. } => {
                 if let Some(id) = from {
                     let mut package = |message: String| {
                         out.push(Diagnostic { rule: M0316_FETCH_PACKAGE, severity: Severity::Error, message, at: Some(index), fix: None })
@@ -3070,6 +3070,9 @@ pub fn lint(
                 };
                 if let Some(why) = crate::build::wad_name_refusal("add_level", name) {
                     refuse(format!("add_level name {name:?}: {why}"));
+                }
+                if let Some(Err(why)) = date.as_deref().map(crate::level::parse_level_date) {
+                    refuse(format!("add_level {name:?}: {why}"));
                 }
                 for s in streams {
                     let file = s.file_name().and_then(|f| f.to_str()).unwrap_or_default().to_ascii_lowercase();
