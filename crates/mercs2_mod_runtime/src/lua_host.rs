@@ -24,7 +24,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicUsiz
 use mercs2_formats::lua_exec::{self, MAX_CHUNK, MAX_RESULTS};
 use mercs2_formats::lua_sites::{HOST_INITIALISED, HOST_LUA_STATE, LuaSites, Site};
 use mercs2_formats::mod_runtime::lua::type_name;
-use mercs2_formats::mod_runtime::{LastError, PCALL_REFUSED, RefTable};
+use mercs2_formats::mod_runtime::{LastError, PCALL_REFUSED, RefTable, namespace_add_refused};
 use mercs2_formats::lua_stack::{
     self, LUA_REGISTRYINDEX, LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUA_TTHREAD, Mem,
     OFF_BASE, OFF_BASE_CI, OFF_CI, OFF_GLOBAL, OFF_STACK, OFF_TOP, TVALUE_SIZE, TVALUE_TT,
@@ -59,10 +59,10 @@ pub const EXEC_REFUSED: c_int = 3;
 
 struct Namespace {
     name: CString,
-    _names: Vec<CString>,
+    names: Vec<CString>,
     regs: Vec<LuaReg>,
 }
-// SAFETY: the rows point into `_names`, owned by the same value, and at functions; read only under the lock.
+// SAFETY: the rows point into `names`, owned by the same value, and at functions; read only under the lock.
 unsafe impl Send for Namespace {}
 
 struct Slot {
@@ -489,9 +489,11 @@ pub extern "C" fn m2_lua_last_error() -> *const c_char {
     LAST_ERROR.get()
 }
 
-/// Add a global table `name` of functions to every Lua state the game creates or a script runs on.
-/// `fns` ends with a NULL name; both are copied. 0 for a NULL or empty name, a NULL table, a name already
-/// added, or more than 32 namespaces or 256 functions.
+/// Add the functions `fns` to the global table `name` on every Lua state the game creates or a script runs
+/// on, creating the table when it does not exist. Several calls, from one mod or several, may add to the same
+/// table (the engine's own `Net`, say). `fns` ends with a NULL name; both are copied. 0 for a NULL or empty
+/// name, a NULL table, a function already added to that table or named twice in `fns`, or more than 32 calls
+/// or 256 functions.
 ///
 /// # Safety
 /// `name` is NULL or a NUL-terminated string; `fns` is NULL or a NULL-name-terminated array whose names
@@ -528,9 +530,11 @@ pub unsafe extern "C" fn m2_lua_add_namespace(name: *const c_char, fns: *const L
     let mut regs: Vec<LuaReg> = names.iter().zip(&funcs).map(|(n, f)| LuaReg { name: n.as_ptr(), func: Some(*f) }).collect();
     regs.push(LuaReg { name: core::ptr::null(), func: None });
     let mut list = NAMESPACES.lock().expect("namespace lock");
-    if list.iter().any(|n| n.name == ns_name) {
+    let earlier: Vec<(&CStr, &CStr)> = list.iter().flat_map(|n| n.names.iter().map(|f| (n.name.as_c_str(), f.as_c_str()))).collect();
+    let fields: Vec<&CStr> = names.iter().map(|f| f.as_c_str()).collect();
+    if let Some(why) = namespace_add_refused(&earlier, &ns_name, &fields) {
         drop(list);
-        fail(format!("m2_lua_add_namespace: {} is already added", ns_name.to_string_lossy()));
+        fail(format!("m2_lua_add_namespace: {why}"));
         return 0;
     }
     if list.len() == MAX_NAMESPACES {
@@ -539,7 +543,7 @@ pub unsafe extern "C" fn m2_lua_add_namespace(name: *const c_char, fns: *const L
         return 0;
     }
     rt_log::line(&format!("namespace {} added ({} functions)", ns_name.to_string_lossy(), funcs.len()));
-    list.push(Namespace { name: ns_name, _names: names, regs });
+    list.push(Namespace { name: ns_name, names, regs });
     NS_COUNT.store(list.len(), Ordering::Release);
     REG_PENDING.store(true, Ordering::Release);
     1
