@@ -229,6 +229,7 @@ contributions:
     max_stock: 4
     unlocked: true
     behaviour: { module: mrxcratedelivery, cargo: "LAVIII (Minigun)", delivery_vehicle: "Mi26 (PMC) (Driver)" }
+    levels: [vz, sean_level]
 
   - kind: add_script
     name: my_module
@@ -507,7 +508,8 @@ const JSON: &str = r#"
       "fuel_cost": 75,
       "max_stock": 4,
       "unlocked": true,
-      "behaviour": { "module": "mrxcratedelivery", "cargo": "LAVIII (Minigun)", "delivery_vehicle": "Mi26 (PMC) (Driver)" }
+      "behaviour": { "module": "mrxcratedelivery", "cargo": "LAVIII (Minigun)", "delivery_vehicle": "Mi26 (PMC) (Driver)" },
+      "levels": ["vz", "sean_level"]
     },
     {
       "kind": "add_script",
@@ -809,6 +811,7 @@ fuel_cost = 75
 max_stock = 4
 unlocked = true
 behaviour = { module = "mrxcratedelivery", cargo = "LAVIII (Minigun)", delivery_vehicle = "Mi26 (PMC) (Driver)" }
+levels = ["vz", "sean_level"]
 
 [[contributions]]
 kind = "add_script"
