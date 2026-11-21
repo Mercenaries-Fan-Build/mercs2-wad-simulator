@@ -573,8 +573,7 @@ fn rewrite_movie(data: &[u8], targets: &[Target], edit: &mut BlockEdit<'_>) -> R
 
 /// Whether the edited movie `out` still decodes, as every edit's result must.
 pub fn check_decodes(out: &[u8]) -> Result<(), String> {
-    crate::gfx::GfxMovie::parse(out)
-        .and_then(|m| crate::gfx_def::MovieDef::decode(&m))
+    crate::gfx_def::MovieDef::read(out)
         .map(|_| ())
         .map_err(|e| format!("the rewritten movie does not decode: {e}"))
 }
