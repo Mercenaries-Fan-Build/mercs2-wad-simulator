@@ -713,6 +713,71 @@ mod retail_tests {
         }
     }
 
+    /// Every action block of every movie (each `DoAction`, in sprites too, and each clip action) reads
+    /// as records and writes back to its bytes, and so does every `Push`'s values and every
+    /// `ConstantPool`'s strings; counted by action code.
+    #[test]
+    fn every_action_block_writes_back() {
+        use mercs2_formats::gfx_actions::{pool, pool_payload, push_payload, push_values, read_actions, write_actions};
+        use mercs2_formats::gfx_stream::{Tag, TagBody, TagStream};
+        use mercs2_formats::gfx_tags::{decode, Typed, DO_ACTION};
+        fn blocks(tags: &[Tag], out: &mut Vec<Vec<u8>>) -> Result<(), String> {
+            for t in tags {
+                match &t.body {
+                    TagBody::Sprite { tags, .. } => blocks(tags, out)?,
+                    TagBody::Raw(b) if t.code == DO_ACTION => out.push(b.clone()),
+                    TagBody::Raw(b) => {
+                        if let Some(Typed::Place(p)) = decode(t.code, b)? {
+                            out.extend(p.clip_actions.into_iter().flat_map(|a| a.records).map(|r| r.code));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        let vz = crate::app::retail_vz_wad();
+        let mut w = WadStack::open(&vz, &crate::app::overlays_for(&vz, true, &[])).expect("open retail vz.wad");
+        let index = AssetIndex::build(&w.wads, &w.side, crate::index::load_all_names().expect("names"));
+        let rows: Vec<_> = index.rows(Kind::UiGfx).to_vec();
+        let (mut codes, mut checked, mut after_end, mut failed) = (BTreeMap::<u8, usize>::new(), 0usize, 0usize, Vec::new());
+        for row in &rows {
+            let label = row.label();
+            let result = (|| -> Result<(), String> {
+                let stream = TagStream::parse(&movie_bytes(&mut w, row.src, row.hash, &label)?)?;
+                let mut found = Vec::new();
+                blocks(&stream.tags, &mut found)?;
+                for (n, block) in found.iter().enumerate() {
+                    let (acts, after) = read_actions(block).map_err(|e| format!("block {n}: {e}"))?;
+                    if write_actions(&acts, &after)? != *block {
+                        return Err(format!("block {n} writes back to other bytes"));
+                    }
+                    after_end += usize::from(!after.is_empty());
+                    for a in &acts {
+                        *codes.entry(a.code).or_default() += 1;
+                        let again = match a.code {
+                            0x96 => push_payload(&push_values(&a.payload)?)?,
+                            0x88 => pool_payload(&pool(&a.payload)?)?,
+                            _ => continue,
+                        };
+                        if again != a.payload {
+                            return Err(format!("block {n}: action {:#x} writes back to other bytes", a.code));
+                        }
+                    }
+                    checked += 1;
+                }
+                Ok(())
+            })();
+            if let Err(e) = result {
+                failed.push(format!("{label} (0x{:08X}): {e}", row.hash));
+            }
+        }
+        println!("{} movies, {checked} blocks ({after_end} with bytes after End), {} failed; actions by code {codes:x?}", rows.len(), failed.len());
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+        for code in [0x96u8, 0x88] {
+            assert!(codes.get(&code).is_some_and(|n| *n > 0), "no action {code:#x} was checked");
+        }
+    }
+
     /// Every timeline of every movie reads as instances, and each placement and removal belongs to
     /// exactly one.
     #[test]
