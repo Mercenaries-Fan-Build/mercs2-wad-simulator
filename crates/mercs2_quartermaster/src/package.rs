@@ -408,7 +408,7 @@ pub fn expand(contributions: &[Contribution], converted: &BTreeMap<String, Conve
     for c in contributions {
         match c {
             Contribution::FetchPackage { .. } => {}
-            Contribution::AddLevel { name, display, streams, from: Some(id) } => {
+            Contribution::AddLevel { name, display, streams, from: Some(id), mission, details, date } => {
                 if !streams.is_empty() {
                     return Err(format!("add_level {name}: `from: {id}` and `streams` both name its streams"));
                 }
@@ -418,6 +418,9 @@ pub fn expand(contributions: &[Contribution], converted: &BTreeMap<String, Conve
                     display: display.clone(),
                     streams: pkg.streams.iter().map(PathBuf::from).collect(),
                     from: None,
+                    mission: mission.clone(),
+                    details: details.clone(),
+                    date: date.clone(),
                 });
                 for ((ty, hash), rungs) in &pkg.assets {
                     out.push(Contribution::LevelAsset {
@@ -803,10 +806,26 @@ mod tests {
 
     #[test]
     fn an_add_level_from_a_package_becomes_its_streams_and_one_row_per_asset() {
-        let rows = vec![fetch(), Contribution::AddLevel { name: "dlc01".into(), display: "D".into(), streams: vec![], from: Some("biua".into()) }];
+        let rows = vec![
+            fetch(),
+            Contribution::AddLevel {
+                name: "dlc01".into(),
+                display: "D".into(),
+                streams: vec![],
+                from: Some("biua".into()),
+                mission: Some("M".into()),
+                details: None,
+                date: Some("2008-11-25".into()),
+            },
+        ];
         let out = expand(&rows, &converted()).unwrap();
         assert_eq!(out.len(), 3, "{out:?}");
         assert!(matches!(&out[0], Contribution::AddLevel { streams, from: None, .. } if streams == &[PathBuf::from("src/level/Audios/a.pws")]));
+        assert!(
+            matches!(&out[0], Contribution::AddLevel { mission: Some(m), details: None, date: Some(d), .. } if m == "M" && d == "2008-11-25"),
+            "the Extras fields carry over: {:?}",
+            out[0]
+        );
         let names: Vec<&str> = out[1..]
             .iter()
             .map(|c| match c {

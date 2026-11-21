@@ -1225,6 +1225,38 @@ fn add_movie_needs_no_game_stack() {
     assert_eq!(carried, movie);
 }
 
+/// A movie retail ships in `shell.wad` (SHELL, the front end's menu) goes to the shell patch, the one
+/// the front end mounts. That patch carries `shell.wad`'s CSUM row, so this is the one `add_movie` that
+/// needs the game, and without it the build says so instead of putting the block in the overlay, which
+/// only gameplay mounts.
+#[test]
+fn replacing_a_shell_wad_movie_needs_the_game_for_the_shell_patch() {
+    let dir = scratch("add_movie_shell_nogame");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/ui.gfx"), tiny_gfx_movie()).unwrap();
+    let s = shipment(&dir, "  - kind: add_movie\n    name: SHELL\n    movie: src/ui.gfx\n");
+    match build::build(&s, None, None, None, None, None) {
+        Err(build::BuildError::GameRequired { kind, .. }) => assert_eq!(kind, "shell patch"),
+        other => panic!("expected GameRequired for the shell patch, got {:?}", other.map(|r| r.placements)),
+    }
+}
+
+/// A movie retail ships only in `Loading.wad` has no patch qm writes, so a replacement would never be
+/// loaded: the build refuses it by name.
+#[test]
+fn a_movie_retail_ships_only_in_loading_wad_is_refused() {
+    let dir = scratch("add_movie_loading");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/ui.gfx"), tiny_gfx_movie()).unwrap();
+    let s = shipment(&dir, "  - kind: add_movie\n    name: loadingscreen_standalone\n    movie: src/ui.gfx\n");
+    match build::build(&s, None, None, None, None, None) {
+        Err(build::BuildError::Lower { message, .. }) => {
+            assert!(message.contains("loading.wad") && message.contains("loadingscreen_standalone"), "{message}")
+        }
+        other => panic!("expected a Lower error, got {:?}", other.map(|r| r.placements)),
+    }
+}
+
 /// A compressed `CFX` movie is injected exactly as an uncompressed one is.
 ///
 /// Retail ships 61 `CFX` and 3 `GFX`, so the loader takes either and there is nothing to normalise

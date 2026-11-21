@@ -1254,9 +1254,10 @@ pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic>
         // yours. A NOVEL name mints a movie the game references from nowhere, so it will sit in the
         // WAD and never display. Advisory, because a Shipment MAY add a movie it also wires up with
         // its own patch_lua — this cannot see that the reference was added, only that retail has none.
+        // Every WAD retail ships movies in counts (`data/retail_movies.tsv`): `game` is `vz.wad`'s stack,
+        // and a `shell.wad` movie such as SHELL is a replacement too.
         if let Contribution::AddMovie { name, .. } = c {
-            let hash = crate::manifest::asset_hash(name);
-            if !game.has_asset(hash, mercs2_formats::types::TYPE_ID_CFX_PACK) {
+            if crate::retail_movies::wads_shipping(name).is_empty() {
                 out.push(Diagnostic {
                     rule: M0192_MOVIE_UNREFERENCED,
                     severity: Severity::Warning,
@@ -3044,7 +3045,7 @@ pub fn lint(
                     package(format!("fetch_package {id}: no add_level or level_asset names it with `from:`"));
                 }
             }
-            Contribution::AddLevel { name, streams, from, .. } => {
+            Contribution::AddLevel { name, streams, from, date, .. } => {
                 if let Some(id) = from {
                     let mut package = |message: String| {
                         out.push(Diagnostic { rule: M0316_FETCH_PACKAGE, severity: Severity::Error, message, at: Some(index), fix: None })
@@ -3069,6 +3070,9 @@ pub fn lint(
                 };
                 if let Some(why) = crate::build::wad_name_refusal("add_level", name) {
                     refuse(format!("add_level name {name:?}: {why}"));
+                }
+                if let Some(Err(why)) = date.as_deref().map(crate::level::parse_level_date) {
+                    refuse(format!("add_level {name:?}: {why}"));
                 }
                 for s in streams {
                     let file = s.file_name().and_then(|f| f.to_str()).unwrap_or_default().to_ascii_lowercase();

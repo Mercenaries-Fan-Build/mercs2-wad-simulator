@@ -911,6 +911,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_model", "New model", "A new model on a donor's rig"),
             ("add_texture", "New texture", "A new texture under a name you choose"),
             ("add_sound", "New sound bank", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
+            ("load_sound", "Load sound", "Load a soundbank, wavebank or stream from the mod loader"),
             ("replace_sound_bank", "Replace sound bank", "Replace every cue of a shipped sound bank, same entry name"),
             ("replace_sound_cue", "Replace sound cue", "Replace one cue of a shipped sound bank with a new WAV"),
             ("replace_sound_wave", "Replace a line", "Replace one line of a shipped wavebank wherever it plays"),
@@ -1112,6 +1113,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             cues: Vec::new(),
             load_in: Vec::new(),
         },
+        "load_sound" => Contribution::LoadSound { soundbank: None, wavebank: None, stream: None, sessions: Vec::new() },
         // The bank names a bank the game ships, so it starts empty (M0215) until it is entered.
         "replace_sound_bank" => Contribution::ReplaceSoundBank {
             bank: String::new(),
@@ -1293,6 +1295,9 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             display: "My Level".into(),
             streams: Vec::new(),
             from: None,
+            mission: None,
+            details: None,
+            date: None,
         },
         "level_asset" => Contribution::LevelAsset {
             level: "my_level".into(),
@@ -1325,6 +1330,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             unlocked: false,
             behaviour: None,
             equipment_type: None,
+            levels: vec![mercs2_quartermaster::level::VZ.to_string()],
         },
         _ => return None,
     })
@@ -1763,6 +1769,16 @@ fn derived_row(ui: &mut egui::Ui, label: &str, value: &str) {
         theme::field_label(ui, label);
         ui.add(egui::Label::new(egui::RichText::new(value).monospace().color(theme::DIM)).truncate());
     });
+}
+
+/// An optional text field: empty is no value.
+fn optional_text_row(ui: &mut egui::Ui, label: &str, value: &mut Option<String>, hint: &str) -> bool {
+    let mut v = value.clone().unwrap_or_default();
+    if text_row(ui, label, &mut v, hint, false) {
+        *value = (!v.trim().is_empty()).then_some(v);
+        return true;
+    }
+    false
 }
 
 /// The optional `from:` of an `add_level` / `level_asset`: the id of the `fetch_package` its streams or
@@ -2685,9 +2701,12 @@ fn contribution_form(
                 }
             }
         }
-        Contribution::AddLevel { name, display, streams, from } => {
+        Contribution::AddLevel { name, display, streams, from, mission, details, date } => {
             commit |= theme::text_field(ui, "Level", name, "dlc01", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Display", display, "My Level", theme::FieldState::Neutral).lost_focus();
+            commit |= optional_text_row(ui, "Mission", mission, "Blow It Up Again Pack");
+            commit |= optional_text_row(ui, "Details", details, "four new missions");
+            commit |= optional_text_row(ui, "Date", date, "YYYY-MM-DD");
             commit |= from_row(ui, from);
             match from {
                 Some(id) => derived_row(ui, "Streams", &format!("from {id}")),

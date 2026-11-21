@@ -835,7 +835,7 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
 
     // Each on its own declares only its own outfit — the standalone-valid case, and the trap.
     for (s, mine) in [(&a, "SeanDevlin"), (&b, "Roze")] {
-        assert!(build::script_mutations(&s.manifest, &s.root).expect("mutations").is_empty());
+        assert!(build::script_mutations(&s.manifest, &s.root, "vz").expect("mutations").is_empty());
         let outfits = build::added_outfits(&s.manifest);
         assert_eq!(outfits.iter().map(|o| o.slug.as_str()).collect::<Vec<_>>(), [mine], "a Shipment must not know about the other");
     }
@@ -1859,6 +1859,39 @@ fn a_built_wad_is_read_back_and_self_checked() {
 // ---------------------------------------------------------------------------
 // add_movie
 // ---------------------------------------------------------------------------
+
+/// ★ Replacing SHELL, the front end's menu, ships in the shell patch: `shell.wad` holds the movie and
+/// the front end mounts only it and `shell-patch.wad`. No overlay is written, and the patch carries
+/// `shell.wad`'s CSUM row.
+#[test]
+fn replacing_shell_ships_in_the_shell_patch() {
+    let mut game = retail_game();
+    let dir = scratch("add_movie_shell");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let movie = tiny_gfx_movie();
+    std::fs::write(dir.join("src/ui.gfx"), &movie).unwrap();
+    let s = shipment(&dir, "  - kind: add_movie\n    name: SHELL\n    movie: src/ui.gfx\n");
+    let out = dir.join("_build");
+    let report = build::build(&s, Some(&mut game), None, Some(&out), None, None).expect("builds");
+    assert!(report.wad.is_none(), "no overlay: gameplay never shows SHELL");
+    assert!(!report.placements.iter().any(|p| p.destination == Destination::Overlay));
+    let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+    let shell_file = out.join(&shell.name);
+    let (hash, carried) = read_back_movie(&std::fs::read(&shell_file).unwrap());
+    assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("SHELL"));
+    assert_eq!(carried, movie);
+    let vz = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let shell_wad = mercs2_quartermaster::sound::sibling_wad(&vz, "shell.wad").unwrap();
+    assert_eq!(
+        mercs2_formats::donor::base_csum(&shell_file).unwrap(),
+        mercs2_formats::donor::base_csum(&shell_wad).unwrap(),
+        "the shell patch carries shell.wad's CSUM row"
+    );
+    assert!(
+        !mercs2_quartermaster::lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0192"),
+        "SHELL is a shipped movie, so replacing it is no M0192"
+    );
+}
 
 /// ★ `add_movie` end to end against the retail WADs — the injector the Scaleform work was missing.
 #[test]
@@ -3585,7 +3618,8 @@ mod sound {
     /// ★ `qm link` compiles a level's whole patch. A Shipment patching a script the level overrides
     /// reaches the level's script, not retail's: its code is spliced into the level's bytecode, which
     /// keeps its own name and DEPS. The linked block holds that script, so the level's own block no
-    /// longer does, and the WAD has one row of the key. `vz`'s link overlay still patches retail's.
+    /// longer does, and the WAD has one row of the key. The patch carries each block once, the linked
+    /// resident's LOD rungs among them. `vz`'s link overlay still patches retail's.
     #[test]
     fn link_compiles_the_set_into_the_level() {
         use mercs2_formats::script_meta::{Dep, ScriptMeta};
@@ -3623,6 +3657,11 @@ mod sound {
         assert_eq!(patch.sha256, build::sha256_hex(&std::fs::read(out.join("data/qmlevel-patch.wad")).unwrap()));
 
         let wad = read_patch_wad(&std::fs::read(out.join("data/qmlevel-patch.wad")).unwrap()).unwrap();
+        let mut paths: Vec<String> = wad.blocks.iter().map(|b| b.path_string.to_ascii_lowercase()).collect();
+        paths.sort();
+        assert!(paths.windows(2).all(|w| w[0] != w[1]), "each block once: {paths:?}");
+        // The linked resident's LOD rungs, which the vz link's blocks carry too.
+        assert!(paths.iter().any(|p| p.contains("resident-pmcoutpost_fountain_p001")), "the resident's rungs: {paths:?}");
         let raw = |b: &PatchBlock| ScriptsBlock::parse(&mercs2_formats::sges::decompress_sges(&b.compressed_data).unwrap()).unwrap();
         let holding: Vec<&PatchBlock> = wad.blocks.iter().filter(|b| b.aset_entries.iter().any(|e| e.asset_hash == m2("mrxtask"))).collect();
         assert_eq!(holding.len(), 1, "one row of the key");
@@ -3676,6 +3715,105 @@ mod sound {
             let text = e.to_string();
             assert!(text.contains("level qmlevel: ") && text.contains(why), "{tag}: {text}");
         }
+    }
+
+    /// A shop item is sold in the levels its `levels` lists, `vz` by default: its catalog and reward rows
+    /// are in those levels' `mrxsupportdata` and `mrxrewarddata` and in no other's. A cargo or delivery
+    /// vehicle the level's worldentity has no template of, a level no installed Shipment adds, and an
+    /// empty `levels` each fail the link, naming the item.
+    #[test]
+    fn a_shop_item_is_sold_in_the_levels_it_lists() {
+        use mercs2_formats::scripts_block::ScriptsBlock;
+        let shop = |dir: &Path, id: &str, cargo: &str, levels: Option<&str>| {
+            named_shipment(
+                dir,
+                &id.replace('_', "-"),
+                &format!(
+                    "  - kind: add_shop_item\n    id: {id}\n    name: {id}\n    icon: vehicles_tank_m1a2\n    shops: [pmc]\n    \
+                     type: heavy\n    cash_cost: 1\n    unlocked: true\n    \
+                     behaviour: {{ module: mrxcratedelivery, cargo: \"{cargo}\", delivery_vehicle: \"Mi26 (PMC) (Driver)\" }}\n{}",
+                    levels.map(|l| format!("    levels: {l}\n")).unwrap_or_default()
+                ),
+            )
+        };
+        // Whether `script` of the resident block of the patch at `wad` carries the string `id`.
+        let sells = |wad: &Path, script: &str, id: &str| -> bool {
+            let wad = read_patch_wad(&std::fs::read(wad).unwrap()).unwrap();
+            let resident = wad.blocks.iter().find(|b| b.path_string == r"blocks\VZ\resident_P000_Q3.block").expect("the linked resident");
+            let block = ScriptsBlock::parse(&mercs2_formats::sges::decompress_sges(&resident.compressed_data).unwrap()).unwrap();
+            let lua = block.extract_lua(block.find_script_by_name(script).unwrap()).unwrap();
+            lua.windows(id.len()).any(|w| w == id.as_bytes())
+        };
+        let dir = scratch("shop_levels");
+        let lvl = level_shipment(&dir.join("level"), "mrxtask", true);
+        let campaign = shop(&dir.join("campaign"), "qm_shop_campaign", "LAVIII (Minigun)", None);
+        let both = shop(&dir.join("both"), "qm_shop_both", "LAVIII (Minigun)", Some("[vz, qmlevel]"));
+        let mut game = stack_for(&[&lvl, &campaign, &both]);
+        let ids = super::arg_ids(3);
+        let out = dir.join("_link");
+        let report = build::link_installed(&super::request(&[&lvl, &campaign, &both], &ids), &mut game, &corpus(), &out, None).expect("links");
+        let vz = report.wad.as_ref().expect("the vz link overlay");
+        let level = out.join("data/qmlevel-patch.wad");
+        for script in ["mrxsupportdata", "mrxrewarddata"] {
+            assert!(sells(vz, script, "qm_shop_campaign"), "{script}: the default sells in vz");
+            assert!(!sells(&level, script, "qm_shop_campaign"), "{script}: and in no custom level");
+            assert!(sells(vz, script, "qm_shop_both") && sells(&level, script, "qm_shop_both"), "{script}: a listed level sells it");
+        }
+
+        let refused = |tag: &str, cargo: &str, levels: &str| -> String {
+            let s = shop(&dir.join(tag), &format!("qm_shop_{tag}"), cargo, Some(levels));
+            let mut game = stack_for(&[&lvl, &s]);
+            let ids = super::arg_ids(2);
+            build::link_installed(&super::request(&[&lvl, &s], &ids), &mut game, &corpus(), &dir.join(format!("_link_{tag}")), None)
+                .unwrap_err()
+                .to_string()
+        };
+        let e = refused("missing", "qm_no_such_template", "[vz, qmlevel]");
+        assert!(
+            e.contains("shop item \"qm_shop_missing\" is sold in vz (`levels`), and vz's worldentity has no template \"qm_no_such_template\""),
+            "{e}"
+        );
+        let e = refused("unknown", "LAVIII (Minigun)", "[vz, qm_no_level]");
+        assert!(e.contains("shop item \"qm_shop_unknown\" is sold in \"qm_no_level\" (`levels`), and no installed Shipment adds a level \"qm_no_level\""), "{e}");
+        let e = refused("empty", "LAVIII (Minigun)", "[]");
+        assert!(e.contains("shop item \"qm_shop_empty\": `levels` is empty, so it is sold in no level"), "{e}");
+    }
+
+    /// ★ A set with a level: the link's shell patch carries qm's edit of SHELL, made from `shell.wad`'s
+    /// own and byte-identical to the reviewed movie, and `qm_shell_modloader` lists the level on the
+    /// Extras page with its Extras fields. The link ships only blocks the plan promised, so the plan
+    /// promised the movie's block. A Shipment replacing SHELL beside a level is refused.
+    #[test]
+    fn a_level_puts_qm_s_shell_edit_and_its_entry_in_the_shell_patch() {
+        let dir = scratch("extras_page");
+        let s = level_shipment_with(&dir.join("level"), "mrxtask", true, "    mission: A pack\n    details: four missions\n    date: 2008-11-25\n");
+        let mut game = stack_for(&[&s]);
+        let ids = super::arg_ids(1);
+        let out = dir.join("_link");
+        let report = build::link_installed(&super::request(&[&s], &ids), &mut game, &corpus(), &out, None).expect("links");
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        let blocks = blocks_of(&out, shell);
+        let path = build::movie_block_path(m2(mercs2_quartermaster::shell_extras::SHELL));
+        assert!(report.plan.link_block_paths.contains(&path), "the plan promises {path}: {:?}", report.plan.link_block_paths);
+        let movie_block = blocks.iter().find(|b| b.path_string == path).unwrap_or_else(|| panic!("no {path} in the shell patch"));
+        let dec = mercs2_formats::sges::decompress_sges(&movie_block.compressed_data).unwrap();
+        let parsed = mercs2_formats::ucfx::walk_decompressed_block(&dec, "SHELL").0;
+        let container = mercs2_formats::ucfx::get_container_by_type_hash(&parsed, mercs2_formats::types::TYPE_HASH_CFX_PACK, Some(m2("SHELL")))
+            .expect("the block carries SHELL's cfx_pack");
+        let movie = mercs2_formats::gfx::cfx_pack_movie(&container, "SHELL").unwrap();
+        assert_eq!(build::sha256_hex(&movie), mercs2_quartermaster::shell_extras::EDITED_SHELL_SHA256);
+        let loader = chunk(&shell_scripts(&blocks), "qm_shell_modloader");
+        for needle in ["qmlevel", "A Level", "A pack", "four missions", "onlineListDLCMaps", "onlineSelectDLC"] {
+            assert!(has(&loader, needle), "the loader carries {needle}");
+        }
+
+        std::fs::create_dir_all(dir.join("shellmod/src")).unwrap();
+        std::fs::write(dir.join("shellmod/src/s.gfx"), crate::tiny_gfx_movie()).unwrap();
+        let m = named_shipment(&dir.join("shellmod"), "shellmod", "  - kind: add_movie\n    name: SHELL\n    movie: src/s.gfx\n");
+        let mut game = stack_for(&[&s, &m]);
+        let ids = super::arg_ids(2);
+        let e = build::link_installed(&super::request(&[&s, &m], &ids), &mut game, &corpus(), &dir.join("_link2"), None).unwrap_err().to_string();
+        assert!(e.contains("shellmod: replaces SHELL, and qm edits SHELL itself when the set has a level (the Extras page lists qmlevel)"), "{e}");
     }
 
     /// An import neither the level nor the game holds fails the build, naming it and its importer.

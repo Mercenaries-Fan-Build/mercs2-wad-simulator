@@ -561,7 +561,7 @@ fn shop_item_claims_are_ordered_list() {
 fn shop_item_lowers_to_catalog_and_reward_appends() {
     let m = shop_item("tank-pack", "dlcm1a1", "LAVIII (Minigun)");
     let muts =
-        mercs2_quartermaster::build::script_mutations(&m, std::path::Path::new(".")).unwrap();
+        mercs2_quartermaster::build::script_mutations(&m, std::path::Path::new("."), "vz").unwrap();
     let targets: Vec<&str> = muts.iter().map(|x| x.target.as_str()).collect();
     assert!(targets.contains(&"mrxsupportdata"), "targets: {targets:?}");
     assert!(targets.contains(&"mrxrewarddata"), "targets: {targets:?}");
@@ -598,7 +598,7 @@ contributions:
 ",
     );
     let muts =
-        mercs2_quartermaster::build::script_mutations(&m, std::path::Path::new(".")).unwrap();
+        mercs2_quartermaster::build::script_mutations(&m, std::path::Path::new("."), "vz").unwrap();
     assert!(
         muts.is_empty(),
         "a novel behaviour must not emit a load-time append (it defers to the loader): {muts:?}"

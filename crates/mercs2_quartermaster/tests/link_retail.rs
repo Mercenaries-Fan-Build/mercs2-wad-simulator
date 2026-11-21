@@ -1004,8 +1004,9 @@ fn one_novel_support_module_from_two_shipments_is_refused() {
         cargo: None,
         delivery_vehicle: None,
         shops: vec!["Pmc".into()],
+        levels: vec!["vz".into()],
     };
-    let link_with = |regs: &[link::SupportRegistration], names: &[&str]| {
+    let link_with =|regs: &[link::SupportRegistration], names: &[&str]| {
         let mut loaded = retail_blocks();
         let mut targets: Vec<link::TargetBlock<'_>> = loaded
             .iter_mut()
@@ -1145,7 +1146,7 @@ fn a_front_end_library_importing_a_gameplay_only_module_is_m0209() {
         link::ScriptAddition { shipment: "menu".into(), name: "qm_t_menu_ok".into(), source: "local s = import(\"mrxsound\")\n".into(), load: load() },
     ];
     let mut targets = [link::TargetBlock { path: link::SHELL_SCRIPT_BLOCKS[0].1.into(), block: &mut block }];
-    let out = link::link_front_end(&mut targets, &[], &additions, &order(&["menu"]), link::QmHooks::ForLibraries).expect("links");
+    let out = link::link_front_end(&mut targets, &[], &[], &additions, &order(&["menu"]), link::QmHooks::ForLibraries).expect("links");
     assert_eq!(found(&out), vec![("M0209", vec!["menu".to_string()], "mrxplayer".to_string())]);
     assert!(out.findings[0].message.contains("add_script qm_t_menu"), "{}", out.findings[0].message);
 }
@@ -1176,7 +1177,7 @@ fn the_front_end_loader_links_into_the_shell_block() {
         },
     ];
     let mut targets = [link::TargetBlock { path: link::SHELL_SCRIPT_BLOCKS[0].1.into(), block: &mut block }];
-    let out = link::link_front_end(&mut targets, &regs, &[], &order(&["pda-sound"]), link::QmHooks::ForLibraries).expect("links");
+    let out = link::link_front_end(&mut targets, &regs, &[], &[], &order(&["pda-sound"]), link::QmHooks::ForLibraries).expect("links");
     let front = qm_hosts(LoadSession::FrontEnd);
     let names: Vec<&str> = out.scripts.iter().map(|l| l.target.as_str()).collect();
     let want: Vec<&str> = std::iter::once(link::QM_SHELL_MODLOADER_NAME).chain(front.iter().map(String::as_str)).collect();
@@ -1221,14 +1222,14 @@ fn the_front_end_loader_links_into_the_shell_block() {
     // No front-end registration in a standalone build: nothing is linked and the block is untouched.
     let mut untouched = ScriptsBlock::parse(&raw).unwrap();
     let mut targets = [link::TargetBlock { path: String::new(), block: &mut untouched }];
-    let none = link::link_front_end(&mut targets, &regs[1..], &[], &order(&["pda-sound"]), link::QmHooks::ForLibraries).unwrap();
+    let none = link::link_front_end(&mut targets, &regs[1..], &[], &[], &order(&["pda-sound"]), link::QmHooks::ForLibraries).unwrap();
     assert!(none.scripts.is_empty());
     assert_eq!(untouched.serialize(), raw);
 
     // The deploy link splices the front end's hooks with nothing to load (W-a), and mints nothing.
     let mut bare = ScriptsBlock::parse(&raw).unwrap();
     let mut targets = [link::TargetBlock { path: String::new(), block: &mut bare }];
-    let hooked = link::link_front_end(&mut targets, &[], &[], &order(&[]), link::QmHooks::Always).unwrap();
+    let hooked = link::link_front_end(&mut targets, &[], &[], &[], &order(&[]), link::QmHooks::Always).unwrap();
     let names: Vec<String> = hooked.scripts.iter().map(|l| l.target.clone()).collect();
     assert_eq!(names, front);
     assert_eq!(bare.entries.len(), original.entries.len());

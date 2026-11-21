@@ -138,6 +138,7 @@ pub mod frame_capture;
 pub mod fxdict;
 pub mod game_paths;
 pub mod gfx;
+pub mod gfx_actions;
 pub mod gfx_def;
 pub mod hash;
 pub mod havok;

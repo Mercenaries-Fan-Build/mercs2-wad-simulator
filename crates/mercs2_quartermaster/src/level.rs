@@ -201,8 +201,35 @@ impl Asset<'_> {
 pub struct LevelOf<'a> {
     pub name: &'a str,
     pub display: &'a str,
+    /// The Extras page's mission line, description and `YYYY-MM-DD` date.
+    pub mission: Option<&'a str>,
+    pub details: Option<&'a str>,
+    pub date: Option<&'a str>,
     pub root: &'a Path,
     pub manifest: &'a Manifest,
+}
+
+/// An `add_level` `date`, `YYYY-MM-DD`, as `(year, month, day)`: a real calendar date.
+pub fn parse_level_date(s: &str) -> Result<(u32, u32, u32), String> {
+    let bad = || format!("date {s:?} is not a YYYY-MM-DD calendar date");
+    let parts: Vec<&str> = s.split('-').collect();
+    let [y, m, d] = parts[..] else { return Err(bad()) };
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 || !s.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        return Err(bad());
+    }
+    let (y, m, d): (u32, u32, u32) = (y.parse().map_err(|_| bad())?, m.parse().map_err(|_| bad())?, d.parse().map_err(|_| bad())?);
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return Err(bad()),
+    };
+    if d == 0 || d > days {
+        return Err(bad());
+    }
+    Ok((y, m, d))
 }
 
 /// Every `add_level` of `shipments`, in load order.
@@ -210,8 +237,16 @@ pub fn levels_of<'a>(shipments: &[&'a crate::discover::LoadedShipment]) -> Vec<L
     let mut out = Vec::new();
     for s in shipments {
         for c in &s.manifest.contributions {
-            if let Contribution::AddLevel { name, display, .. } = c {
-                out.push(LevelOf { name, display, root: &s.root, manifest: &s.manifest });
+            if let Contribution::AddLevel { name, display, mission, details, date, .. } = c {
+                out.push(LevelOf {
+                    name,
+                    display,
+                    mission: mission.as_deref(),
+                    details: details.as_deref(),
+                    date: date.as_deref(),
+                    root: &s.root,
+                    manifest: &s.manifest,
+                });
             }
         }
     }
@@ -453,6 +488,16 @@ mod tests {
         assert!(!holds_level([b].into_iter(), "dlc01"));
         assert!(!holds_level([s, (m2("dlc01_base"), TYPE_ID_TEXTURE)].into_iter(), "dlc01"));
         assert!(!holds_level([s, b].into_iter(), "english"));
+    }
+
+    #[test]
+    fn a_level_date_is_a_calendar_date() {
+        assert_eq!(parse_level_date("2008-11-25"), Ok((2008, 11, 25)));
+        assert_eq!(parse_level_date("2008-02-29"), Ok((2008, 2, 29)));
+        for bad in ["2007-02-29", "1900-02-29", "2008-13-01", "2008-04-31", "2008-00-10", "2008-1-25", "25-11-2008", "2008-11-25x", ""] {
+            assert!(parse_level_date(bad).is_err(), "{bad}");
+        }
+        assert!(parse_level_date("2000-02-29").is_ok(), "400-year leap");
     }
 
     fn rung(block: &str, file: &str) -> LevelRung {
