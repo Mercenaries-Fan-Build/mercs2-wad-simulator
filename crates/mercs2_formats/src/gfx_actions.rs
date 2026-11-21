@@ -16,7 +16,8 @@
 //! length counts the bytes through `End`; bytes after `End` (retail SHELL has 1285) are kept verbatim
 //! and stay uncounted.
 
-use std::io::{Read, Write};
+use crate::gfx_stream::{Tag, TagBody, TagStream};
+use crate::gfx_tags;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -39,68 +40,8 @@ impl Target {
     }
 }
 
-const TAG_END: u16 = 0;
-const TAG_SHOW_FRAME: u16 = 1;
-const TAG_DO_ACTION: u16 = 12;
-const TAG_DEFINE_SPRITE: u16 = 39;
 const ACTION_CONSTANT_POOL: u8 = 0x88;
 const ACTION_PUSH: u8 = 0x96;
-
-struct Tag<'a> {
-    code: u16,
-    long: bool,
-    body: &'a [u8],
-}
-
-/// The tags up to and including `End`, and the offset just past `End` (`data.len()` when there is none).
-fn read_tags_to_end(data: &[u8]) -> Result<(Vec<Tag<'_>>, usize), String> {
-    let tags = read_tags(data)?;
-    let end = tags.iter().map(|t| 2 + if t.long { 4 } else { 0 } + t.body.len()).sum();
-    Ok((tags, end))
-}
-
-fn read_tags(data: &[u8]) -> Result<Vec<Tag<'_>>, String> {
-    let mut tags = Vec::new();
-    let mut off = 0;
-    while off < data.len() {
-        if off + 2 > data.len() {
-            return Err(format!("tag header truncated at {off:#x}"));
-        }
-        let rh = u16::from_le_bytes([data[off], data[off + 1]]);
-        off += 2;
-        let code = rh >> 6;
-        let mut len = usize::from(rh & 0x3f);
-        let long = len == 0x3f;
-        if long {
-            if off + 4 > data.len() {
-                return Err(format!("long tag length truncated at {off:#x}"));
-            }
-            len = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
-            off += 4;
-        }
-        if off + len > data.len() {
-            return Err(format!("tag {code} at {off:#x} overruns its stream ({len} bytes)"));
-        }
-        tags.push(Tag { code, long, body: &data[off..off + len] });
-        off += len;
-        if code == TAG_END {
-            break;
-        }
-    }
-    Ok(tags)
-}
-
-fn write_tag(out: &mut Vec<u8>, code: u16, long: bool, body: &[u8]) -> Result<(), String> {
-    if long || body.len() >= 0x3f {
-        let len = u32::try_from(body.len()).map_err(|_| format!("tag {code} body above 4 GiB"))?;
-        out.extend_from_slice(&((code << 6) | 0x3f).to_le_bytes());
-        out.extend_from_slice(&len.to_le_bytes());
-    } else {
-        out.extend_from_slice(&((code << 6) | body.len() as u16).to_le_bytes());
-    }
-    out.extend_from_slice(body);
-    Ok(())
-}
 
 /// The action records of a block as `(code, offset of the record, payload)`.
 fn actions(block: &[u8]) -> Result<Vec<(u8, usize, &[u8])>, String> {
@@ -457,53 +398,42 @@ pub fn parse_patches(text: &str) -> Result<Vec<ActionPatch>, String> {
 /// What [`rewrite_movie`] does to one `DoAction` body of a named block: `Some` replaces it, `None` keeps it.
 type BlockEdit<'f> = dyn FnMut(Target, &[u8]) -> Result<Option<Vec<u8>>, String> + 'f;
 
-/// Rewrites a tag list; `in_sprite` is the sprite id when the list is a sprite's.
+/// Applies `edit` to the named `DoAction`s of a tag list; `in_sprite` is the sprite id when the list is a
+/// sprite's.
 fn rewrite_tags(
-    tags: &[Tag<'_>],
+    tags: &mut [Tag],
     in_sprite: Option<u16>,
     targets: &[Target],
     edit: &mut BlockEdit<'_>,
     done: &mut Vec<(Target, usize)>,
-) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
+) -> Result<(), String> {
     let mut frame = 0u32;
     for tag in tags {
-        match tag.code {
-            TAG_DO_ACTION => {
+        match &mut tag.body {
+            TagBody::Raw(body) if tag.code == gfx_tags::DO_ACTION => {
                 let here = match in_sprite {
                     None => Target::Root(frame),
                     Some(id) => Target::Sprite(id, frame),
                 };
-                let swapped = if targets.contains(&here) { edit(here, tag.body)? } else { None };
-                match swapped {
-                    Some(body) => {
-                        write_tag(&mut out, tag.code, tag.long, &body)?;
-                        done.push((here, body.len()));
+                if targets.contains(&here) {
+                    if let Some(new) = edit(here, body)? {
+                        done.push((here, new.len()));
+                        *body = new;
                     }
-                    None => write_tag(&mut out, tag.code, tag.long, tag.body)?,
                 }
             }
-            TAG_DEFINE_SPRITE if in_sprite.is_none() => {
-                if tag.body.len() < 4 {
-                    return Err("DefineSprite shorter than its header".into());
-                }
-                let id = u16::from_le_bytes([tag.body[0], tag.body[1]]);
-                if targets.iter().any(|t| matches!(t, Target::Sprite(s, _) if *s == id)) {
-                    let inner = read_tags(&tag.body[4..])?;
-                    let mut body = tag.body[..4].to_vec();
-                    body.extend_from_slice(&rewrite_tags(&inner, Some(id), targets, edit, done)?);
-                    write_tag(&mut out, tag.code, tag.long, &body)?;
-                } else {
-                    write_tag(&mut out, tag.code, tag.long, tag.body)?;
+            TagBody::Sprite { id, tags, .. } if in_sprite.is_none() => {
+                if targets.iter().any(|t| matches!(t, Target::Sprite(s, _) if s == id)) {
+                    rewrite_tags(tags, Some(*id), targets, edit, done)?;
                 }
             }
-            _ => write_tag(&mut out, tag.code, tag.long, tag.body)?,
+            _ => {}
         }
-        if tag.code == TAG_SHOW_FRAME {
+        if tag.code == gfx_tags::SHOW_FRAME {
             frame += 1;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The movie `data` with `from` swapped for `to` in the pools of `targets`, and what was rewritten.
@@ -521,54 +451,13 @@ pub fn swap_constant(data: &[u8], targets: &[Target], from: &str, to: &str) -> R
 }
 
 /// The movie `data` with `edit` applied to every `DoAction` of the named `targets`, every other byte kept,
-/// and the blocks `edit` replaced with their new lengths. Tag, sprite and file lengths follow; a tag keeps
-/// its long header form; bytes after `End` stay, uncounted.
+/// and the blocks `edit` replaced with their new lengths. Read and written by [`TagStream`]: tag, sprite and
+/// file lengths follow, a tag keeps its header form, and bytes after `End` stay, uncounted.
 fn rewrite_movie(data: &[u8], targets: &[Target], edit: &mut BlockEdit<'_>) -> Result<(Vec<u8>, Vec<(Target, usize)>), String> {
-    if data.len() < 8 {
-        return Err("too small for a GFx header".into());
-    }
-    let magic = &data[..3];
-    let compressed = match magic {
-        b"CFX" | b"CWS" => true,
-        b"GFX" | b"FWS" => false,
-        _ => return Err(format!("bad magic {:?}", String::from_utf8_lossy(magic))),
-    };
-    let body = if compressed {
-        let mut out = Vec::new();
-        flate2::read::ZlibDecoder::new(&data[8..]).read_to_end(&mut out).map_err(|e| format!("zlib inflate: {e}"))?;
-        out
-    } else {
-        data[8..].to_vec()
-    };
-    // The frame RECT: 5 bits of field width, then four fields of that width, padded to a byte.
-    let nbits = usize::from(body[0] >> 3);
-    let header_len = (5 + 4 * nbits).div_ceil(8) + 4;
-    let (tags, tags_len) = read_tags_to_end(&body[header_len..])?;
-    // The header counts the bytes through `End`; retail SHELL carries 1285 more after it, kept verbatim.
-    let declared = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-    if declared != 8 + header_len + tags_len {
-        return Err(format!(
-            "the header declares {declared} bytes; the stream through End is {} (and {} follow it)",
-            8 + header_len + tags_len,
-            body.len() - header_len - tags_len
-        ));
-    }
-    let trailer = &body[header_len + tags_len..];
+    let mut stream = TagStream::parse(data)?;
     let mut done = Vec::new();
-    let mut new_body = body[..header_len].to_vec();
-    new_body.extend_from_slice(&rewrite_tags(&tags, None, targets, edit, &mut done)?);
-    let total = u32::try_from(new_body.len() + 8).map_err(|_| "movie above 4 GiB".to_string())?;
-    new_body.extend_from_slice(trailer);
-    let mut out = data[..4].to_vec();
-    out.extend_from_slice(&total.to_le_bytes());
-    if compressed {
-        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-        z.write_all(&new_body).map_err(|e| format!("zlib deflate: {e}"))?;
-        out.extend_from_slice(&z.finish().map_err(|e| format!("zlib deflate: {e}"))?);
-    } else {
-        out.extend_from_slice(&new_body);
-    }
-    Ok((out, done))
+    rewrite_tags(&mut stream.tags, None, targets, edit, &mut done)?;
+    Ok((stream.file()?, done))
 }
 
 /// Whether the edited movie `out` still decodes, as every edit's result must.
@@ -581,6 +470,23 @@ pub fn check_decodes(out: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    const TAG_END: u16 = 0;
+    const TAG_SHOW_FRAME: u16 = 1;
+    const TAG_DO_ACTION: u16 = 12;
+    const TAG_DEFINE_SPRITE: u16 = 39;
+
+    fn write_tag(out: &mut Vec<u8>, code: u16, long: bool, body: &[u8]) -> Result<(), String> {
+        if long || body.len() >= 0x3f {
+            out.extend_from_slice(&((code << 6) | 0x3f).to_le_bytes());
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        } else {
+            out.extend_from_slice(&((code << 6) | body.len() as u16).to_le_bytes());
+        }
+        out.extend_from_slice(body);
+        Ok(())
+    }
 
     fn pool(strings: &[&str]) -> Vec<u8> {
         let mut p = (strings.len() as u16).to_le_bytes().to_vec();
@@ -781,7 +687,7 @@ mod tests {
         let mut wrong = input.clone();
         wrong[4..8].copy_from_slice(&(input.len() as u32).to_le_bytes());
         let e = swap_constant(&wrong, &[Target::Root(1)], "PS3", "PC").unwrap_err();
-        assert!(e.contains("through End") && e.contains("5 follow it"), "{e}");
+        assert!(e.contains("through End") && e.contains("5 bytes follow End"), "{e}");
     }
 
     #[test]
