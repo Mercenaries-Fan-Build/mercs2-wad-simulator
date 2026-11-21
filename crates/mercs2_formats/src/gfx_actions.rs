@@ -1,4 +1,7 @@
 //! Edits to the action blocks of a GFx movie, every other byte of the movie copied unchanged.
+//! [`read_actions`] / [`write_actions`], [`push_values`] / [`push_payload`] and [`pool`] / [`pool_payload`]
+//! read a block's records, a `Push`'s values and a `ConstantPool`'s strings as stored and write them back
+//! to the same bytes (every block of every movie: the workshop's `every_action_block_writes_back`).
 //! [`swap_constant`] replaces one string of the `ConstantPool` in chosen action blocks; [`patch_actions`]
 //! finds and replaces whole actions in chosen action blocks, remapping every branch and function size
 //! across the changed lengths. `mercs2_probe gfx-swap-constant` and `gfx-patch-actions` run them on a file.
@@ -91,30 +94,150 @@ fn pool_strings(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
     Ok(strings)
 }
 
-/// The inline strings of a `Push` payload.
-fn push_strings(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
+/// One action record as written: its code and, for a code of `0x80` or more, its payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action {
+    pub code: u8,
+    pub payload: Vec<u8>,
+}
+
+/// A block's action records through its `End` (code 0), and the bytes after that `End`.
+pub fn read_actions(block: &[u8]) -> Result<(Vec<Action>, Vec<u8>), String> {
+    let acts = actions(block)?;
+    let read: usize = acts.iter().map(|(c, _, p)| record_len(*c, p)).sum();
+    Ok((acts.into_iter().map(|(code, _, payload)| Action { code, payload: payload.to_vec() }).collect(), block[read..].to_vec()))
+}
+
+/// The records and the bytes after them, as [`read_actions`] reads them.
+pub fn write_actions(actions: &[Action], after: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for a in actions {
+        out.push(a.code);
+        if a.code >= 0x80 {
+            let len = u16::try_from(a.payload.len()).map_err(|_| format!("action {:#x}: a {}-byte payload past 65535", a.code, a.payload.len()))?;
+            out.extend(len.to_le_bytes());
+            out.extend(&a.payload);
+        } else if !a.payload.is_empty() {
+            return Err(format!("action {:#x} is below 0x80 and has no payload to carry {} bytes", a.code, a.payload.len()));
+        }
+    }
+    out.extend(after);
+    Ok(out)
+}
+
+/// One value of a `Push`, as stored: numbers keep their bits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushValue {
+    /// Type 0.
+    Str(Vec<u8>),
+    /// Type 1: an `f32`'s bits.
+    Float(u32),
+    /// Type 2.
+    Null,
+    /// Type 3.
+    Undefined,
+    /// Type 4.
+    Register(u8),
+    /// Type 5.
+    Bool(u8),
+    /// Type 6: SWF's double, its two 32-bit halves swapped, as stored.
+    Double([u8; 8]),
+    /// Type 7.
+    Int(u32),
+    /// Type 8: a constant-pool index in one byte.
+    Constant8(u8),
+    /// Type 9: a constant-pool index in two bytes.
+    Constant16(u16),
+}
+
+/// The values of a `Push` payload.
+pub fn push_values(payload: &[u8]) -> Result<Vec<PushValue>, String> {
     let mut out = Vec::new();
     let mut off = 0;
     while off < payload.len() {
         let ty = payload[off];
         off += 1;
-        let size = match ty {
+        let take = |off: &mut usize, n: usize| -> Result<&[u8], String> {
+            let b = payload.get(*off..*off + n).ok_or_else(|| format!("Push value type {ty} overruns its action"))?;
+            *off += n;
+            Ok(b)
+        };
+        out.push(match ty {
             0 => {
                 let end = payload[off..].iter().position(|&b| b == 0).ok_or("Push string has no terminator")?;
-                out.push(&payload[off..off + end]);
-                end + 1
+                let s = payload[off..off + end].to_vec();
+                off += end + 1;
+                PushValue::Str(s)
             }
-            1 | 7 => 4,
-            2 | 3 => 0,
-            4 | 5 | 8 => 1,
-            6 => 8,
-            9 => 2,
+            1 => PushValue::Float(u32::from_le_bytes(take(&mut off, 4)?.try_into().expect("4 bytes"))),
+            2 => PushValue::Null,
+            3 => PushValue::Undefined,
+            4 => PushValue::Register(take(&mut off, 1)?[0]),
+            5 => PushValue::Bool(take(&mut off, 1)?[0]),
+            6 => PushValue::Double(take(&mut off, 8)?.try_into().expect("8 bytes")),
+            7 => PushValue::Int(u32::from_le_bytes(take(&mut off, 4)?.try_into().expect("4 bytes"))),
+            8 => PushValue::Constant8(take(&mut off, 1)?[0]),
+            9 => PushValue::Constant16(u16::from_le_bytes(take(&mut off, 2)?.try_into().expect("2 bytes"))),
             _ => return Err(format!("Push value type {ty} is not an SWF 8 type")),
-        };
-        if off + size > payload.len() {
-            return Err(format!("Push value type {ty} overruns its action"));
+        });
+    }
+    Ok(out)
+}
+
+/// The payload of a `Push` of `values`.
+pub fn push_payload(values: &[PushValue]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for v in values {
+        match v {
+            PushValue::Str(s) => {
+                if s.contains(&0) {
+                    return Err(format!("a pushed string {:?} holds a zero byte", String::from_utf8_lossy(s)));
+                }
+                out.push(0);
+                out.extend(s);
+                out.push(0);
+            }
+            PushValue::Float(bits) => {
+                out.push(1);
+                out.extend(bits.to_le_bytes());
+            }
+            PushValue::Null => out.push(2),
+            PushValue::Undefined => out.push(3),
+            PushValue::Register(r) => out.extend([4, *r]),
+            PushValue::Bool(b) => out.extend([5, *b]),
+            PushValue::Double(d) => {
+                out.push(6);
+                out.extend(d);
+            }
+            PushValue::Int(i) => {
+                out.push(7);
+                out.extend(i.to_le_bytes());
+            }
+            PushValue::Constant8(i) => out.extend([8, *i]),
+            PushValue::Constant16(i) => {
+                out.push(9);
+                out.extend(i.to_le_bytes());
+            }
         }
-        off += size;
+    }
+    Ok(out)
+}
+
+/// The strings of a `ConstantPool` payload.
+pub fn pool(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    Ok(pool_strings(payload)?.into_iter().map(<[u8]>::to_vec).collect())
+}
+
+/// The payload of a `ConstantPool` of `strings`.
+pub fn pool_payload(strings: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let count = u16::try_from(strings.len()).map_err(|_| format!("{} pool strings do not fit a u16 count", strings.len()))?;
+    let mut out = count.to_le_bytes().to_vec();
+    for s in strings {
+        if s.contains(&0) {
+            return Err(format!("a pool string {:?} holds a zero byte", String::from_utf8_lossy(s)));
+        }
+        out.extend(s);
+        out.push(0);
     }
     Ok(out)
 }
@@ -124,7 +247,7 @@ fn push_strings(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
 fn swap_in_block(block: &[u8], from: &str, to: &str) -> Result<Option<Vec<u8>>, String> {
     let acts = actions(block)?;
     for (code, start, payload) in &acts {
-        if *code == ACTION_PUSH && push_strings(payload)?.contains(&from.as_bytes()) {
+        if *code == ACTION_PUSH && push_values(payload)?.iter().any(|v| matches!(v, PushValue::Str(s) if s == from.as_bytes())) {
             return Err(format!("the block pushes {from:?} inline at {start:#x}; only a pool entry is swapped"));
         }
     }
@@ -529,6 +652,27 @@ mod tests {
         out.extend_from_slice(&((body.len() + 8) as u32).to_le_bytes());
         out.extend_from_slice(&body);
         out
+    }
+
+    /// A block's records, every Push value type and a pool write back to their bytes.
+    #[test]
+    fn records_values_and_pools_write_back() {
+        let b = block(&["Platform", "PS3"]);
+        let (acts, after) = read_actions(&b).unwrap();
+        assert!(after.is_empty());
+        assert_eq!(write_actions(&acts, &after).unwrap(), b);
+        let mut tail = b.clone();
+        tail.extend([0xAA, 0xBB]);
+        let (acts, after) = read_actions(&tail).unwrap();
+        assert_eq!(after, [0xAA, 0xBB], "bytes after End are kept");
+        assert_eq!(write_actions(&acts, &after).unwrap(), tail);
+        let push = [0u8, b'a', 0, 1, 0, 0, 0x80, 0x3f, 2, 3, 4, 7, 5, 1, 6, 1, 2, 3, 4, 5, 6, 7, 8, 7, 9, 0, 0, 0, 8, 3, 9, 1, 2];
+        let values = push_values(&push).unwrap();
+        assert_eq!(values.len(), 10, "one of each type");
+        assert_eq!(push_payload(&values).unwrap(), push);
+        let strings = super::pool(&acts[0].payload).unwrap();
+        assert_eq!(strings, [b"Platform".to_vec(), b"PS3".to_vec()]);
+        assert_eq!(pool_payload(&strings).unwrap(), acts[0].payload);
     }
 
     #[test]
