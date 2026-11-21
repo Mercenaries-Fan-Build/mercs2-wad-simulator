@@ -97,7 +97,10 @@ impl TagStream {
         s.length_counts_header = match length {
             l if l == 8 + movie => true,
             l if l == movie => false,
-            l => return Err(format!("the header's length {l} is neither the {movie}-byte body through End nor it and the header")),
+            l => {
+                let after = s.trailing.len();
+                return Err(format!("the header's length {l} is neither the {movie}-byte body through End nor it and the header ({after} bytes follow End)"));
+            }
         };
         Ok(s)
     }
