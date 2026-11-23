@@ -1,4 +1,4 @@
-//! Shared by `doc_links.rs` (hermetic) and `doc_links_retail.rs` (needs the notes checkout).
+//! The rule list and GitHub's anchor rule, for `doc_links.rs`.
 
 use mercs2_quartermaster::lint;
 
