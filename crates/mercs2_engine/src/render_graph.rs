@@ -7,11 +7,11 @@
 //! per-viewport render dispatcher, not exclusively either.
 //!
 //! Anchors (unpacked SecuROM image `mercs2_unpacked.exe`, base `0x400000`):
-//! - `docs/reverse_engineer/render_core_code_map.md` §5 (body order table) + §11 (summary:
+//! - [`docs/reverse_engineer/render_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/render_core_code_map.md) §5 (body order table) + §11 (summary:
 //!   collect → z/opaque → 4× shadow cascade → reflection → fading-trees → color → water-surface →
 //!   mirror → blob-fallback).
-//! - `docs/reverse_engineer/water_code_map.md` §2 (wake → occlusion → reflection → main → surface).
-//! - `docs/reverse_engineer/shadow_code_map.md` §4 (the `while(i<4)` cascade emit around `FUN_00468ca0`).
+//! - [`docs/reverse_engineer/water_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/water_code_map.md) §2 (wake → occlusion → reflection → main → surface).
+//! - [`docs/reverse_engineer/shadow_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/shadow_code_map.md) §4 (the `while(i<4)` cascade emit around `FUN_00468ca0`).
 //!
 //! This module encodes that order as a list of **named nodes** so the engine's frame recording follows
 //! the oracle, and so the reflection / water / decals / sky-as-pass / particles-as-pass passes
