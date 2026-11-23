@@ -119,7 +119,9 @@ pub fn boot_new_game(vz_wad: &Path, hero: Hero, trace_out: &Path) -> Result<Sess
     .map_err(BootError::Wad)?;
 
     let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
-    let stream = Rc::new(RefCell::new(data.into_streaming_world(host.borrow().guids()).1));
+    // Stepped headless: no scene draws this world, so its scope is its own and unused.
+    let scope = mercs2_engine::scene::WorldScope::new();
+    let stream = Rc::new(RefCell::new(data.into_streaming_world(host.borrow().guids(), scope).1));
     host.borrow_mut().attach_stream(stream.clone());
 
     let sh = script_host::resident_script_host(host.clone()).ok_or(BootError::ScriptHost)?;
