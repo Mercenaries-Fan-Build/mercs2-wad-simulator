@@ -2159,7 +2159,7 @@ fn lint_tiny(label: &str, objects: &[String], row: u32, prims: &[(Option<&str>, 
     let objects = objects.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(", ");
     let yaml = format!(
         "  - kind: add_tiny_geometry\n    layer: vz_state_mar_city_pristine\n    cell: {{ row: {row}, col: 32 }}\n    \
-         key: 1327103\n    objects: [{objects}]\n    model: src/t.gltf\n"
+         key: \"0x00143FFF\"\n    objects: [{objects}]\n    model: src/t.gltf\n"
     );
     lint::lint(&shipment_with(&yaml), Some(&root), None)
 }
