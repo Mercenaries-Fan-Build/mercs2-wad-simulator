@@ -1,8 +1,8 @@
 //! `mercs2_population` — Population / spawners.
 //!
-//! **Code map:** `docs/reverse_engineer/population_spawner_code_map.md` (the recovered
+//! **Code map:** [`docs/reverse_engineer/population_spawner_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/population_spawner_code_map.md) (the recovered
 //! `PgSysPopulation` runtime, married Xbox↔PC), plus the component census in
-//! `docs/mercs2-ecs/02_ai_perception_population.md` and `ai_code_map.md` §3.
+//! `crates/mercs2_workshop/data/mercs2-ecs/02_ai_perception_population.md` and `ai_code_map.md` §3.
 //! **Owned Lua namespace(s):** the population verbs on `Ai` (`TweakAttachedSpawners`, `SetSpawnList`, …)
 //! and `Pg` (`StartHeliWaveSpawner`, `SetSkirmishTable`, …) — driven via the game's `EngineHost` seam.
 //!
@@ -97,7 +97,7 @@ pub const SPAWN_EVENT_HASH: u32 = 0x7962_caf5;
 /// **CONFIRM-LIVE (region cap):** the *faithful* per-region ceiling is the WAD-authored **desired
 /// count** the game stores per player in `DAT_00ed55c8[]` / `DAT_00ed55b0[]`, written by region-select
 /// (`FUN_004d8490`→`FUN_004d60e0`) from the `PopulationDensity` COMP records
-/// (`docs/reverse_engineer/render_distance_and_density_levers.md` §1–2: the ambient rule is literally
+/// ([`docs/reverse_engineer/render_distance_and_density_levers.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/render_distance_and_density_levers.md) §1–2: the ambient rule is literally
 /// `desired − live > 0 → spawn`, and the `10/10/2/2` per-tick budgets only fill that deficit *faster*,
 /// they do not raise the ceiling). That desired-count data is not statically recoverable (it ships in
 /// the vz_state overlays; COMP extraction is unimplemented). Until that feed exists, bound live ambient
