@@ -414,7 +414,7 @@ fn is_shot_value(args: &[String], index: usize) -> bool {
 /// `pmc.rs`) as ECS entities.
 fn populate_pmc_interior(
     world: &mut mercs2_core::World,
-    scene: &mut mercs2_engine::scene::Scene,
+    (scene, scope): (&mut mercs2_engine::scene::Scene, mercs2_engine::scene::WorldScope),
     wad: &mut mercs2_engine::wad::Wad,
     recruits: pmc::RecruitUnlocks,
     stockpile: &pmc::Stockpile,
@@ -426,10 +426,10 @@ fn populate_pmc_interior(
         Ok(pieces) => {
             let n = pieces.len();
             for (m, pos, quat) in pieces {
-                if !scene.has_model(m.hash) {
-                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                if !scene.has_model(scope, m.hash) {
+                    scene.load_model(scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                 }
-                let rest = scene.model_rest_palette(m.hash);
+                let rest = scene.model_rest_palette(scope, m.hash);
                 world.spawn((
                     Transform {
                         translation: Vec3::new(pos[0], pos[1], pos[2]),
