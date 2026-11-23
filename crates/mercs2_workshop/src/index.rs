@@ -188,7 +188,7 @@ impl AssetRow {
     /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
     /// off the `<faction>_veh_<class>_<name>` naming convention (plus a few irregular names like
     /// `uh1huey`). The class token after `_veh_` is normalised into the 12-type taxonomy from
-    /// `docs/reverse_engineer/valid_model_structure_map.md` §6.
+    /// [`docs/reverse_engineer/valid_model_structure_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/valid_model_structure_map.md) §6.
     pub fn vehicle_class(&self) -> Option<&'static str> {
         let n = self.name.as_ref()?.to_ascii_lowercase();
         let cls = n.split("_veh_").nth(1)?.split('_').next().unwrap_or("");
@@ -808,17 +808,17 @@ pub fn embedded_aset_names() -> HashMap<u32, String> {
 /// The RAW corpora merge behind `--pack-data` when this crate's `data/production_names.json` is
 /// absent, merged lowest→highest priority: the Jul-08 devkit strings, the bone-name candidates,
 /// the rainbow table, the ASET-derived name fragments, then the live registry dump. The fragments
-/// are committed in this crate's `data/` ([`crate_data_file`]); every other source is a
-/// dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
-/// `jul08_strings` and `rainbow_table` keys, and the `data/` folder under `notes_docs_dir`. A
-/// missing key or file is an error naming it.
+/// and the live registry dump are committed in this crate's `data/` ([`crate_data_file`]), the
+/// block-string harvest in this repository's `docs/data/` ([`repo_data_file`]); every other source
+/// is a dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
+/// `jul08_strings`, `bone_name_candidates` and `rainbow_table` keys. A missing key or file is an
+/// error naming it.
 pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> {
     use mercs2_formats::game_paths;
     // 57k authored strings from the devkit Xbox build — resolves engine command/message names
     // (SetStateOnMsg, KillObjectsLinkedToHP, …) that the retail exe strips.
     let mut names = load_name_lines(&game_paths::local_config_jul08_strings(start)?)?;
-    let notes_docs = game_paths::local_config_notes_docs_dir(start)?;
-    names.extend(load_name_lines(&notes_data_file(&notes_docs, "bone_name_candidates.txt")?)?);
+    names.extend(load_name_lines(&game_paths::local_config_bone_name_candidates(start)?)?);
     names.extend(load_rainbow_json(&game_paths::local_config_rainbow_table(start)?)?);
     // Names cracked from the WAD's own naming convention rather than a wordlist: a texture
     // `X_dm`/`X_nm`/`X_sm` names its own model `X`, so a named texture yields its model's exact
@@ -827,11 +827,11 @@ pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> 
     // aircraft roster: A-10, AC-130, C-130, Predator, Pave Low, AH-1Z, MiG-27, …) browsable.
     // Produced by `wad_simulator --bin asset_gap_probe --emit`; every entry is a verified preimage.
     // The block-string harvest goes under the fragments: a fragment's name wins over a harvested one.
-    names.extend(load_harvested_names(&notes_data_file(&notes_docs, "aset_block_strings.json")?)?);
+    names.extend(load_harvested_names(&repo_data_file("aset_block_strings.json")?)?);
     for f in ASET_NAME_FRAGMENTS {
         names.extend(load_rainbow_json(&crate_data_file(f)?)?);
     }
-    names.extend(load_names_csv(&notes_data_file(&notes_docs, "live_registry_hashes.csv")?)?);
+    names.extend(load_names_csv(&crate_data_file("live_registry_hashes.csv")?)?);
     Ok(names)
 }
 
@@ -851,17 +851,18 @@ pub fn crate_data_file(name: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// `<notes_docs_dir>/data/<name>`, or an error naming the `notes_docs_dir` key and the missing file.
-pub fn notes_data_file(notes_docs: &Path, name: &str) -> Result<PathBuf, String> {
-    let p = notes_docs.join("data").join(name);
+/// `docs/data/<name>` of the checkout this binary was built from
+/// ([`mercs2_formats::game_paths::repo_root`]) — the tooling tables the dev tools read and write —
+/// or an error naming the missing file. Read only from a checkout, like [`crate_data_file`].
+pub fn repo_data_file(name: &str) -> Result<PathBuf, String> {
+    let p = mercs2_formats::game_paths::repo_root().join("docs").join("data").join(name);
     if p.is_file() {
         Ok(p)
     } else {
         Err(format!(
-            "{} is not a file (`notes_docs_dir` in {} names {})",
+            "{} is not a file (committed in the checkout {} was built from)",
             p.display(),
-            mercs2_formats::game_paths::LOCAL_CONFIG,
-            notes_docs.display()
+            env!("CARGO_PKG_NAME")
         ))
     }
 }
