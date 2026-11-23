@@ -718,7 +718,7 @@ mod retail_tests {
     /// `ConstantPool`'s strings; counted by action code.
     #[test]
     fn every_action_block_writes_back() {
-        use mercs2_formats::gfx_actions::{pool, pool_payload, push_payload, push_values, read_actions, write_actions};
+        use mercs2_formats::gfx_actions::{pool, pool_payload, push_payload, push_values, read_actions, write_actions, Program};
         use mercs2_formats::gfx_stream::{Tag, TagBody, TagStream};
         use mercs2_formats::gfx_tags::{decode, Typed, DO_ACTION};
         fn blocks(tags: &[Tag], out: &mut Vec<Vec<u8>>) -> Result<(), String> {
@@ -739,7 +739,7 @@ mod retail_tests {
         let mut w = WadStack::open(&vz, &crate::app::overlays_for(&vz, true, &[])).expect("open retail vz.wad");
         let index = AssetIndex::build(&w.wads, &w.side, crate::index::load_all_names().expect("names"));
         let rows: Vec<_> = index.rows(Kind::UiGfx).to_vec();
-        let (mut codes, mut checked, mut after_end, mut failed) = (BTreeMap::<u8, usize>::new(), 0usize, 0usize, Vec::new());
+        let (mut codes, mut checked, mut after_end, mut positions, mut failed) = (BTreeMap::<u8, usize>::new(), 0usize, 0usize, 0usize, Vec::new());
         for row in &rows {
             let label = row.label();
             let result = (|| -> Result<(), String> {
@@ -751,6 +751,11 @@ mod retail_tests {
                     if write_actions(&acts, &after)? != *block {
                         return Err(format!("block {n} writes back to other bytes"));
                     }
+                    let program = Program::decode(block).map_err(|e| format!("block {n}: {e}"))?;
+                    if program.encode()? != *block {
+                        return Err(format!("block {n} encodes as a program to other bytes"));
+                    }
+                    positions += program.ops.iter().map(|o| o.to.len()).sum::<usize>();
                     after_end += usize::from(!after.is_empty());
                     for a in &acts {
                         *codes.entry(a.code).or_default() += 1;
@@ -771,11 +776,100 @@ mod retail_tests {
                 failed.push(format!("{label} (0x{:08X}): {e}", row.hash));
             }
         }
-        println!("{} movies, {checked} blocks ({after_end} with bytes after End), {} failed; actions by code {codes:x?}", rows.len(), failed.len());
+        println!(
+            "{} movies, {checked} blocks ({after_end} with bytes after End, {positions} positions), {} failed; actions by code {codes:x?}",
+            rows.len(),
+            failed.len()
+        );
         assert!(failed.is_empty(), "{}", failed.join("\n"));
+        assert!(positions > 0, "no branch or body position was checked");
         for code in [0x96u8, 0x88] {
             assert!(codes.get(&code).is_some_and(|n| *n > 0), "no action {code:#x} was checked");
         }
+    }
+
+    /// The player's strings are the language's table as the engine keys it (`pandemic_hash_m2("english")`),
+    /// from the WAD mounted last that holds one, in whatever block: a patch carrying the table at
+    /// `blocks\VZ\mod_<hash>.block` (as `qm link` ships one) overrides `shell.wad`'s, and its added key
+    /// reads.
+    #[test]
+    fn a_patched_string_table_is_the_one_the_player_reads() {
+        use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
+        use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+        let vz = crate::app::retail_vz_wad();
+        let shell = std::path::Path::new(&vz).with_file_name("shell.wad");
+        let english = mercs2_formats::hash::pandemic_hash_m2("english");
+        let mut base = mercs2_engine::gfx_pass::WadImages::open(&[shell.to_string_lossy().into_owned()]).expect("shell.wad");
+        let retail = base.strings("english").expect("shell.wad's english");
+        let (&edited, _) = retail.iter().next().expect("a key");
+        let added = mercs2_formats::stringdb::key_hash("[QmPlayerTest.Added]");
+        assert!(!retail.contains_key(&added));
+        let mut stack = mercs2_quartermaster::GameStack::open(&[shell.clone()]).expect("shell.wad");
+        let container = stack.container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB).expect("shell.wad's english container");
+        let patched = mercs2_formats::stringdb::apply_container(&container, |db| {
+            db.set_by_hash(edited, "QM PATCHED");
+            db.add_by_hash(added, "QM ADDED");
+            Ok(())
+        })
+        .expect("edit");
+        let mut block = Vec::new();
+        for v in [1u32, english, TYPE_HASH_STRINGDB, 0, patched.len() as u32] {
+            block.extend(v.to_le_bytes());
+        }
+        block.extend(&patched);
+        let aset = AsetEntry::new(english, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB);
+        let patch = PatchBlock::from_decompressed(&block, format!("blocks\\VZ\\mod_{english:08x}.block"), vec![aset], None).expect("block");
+        let wad = build_patch_wad_multi(&[patch], mercs2_formats::donor::base_csum(&shell).expect("csum"), &FFCS_CERT_BLOB).expect("wad");
+        let path = std::env::temp_dir().join(format!("qm_player_strings_{}.wad", std::process::id()));
+        std::fs::write(&path, wad).expect("write");
+        let mut images = mercs2_engine::gfx_pass::WadImages::open(&[path.to_string_lossy().into_owned(), shell.to_string_lossy().into_owned()]).expect("the stack");
+        let strings = images.strings("english").expect("english");
+        assert_eq!(strings.get(&added).map(String::as_str), Some("QM ADDED"));
+        assert_eq!(strings.get(&edited).map(String::as_str), Some("QM PATCHED"), "the patch's copy wins over shell.wad's");
+        assert_eq!(strings.len(), retail.len() + 1);
+    }
+
+    /// Every shape of every movie whose one fill style is a bitmap writes back to its bytes with that
+    /// fill rewritten (its matrix in the exporter's widths), and every external image tag writes back.
+    #[test]
+    fn every_bitmap_fill_and_external_image_writes_back() {
+        use mercs2_formats::gfx_stream::{TagBody, TagStream};
+        use mercs2_formats::gfx_tags::{external_image, shape_bitmap_fill, with_bitmap_fill, DEFINE_EXTERNAL_IMAGE, DEFINE_SHAPES};
+        let vz = crate::app::retail_vz_wad();
+        let mut w = WadStack::open(&vz, &crate::app::overlays_for(&vz, true, &[])).expect("open retail vz.wad");
+        let index = AssetIndex::build(&w.wads, &w.side, crate::index::load_all_names().expect("names"));
+        let rows: Vec<_> = index.rows(Kind::UiGfx).to_vec();
+        let (mut fills, mut images, mut failed) = (0usize, 0usize, Vec::new());
+        for row in &rows {
+            let label = row.label();
+            let result = (|| -> Result<(), String> {
+                let stream = TagStream::parse(&movie_bytes(&mut w, row.src, row.hash, &label)?)?;
+                for t in &stream.tags {
+                    let TagBody::Raw(body) = &t.body else { continue };
+                    if DEFINE_SHAPES.contains(&t.code) {
+                        // Shapes of several fills, or of no bitmap, are not this edit's.
+                        let Ok(shape) = shape_bitmap_fill(t.code, body) else { continue };
+                        if with_bitmap_fill(t.code, body, shape.id, &shape.fill)? != *body {
+                            return Err(format!("shape {}'s bitmap fill writes back to other bytes", shape.id));
+                        }
+                        fills += 1;
+                    } else if t.code == DEFINE_EXTERNAL_IMAGE {
+                        let img = external_image(body)?;
+                        if img.encode()? != *body {
+                            return Err(format!("external image {} writes back to other bytes", img.id));
+                        }
+                        images += 1;
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(e) = result {
+                failed.push(format!("{label} (0x{:08X}): {e}", row.hash));
+            }
+        }
+        println!("{} movies, {fills} single bitmap fills, {images} external images, {} failed", rows.len(), failed.len());
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+        assert!(fills > 0 && images > 0, "no bitmap fill or external image was checked");
     }
 
     /// Every timeline of every movie reads as instances, and each placement and removal belongs to
