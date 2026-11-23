@@ -1,6 +1,6 @@
 //! PS3 -> PC native re-interleave pass for the 1-to-1 compact-decl subset of DLC01.
 //!
-//! Scope (as cataloged in `docs/_descriptor_walker_oracle.md`): the six PS3
+//! Scope (as cataloged in [`docs/_descriptor_walker_oracle.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md)): the six PS3
 //! compact `decl` patterns whose Xbox-DOH oracle is **1-to-1** -- the five
 //! `type_hash=0x7C569307` terrain patterns and the single `0x1602815C` lowres
 //! pattern. These are the patterns that can be converted natively from PS3 bytes
