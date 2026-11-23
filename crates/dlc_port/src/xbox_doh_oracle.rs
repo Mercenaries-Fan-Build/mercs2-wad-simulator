@@ -3,7 +3,7 @@
 //! When the PS3 UCFX descriptor walker (`ucfx_byteswap::convert_block`) refuses
 //! a block with the `PS3 compact decl detected` error class — the walker's
 //! loud-fail arm for the non-interleaved multi-stream vertex layout the PS3
-//! DLC ships (see `docs/_descriptor_walker_oracle.md`) — the sibling Xbox 360
+//! DLC ships (see [`docs/_descriptor_walker_oracle.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md)) — the sibling Xbox 360
 //! DOH holds a cross-platform-identical asset in LE-translatable form. This
 //! module parses the Xbox DOH, converts every block through the same walker,
 //! and indexes the result by its PRIMARY `name_hash` (the first entry in the
@@ -14,7 +14,7 @@
 //! The key is the primary `name_hash`, not the block path, because PS3 and
 //! Xbox ship nearly-identical path strings but with LOD-tier / platform-suffix
 //! divergences (29 PS3-only paths plus `_P003_Q0` ↔ `_P001_Q2` rung shuffles
-//! documented in `docs/_dlc01_pipeline_readiness.md` §4). The first-entry
+//! documented in [`docs/_dlc01_pipeline_readiness.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_dlc01_pipeline_readiness.md) §4). The first-entry
 //! `name_hash` is the engine's own identifier for an asset and is identical
 //! across PS3 and Xbox for the same content.
 //!
