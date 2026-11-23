@@ -31,7 +31,7 @@ on a physics engine crate.
 ## Where it comes from
 
 The retail PC exe is the oracle. The crate's source cites
-`docs/reverse_engineer/vehicle_code_map.md` (+ `docs/data/vehicle_code_map.json`) and
+[`docs/reverse_engineer/vehicle_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/vehicle_code_map.md) (+ [`docs/data/vehicle_code_map.json`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/data/vehicle_code_map.json)) and
 `camera_code_map.md` throughout.
 
 Key decoded facts the source records:
