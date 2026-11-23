@@ -109,7 +109,8 @@ that gets hashed with `pandemic_hash_m2`:
 # catalog dump, optionally substring-filtered
 cargo run -p mercs2_workshop -- --list heli
 
-# models grouped by vehicle class (helicopter, tank, car, boat, ...); optional class filter
+# models grouped by vehicle class (helicopter, tank, car, boat, ...), from the templates that
+# name each model and then its name; optional class filter
 cargo run -p mercs2_workshop -- --inventory helicopter
 
 # load one model end-to-end (geometry + textures + clips + bones + LOD tiers) and print its stats
