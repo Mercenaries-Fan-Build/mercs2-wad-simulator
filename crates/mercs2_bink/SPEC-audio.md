@@ -102,7 +102,7 @@ meaning is **INFERRED**.
   (ids 0 and 3 stereo, the rest mono). EA and Pandemic: 4 tracks, ids `0 (st), 1, 2, 3 (st)`.
   `attract.bik`: 1 track, id 0, 48 kHz stereo. 7 files (shell menus, `01_VIK_01`, `title_*`) have
   no audio.
-- Correction to `docs/reverse_engineer/disc_media_inventory.md` §2.1 (which read a disc image):
+- Correction to [`docs/reverse_engineer/disc_media_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/disc_media_inventory.md) §2.1 (which read a disc image):
   the **PC** `01_AOA_C.bik` has **8** tracks at **22050 Hz** and is 1024×576, not 9 tracks at
   48 kHz; the PC `EA.bik` header says 15/1 fps, not 30/1.
 
