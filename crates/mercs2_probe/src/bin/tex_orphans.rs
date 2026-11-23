@@ -11,7 +11,7 @@
 //! Any OTHER container type that carries an `MTRL` row is not parsed (its loader is not decoded) and
 //! is listed; it makes the run exit 1, because its citations are missing from the census.
 //!
-//! Names come from `docs/data/aset_names.csv` under the `notes_docs_dir` of `.mercs2-local.toml`.
+//! Names come from this repository's `docs/data/aset_names.csv`.
 //!
 //! Exit 0 = every block, every MTRL read; 1 = something could not be read (listed); 2 = usage or setup.
 //!
@@ -60,7 +60,7 @@ fn main() {
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let tsv = get("--tsv");
 
-    let name_of = dev_aset_names(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| setup_fail(e));
+    let name_of = dev_aset_names().unwrap_or_else(|e| setup_fail(e));
 
     let wadpath = wad::resolve_vz_wad(get("--wad").as_deref())
         .unwrap_or_else(|| setup_fail("no vz.wad found (pass --wad, or write .mercs2-local.toml)".into()));
