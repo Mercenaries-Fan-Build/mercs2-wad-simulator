@@ -1,0 +1,3 @@
+-- Empty bytecode chunk — unluac decompiles to zero bytes.
+-- Source `.luac` is a bare `return` (no locals, no body); this file
+-- preserves PC backfill parity with the Xbox-side pseudocode output.
