@@ -7,7 +7,10 @@
 //! Stage gate: a byte-identical UCFX round-trip self-test runs first — if rebuilding the worldentity
 //! container with NO changes does not reproduce the original bytes, we abort before any surgery.
 //!
-//! Usage: mercs2_probe jc2-template-mint [vz.wad path]
+//! Usage: mercs2_probe jc2-template-mint --dir <dir> [vz.wad path]
+//!
+//! `<dir>` holds the compiled `mrxrewarddata_edited.luaq` and `mrxsupportdata_edited.luaq` it reads
+//! and receives the `jc2_block3185_minted.bin` it writes.
 
 use std::fs::File;
 
@@ -247,6 +250,12 @@ fn parse_info_name(info: &[u8]) -> Option<String> {
 }
 
 pub fn run(args: &[String]) {
+    let mut args = args.to_vec();
+    let Some(i) = args.iter().position(|a| a == "--dir").filter(|i| i + 1 < args.len()) else {
+        eprintln!("usage: jc2-template-mint --dir <dir> [vz.wad]");
+        std::process::exit(1)
+    };
+    let dir = std::path::PathBuf::from(args.drain(i..=i + 1).nth(1).expect("checked above"));
     let path = args
         .first()
         .map(std::path::PathBuf::from)
@@ -570,7 +579,7 @@ pub fn run(args: &[String]) {
         if ok_name { "✓" } else { "✗" }
     );
 
-    std::fs::create_dir_all("../../output").ok();
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
 
     // --- Rebuild the FULL block 3185 with worldentity replaced in place (all other entries intact) ---
     // Resident scripts + worldentity require full-block replacement (asset_injection_playbook §5); the
@@ -583,10 +592,12 @@ pub fn run(args: &[String]) {
     //  - mrxsupportdata.Init gets the tSupportData catalog entry (delivery + tUnlockStatus.Pmc).
     //  - mrxrewarddata gets a _tRewards reward row {jc2sportscar,"Pmc"} so GetAllPotentialShopItems("Pmc")
     //    surfaces it. Both are full-block-replaced (per-hash overlay does NOT load); no new asset/DEPS.
-    let rw_luaq = std::fs::read("../../output/mrxrewarddata_edited.luaq")
-        .expect("compile output/mrxrewarddata_edited.luaq first");
-    let sd_luaq = std::fs::read("../../output/mrxsupportdata_edited.luaq")
-        .expect("compile output/mrxsupportdata_edited.luaq first");
+    let luaq = |name: &str| {
+        let p = dir.join(name);
+        std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e} (compile it first)", p.display()))
+    };
+    let rw_luaq = luaq("mrxrewarddata_edited.luaq");
+    let sd_luaq = luaq("mrxsupportdata_edited.luaq");
 
     let count = read_u32_le(&blk, 0) as usize;
     let mut entries: Vec<(u32, u32, u32, Vec<u8>)> = Vec::new();
@@ -639,9 +650,14 @@ pub fn run(args: &[String]) {
         full.extend_from_slice(b);
     }
 
-    std::fs::write("../../output/jc2_block3185_minted.bin", &full).unwrap();
-    println!("wrote output/jc2_block3185_minted.bin ({} bytes, {} entries: worldentity + edited mrxrewarddata)",
-        full.len(), entries.len());
+    let minted = dir.join("jc2_block3185_minted.bin");
+    std::fs::write(&minted, &full).unwrap_or_else(|e| panic!("write {}: {e}", minted.display()));
+    println!("wrote {} ({} bytes, {} entries: worldentity + edited mrxrewarddata)",
+        minted.display(), full.len(), entries.len());
     println!("\nPACKAGE: smuggler --source-wad vz.wad --extra-only \\");
-    println!("  --inject-block \"resident_P000_Q3:output/jc2_block3185_minted.bin\" --output output/jc2_sportscar_template.wad");
+    println!(
+        "  --inject-block \"resident_P000_Q3:{}\" --output {}",
+        minted.display(),
+        dir.join("jc2_sportscar_template.wad").display()
+    );
 }
