@@ -637,6 +637,41 @@ pub fn language_name_refusal(name: &str) -> Option<String> {
     wad_name_refusal("add_language", name)
 }
 
+/// The table an `add_language` forks when it names no `base`.
+pub const LANGUAGE_BASE: &str = "english";
+
+/// An `add_language`'s string table as the build writes it, before it is re-keyed to the language's
+/// name: `base` (or [`LANGUAGE_BASE`]) as `game` ships it, with the `strings` file (under `root`)
+/// applied by [`mercs2_formats::stringdb::edit_container`]. Also the edits read. A base the stack
+/// does not hold, a file that does not read, one with no edits, or a key the base lacks is refused.
+pub fn language_table(
+    game: &mut GameStack,
+    root: &Path,
+    strings: &Path,
+    base: Option<&str>,
+) -> Result<(std::collections::BTreeMap<String, String>, StringTableWrite), String> {
+    let base_name = base.unwrap_or(LANGUAGE_BASE);
+    let base_hash = crate::manifest::asset_hash(base_name);
+    let container = game.container_for_asset(base_hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB).ok_or_else(|| {
+        format!(
+            "base table {base_name:?} (0x{base_hash:08X}) is not a string table in the configured game \
+             stack — a new language forks a shipped table, so `base` must name one that exists (default \
+             `{LANGUAGE_BASE}`)"
+        )
+    })?;
+    let path = root.join(strings);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let edits = parse_string_edits(&text)?;
+    if edits.is_empty() {
+        return Err(format!(
+            "{} declares no strings — a language identical to {base_name} is not a new language",
+            path.display()
+        ));
+    }
+    let merged = mercs2_formats::stringdb::edit_container(&container, &edits)?;
+    Ok((edits, StringTableWrite { table: base_hash, target: base_name.to_string(), copy: TableCopy::Vz, base: container, merged }))
+}
+
 /// Refuse a name `kind` would turn into a new base WAD: [`language_name_refusal`]'s two failure modes.
 pub fn wad_name_refusal(kind: &str, name: &str) -> Option<String> {
     let n = name.trim();
@@ -844,6 +879,9 @@ enum Lowering {
     /// declares a mutation that the linker applies later.
     Nothing,
     Block(PatchBlock),
+    /// A model's LOD chain ([`emit_model_chain`]): its blocks number each other by group-local source
+    /// indices, so [`build`] renumbers the group past every other block before it joins the overlay.
+    Chain(Vec<PatchBlock>),
     /// Several blocks from one contribution. A skinned outfit with `textures:` emits the model
     /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
     /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
@@ -1076,9 +1114,24 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// field. Group 0 is the common case for a simple prop.
 const DEFAULT_TARGET_GROUP: usize = 0;
 
+/// M0317 against the corpus, as a build error: every `set_spawn_lists` row of `manifest` names a call
+/// of its target the wrapper can set, and a list the shipped Lua sets
+/// ([`crate::lint::spawn_list_source_checks`]). `who` leads each message.
+fn check_spawn_lists(manifest: &crate::manifest::Manifest, corpus_root: &Path, who: &str) -> Result<(), BuildError> {
+    let found = crate::lint::spawn_list_source_checks(manifest, corpus_root);
+    match found.first() {
+        None => Ok(()),
+        Some(d) => Err(BuildError::Lower {
+            index: d.at.unwrap_or(0),
+            kind: "set_spawn_lists",
+            message: format!("{who}{}", found.iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("; ")),
+        }),
+    }
+}
+
 /// Every script mutation a Shipment declares for `level` (`vz` or a custom level's name), derived from
-/// its manifest alone. A `patch_lua` applies in every level; an `add_shop_item` only in the levels it
-/// lists.
+/// its manifest alone. A `patch_lua` and a `set_spawn_lists` apply in every level; an `add_shop_item`
+/// only in the levels it lists.
 ///
 /// **Hermetic on purpose — no game stack, no lowering.** That is what lets the same function serve
 /// two callers that are otherwise very different: [`build`], linking one Shipment so its overlay is
@@ -1116,6 +1169,14 @@ pub fn script_mutations(
                     shipment: shipment.clone(),
                     target: target.clone(),
                     append: source,
+                });
+            }
+            // No rows, no Lua: an empty `set_spawn_lists` claims no script block.
+            Contribution::SetSpawnLists { target, lists } if !lists.is_empty() => {
+                out.push(ScriptMutation {
+                    shipment: shipment.clone(),
+                    target: target.clone(),
+                    append: crate::spawn_lists::wrapper(lists),
                 });
             }
             Contribution::AddShopItem {
@@ -1228,60 +1289,307 @@ pub(crate) fn read_entities_file(path: &Path) -> Result<Vec<mercs2_formats::plac
     crate::world::parse_entities(&text).map_err(|m| format!("{}: {m}", path.display()))
 }
 
-fn lower_layer_append(
-    game: &mut crate::game::GameStack,
-    template_layer: &str,
-    new_layer_name: &str,
+/// `container` (a layer sub-block) with `ents` inserted in place, each with the `flgs` state of a
+/// `Name` + `ModelName` + `Transform` entity, after any of those COMPs the layer lacks is added
+/// from `scaffold` ([`mercs2_formats::placement_build::with_comps`]).
+fn insert_entities(
+    container: &[u8],
     ents: &[mercs2_formats::placement_build::NewEntity],
-    index: usize,
-    kind: &'static str,
-) -> Result<Lowering, BuildError> {
-    let inputs = game.layer_block_for_edit(template_layer).ok_or_else(|| BuildError::Lower {
-        index, kind,
-        message: format!("no layer matching {template_layer:?} in the game stack"),
-    })?;
-    let template_sub = find_template_sub(&inputs.block).ok_or_else(|| BuildError::Lower {
-        index, kind,
-        message: format!("no layer sub-block found in the carrier block for {template_layer:?}"),
-    })?;
-    let layer_hash = crate::manifest::asset_hash(new_layer_name);
-    let new_block = mercs2_formats::placement_build::append_placements(
-        &inputs.block, template_sub, ents, layer_hash,
-    ).map_err(|m| BuildError::Lower { index, kind, message: m })?;
-
-    // Every sub-block in the modified carrier needs its own ASET row: on WAD merge the base's
-    // rows still point at BASE block indices, and our overlay's block gets re-indexed. Without
-    // rows for the pre-existing sub-blocks, they resolve to a stale base index and M0004 fires.
-    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&new_block);
-    let mut asets = Vec::with_capacity(count as usize);
-    for e in &entries {
-        let tid = mercs2_formats::aset_type_ids::type_id_for_type_hash(e.type_hash)
-            .unwrap_or(TYPE_ID_LAYER);
-        asets.push(AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, tid));
+    scaffold: &mercs2_formats::placement_build::LayerScaffold,
+) -> Result<Vec<u8>, String> {
+    use mercs2_formats::placement_build as pb;
+    let mut c = pb::with_comps(container, scaffold)?;
+    for e in ents {
+        c = pb::insert_entity(&c, e, pb::FLGS_MODEL_PLACEMENT)?;
     }
-
-    Ok(Lowering::Block(PatchBlock::from_decompressed(
-        &new_block,
-        inputs.path.clone(),
-        asets,
-        None,
-    ).map_err(|m| BuildError::Lower { index, kind, message: m })?))
+    Ok(c)
 }
 
-fn find_template_sub(block: &[u8]) -> Option<usize> {
-    if block.len() < 4 { return None; }
-    let count = u32::from_le_bytes(block[0..4].try_into().ok()?) as usize;
-    for i in 0..count {
-        let row = 4 + i * 16;
-        if row + 8 > block.len() { break; }
-        let type_hash = u32::from_le_bytes(block[row + 4..row + 8].try_into().ok()?);
-        if type_hash == TYPE_HASH_LAYER
-            && mercs2_formats::placement_build::container_has_scaffolding(block, i)
-        {
-            return Some(i);
+/// One write of a Shipment's into a layer block: an `edit_world`'s edits, an `add_placement`'s or
+/// `add_layer`'s entities, or a stand-in's placement.
+#[derive(Debug, Clone)]
+pub enum WorldWrite {
+    /// `edit_world`: `doc` (read from `file`) applied to the block `layer` names.
+    Edit { layer: String, file: PathBuf, doc: crate::world::WorldDoc },
+    /// `add_placement`: `ents` inserted into the layer named `layer`.
+    Place { layer: String, ents: Vec<mercs2_formats::placement_build::NewEntity> },
+    /// `add_layer`: a new layer `name` placing `ents`, in the block `template` names.
+    NewLayer { name: String, template: String, ents: Vec<mercs2_formats::placement_build::NewEntity> },
+    /// `add_tiny_geometry`: the stand-in's placement into its layer.
+    StandIn(crate::tiny::StandInPlace),
+}
+
+impl WorldWrite {
+    /// The write contribution `c` (of the Shipment at `root`) makes, its file read: `None` for a
+    /// kind that writes no layer block, or for `add_tiny_geometry`, whose placement comes from its
+    /// lowering ([`crate::tiny::lower_shipment`]).
+    pub fn of(c: &Contribution, root: &Path) -> Result<Option<WorldWrite>, String> {
+        Ok(match c {
+            Contribution::EditWorld { layer, edits } => {
+                let file = root.join(edits);
+                let text = std::fs::read_to_string(&file).map_err(|e| format!("reading {}: {e}", file.display()))?;
+                let doc = crate::world::parse(&text).map_err(|m| format!("{}: {m}", file.display()))?;
+                Some(WorldWrite::Edit { layer: layer.clone(), file, doc })
+            }
+            Contribution::AddPlacement { layer, entity } => {
+                Some(WorldWrite::Place { layer: layer.clone(), ents: read_entities_file(&root.join(entity))? })
+            }
+            Contribution::AddLayer { name, template, entities } => Some(WorldWrite::NewLayer {
+                name: name.clone(),
+                template: template.clone(),
+                ents: read_entities_file(&root.join(entities))?,
+            }),
+            _ => None,
+        })
+    }
+
+    /// The stack's block the write goes into: the block a needle names for an `edit_world` and an
+    /// `add_layer` ([`GameStack::layer_block_for_edit`]), the block holding the layer of that name
+    /// for an `add_placement` and a stand-in ([`GameStack::layer_by_name`]). A name that is no layer
+    /// of the stack — a block path among them — is refused.
+    pub fn base(&self, game: &mut GameStack) -> Result<crate::game::LayerEditInputs, String> {
+        let by_name = |game: &mut GameStack, layer: &str| {
+            game.layer_by_name(layer)?.map(|(inputs, _)| inputs).ok_or_else(|| {
+                format!("{layer:?} is not the name of a layer of the game stack; `layer` names one layer, like vz_state_pmccon004, not a block path")
+            })
+        };
+        match self {
+            WorldWrite::Edit { layer, .. } => game.layer_block_for_edit(layer).ok_or_else(|| {
+                format!(
+                    "no layer matching {layer:?} in the game stack — the target is a PTHS-path needle \
+                     like \"vz_state_pmccon004\" or \"layers_static\""
+                )
+            }),
+            WorldWrite::NewLayer { template, .. } => {
+                game.layer_block_for_edit(template).ok_or_else(|| format!("no layer matching {template:?} in the game stack"))
+            }
+            WorldWrite::Place { layer, .. } => by_name(game, layer),
+            WorldWrite::StandIn(p) => by_name(game, &p.layer),
         }
     }
-    None
+
+    /// Whether the write needs the game's layer scaffolding ([`GameStack::layer_scaffold`]).
+    pub fn builds_comps(&self) -> bool {
+        matches!(self, WorldWrite::Place { .. } | WorldWrite::NewLayer { .. })
+    }
+
+    /// `block` with the write applied, and what it did (an `edit_world`'s counts). `scaffold` is
+    /// required by an `add_placement` and an `add_layer` ([`Self::builds_comps`]).
+    pub fn apply(
+        &self,
+        block: &[u8],
+        scaffold: Option<&mercs2_formats::placement_build::LayerScaffold>,
+    ) -> Result<(Vec<u8>, WriteCounts), String> {
+        use mercs2_formats::placement_build as pb;
+        let need = || scaffold.ok_or_else(|| "the layer scaffolding was not read".to_string());
+        // The layer named `name` in `block`: its entry index and container.
+        let entry = |name: &str| {
+            pb::find_entry(block, crate::manifest::asset_hash(name), TYPE_HASH_LAYER)
+                .map(|(i, c)| (i, c.to_vec()))
+                .ok_or_else(|| format!("the block holds no layer {name}"))
+        };
+        match self {
+            WorldWrite::Edit { layer, file, doc } => {
+                let (edited, moved, reskinned) = edit_world_block(block, doc, layer)?;
+                if edited == block {
+                    return Err(edit_world_no_change(file, layer));
+                }
+                Ok((edited, WriteCounts { edits: doc.edits.len(), moved, reskinned }))
+            }
+            WorldWrite::Place { layer, ents } => {
+                let (i, c) = entry(layer)?;
+                let edited = insert_entities(&c, ents, need()?).map_err(|m| format!("layer {layer}: {m}"))?;
+                Ok((pb::replace_entry(block, i, &edited)?, WriteCounts::default()))
+            }
+            WorldWrite::NewLayer { name, ents, .. } => {
+                let hash = crate::manifest::asset_hash(name);
+                if pb::find_entry(block, hash, TYPE_HASH_LAYER).is_some() {
+                    return Err(format!("the block already holds a layer named {name}"));
+                }
+                let carrier = mercs2_formats::ucfx::block_chunk_spans(block)?
+                    .into_iter()
+                    .find(|(e, _)| e.type_hash == TYPE_HASH_LAYER)
+                    .map(|(_, r)| block[r].to_vec())
+                    .ok_or("the block holds no layer for the new one to be built beside")?;
+                let fresh = pb::empty_layer(&carrier, need()?)?;
+                let container = insert_entities(&fresh, ents, need()?).map_err(|m| format!("layer {name}: {m}"))?;
+                Ok((pb::append_entry(block, hash, TYPE_HASH_LAYER, &container)?, WriteCounts::default()))
+            }
+            WorldWrite::StandIn(p) => {
+                let (i, c) = entry(&p.layer)?;
+                let edited = crate::tiny::layer_with_placement(&c, p.key, p.row, p.col, p.hash).map_err(|m| format!("layer {}: {m}", p.layer))?;
+                Ok((pb::replace_entry(block, i, &edited)?, WriteCounts::default()))
+            }
+        }
+    }
+}
+
+/// What an `edit_world` write did: its edit count, and the Transform and ModelName records written.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WriteCounts {
+    pub edits: usize,
+    pub moved: usize,
+    pub reskinned: usize,
+}
+
+/// Lower every write of a Shipment's to a layer block (its `edit_world`, `add_placement` and
+/// `add_layer` contributions, and `stand_ins`, its stand-ins' placements): the writes to one block
+/// applied to it in contribution order, and that block shipped once. Each overlay ships a whole
+/// block, so two of one block would leave one write's records out (the registry keeps the first
+/// block's rows).
+fn lower_world(
+    manifest: &crate::manifest::Manifest,
+    root: &Path,
+    game: &mut GameStack,
+    stand_ins: Vec<crate::tiny::StandInPlace>,
+    log: &mut Vec<String>,
+) -> Result<Vec<PatchBlock>, BuildError> {
+    let mut writes: Vec<(usize, &'static str, WorldWrite)> = Vec::new();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let kind = c.kind();
+        if let Some(w) = WorldWrite::of(c, root).map_err(|message| BuildError::Lower { index, kind, message })? {
+            writes.push((index, kind, w));
+        }
+    }
+    writes.extend(stand_ins.into_iter().map(|p| (p.index, "add_tiny_geometry", WorldWrite::StandIn(p))));
+    writes.sort_by_key(|w| w.0);
+    let scaffold = match writes.iter().find(|w| w.2.builds_comps()) {
+        Some(&(index, kind, _)) => Some(game.layer_scaffold().map_err(|message| BuildError::Lower { index, kind, message })?),
+        None => None,
+    };
+    // Per block: the stack's block, the block as written so far, whether a layer was appended, and
+    // the first write to it (its contribution and kind).
+    type BlockWrites = (crate::game::LayerEditInputs, Vec<u8>, bool, (usize, &'static str));
+    let mut blocks: Vec<BlockWrites> = Vec::new();
+    for (index, kind, w) in &writes {
+        let (index, kind) = (*index, *kind);
+        let fail = |message: String| BuildError::Lower { index, kind, message };
+        let base = w.base(game).map_err(fail)?;
+        let at = match blocks.iter().position(|b| b.0.path == base.path) {
+            Some(at) => at,
+            None => {
+                let block = base.block.clone();
+                blocks.push((base, block, false, (index, kind)));
+                blocks.len() - 1
+            }
+        };
+        let (written, counts) = w.apply(&blocks[at].1, scaffold.as_ref()).map_err(|m| fail(format!("{}: {m}", blocks[at].0.path)))?;
+        let what = match w {
+            WorldWrite::Edit { layer, .. } => format!(
+                "edit_world {layer}: {} edit(s) \u{2192} {} moved, {} re-modelled",
+                counts.edits, counts.moved, counts.reskinned
+            ),
+            WorldWrite::Place { layer, ents } => format!("add_placement {layer}: {} entities inserted into the layer", ents.len()),
+            WorldWrite::NewLayer { name, ents, .. } => format!("add_layer {name}: a new layer of {} entities", ents.len()),
+            WorldWrite::StandIn(p) => format!("add_tiny_geometry placement 0x{:08X} into {}", p.key, p.layer),
+        };
+        log.push(format!("contributions[{index}] {what}; layer block {}", blocks[at].0.path));
+        blocks[at].1 = written;
+        blocks[at].2 |= matches!(w, WorldWrite::NewLayer { .. });
+    }
+    let mut out = Vec::with_capacity(blocks.len());
+    for (base, block, appended, (index, kind)) in blocks {
+        let built = if appended { emit_appended_layer(&base, &block) } else { emit_edited_layer(&base, &block) };
+        out.push(built.map_err(|message| BuildError::Lower { index, kind, message })?);
+    }
+    Ok(out)
+}
+
+/// The refusal of an `edit_world` whose edits (`file`) change nothing in `layer`.
+pub fn edit_world_no_change(file: &Path, layer: &str) -> String {
+    format!(
+        "{} declares no effective change to {layer:?} — an edit_world that moves nothing \
+         would ship an overlay that only restates the base layer",
+        file.display()
+    )
+}
+
+/// `block` (the layer block `layer` names) with `doc`'s edits applied in place
+/// (`placement::patch_transform` / `patch_model`), each edit's entity a bare `0xKEY` or a name the
+/// block's placements carry, and each container an edit wrote into resealed
+/// (`placement::reseal`); and how many Transform and ModelName records the edits wrote.
+pub fn edit_world_block(block: &[u8], doc: &crate::world::WorldDoc, layer: &str) -> Result<(Vec<u8>, usize, usize), String> {
+    // Name → key, from the layer's own placements, so an author can target by entity name.
+    let places = mercs2_formats::placement::load_placements(block).unwrap_or_default();
+    let key_by_name: std::collections::HashMap<&str, u32> =
+        places.iter().filter_map(|p| p.name.as_deref().map(|n| (n, p.key))).collect();
+
+    let records = mercs2_formats::placement::RecordIndex::read(block);
+    let mut edited = block.to_vec();
+    let (mut moved, mut reskinned) = (0usize, 0usize);
+    let mut written = std::collections::BTreeSet::new();
+    for e in &doc.edits {
+        // Resolve the target to a Transform record key.
+        let key = crate::manifest::bare_hash(&e.entity)
+            .or_else(|| key_by_name.get(e.entity.as_str()).copied())
+            .ok_or_else(|| {
+                format!(
+                    "edit_world: entity {:?} is neither a bare 0xKEY nor a name in {layer:?} \
+                     — extract a baseline with `qm extract-world` and edit that",
+                    e.entity
+                )
+            })?;
+        if e.pos.is_some() || e.quat.is_some() {
+            let n = records.patch_transform(&mut edited, key, e.pos, e.quat);
+            if n == 0 {
+                return Err(format!("edit_world: no Transform for entity {:?} (0x{key:08X}) in {layer:?}", e.entity));
+            }
+            moved += n;
+        }
+        if let Some(m) = &e.model {
+            let mh = crate::manifest::asset_hash(m);
+            let n = records.patch_model(&mut edited, key, mh);
+            if n == 0 {
+                return Err(format!(
+                    "edit_world: entity {:?} (0x{key:08X}) has no ModelName to re-model in {layer:?}",
+                    e.entity
+                ));
+            }
+            reskinned += n;
+        }
+        written.extend(records.offsets(key));
+    }
+    // Each container an edit wrote into carries a CSUM of its old bytes until it is resealed.
+    mercs2_formats::placement::reseal(&mut edited, &written).map_err(|e| format!("edit_world: {layer:?}: {e}"))?;
+    Ok((edited, moved, reskinned))
+}
+
+/// What an `edit_world`, `add_placement` or `add_layer` builds: the stack's block it is built from,
+/// the block as built, and for an `edit_world` its edit count and the Transform and ModelName
+/// records they wrote.
+#[derive(Debug, Clone)]
+pub struct WorldBlock {
+    pub base: crate::game::LayerEditInputs,
+    pub block: Vec<u8>,
+    pub edits: usize,
+    pub moved: usize,
+    pub reskinned: usize,
+}
+
+/// The block contribution `c` (of the Shipment at `root`) builds on its own, as the lowering applies
+/// its write ([`WorldWrite`]): `None` for a kind that builds no world block, `Err` with the
+/// lowering's refusal. The build applies every write of a Shipment's to one block together
+/// ([`lower_world`]).
+pub fn world_block(c: &Contribution, root: &Path, game: &mut GameStack) -> Result<Option<WorldBlock>, String> {
+    let Some(w) = WorldWrite::of(c, root)? else { return Ok(None) };
+    let base = w.base(game)?;
+    let scaffold = if w.builds_comps() { Some(game.layer_scaffold()?) } else { None };
+    let (block, counts) = w.apply(&base.block, scaffold.as_ref()).map_err(|m| format!("{}: {m}", base.path))?;
+    Ok(Some(WorldBlock { base, block, edits: counts.edits, moved: counts.moved, reskinned: counts.reskinned }))
+}
+
+/// A layer block with entries appended, as an overlay of `inputs`' block: one ASET row per entry
+/// of `new_block`. On WAD merge the base's rows still point at BASE block indices, and the
+/// overlay's block gets re-indexed; without rows for the pre-existing sub-blocks, they resolve to a
+/// stale base index and M0004 fires.
+fn emit_appended_layer(inputs: &crate::game::LayerEditInputs, new_block: &[u8]) -> Result<PatchBlock, String> {
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(new_block);
+    let mut asets = Vec::with_capacity(count as usize);
+    for e in &entries {
+        let tid = mercs2_formats::aset_type_ids::type_id_for_type_hash(e.type_hash).unwrap_or(TYPE_ID_LAYER);
+        asets.push(AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, tid));
+    }
+    PatchBlock::from_decompressed(new_block, inputs.path.clone(), asets, None)
 }
 
 /// Shared helper for the passthrough kinds: read an author-supplied binary file and wrap it as a
@@ -1311,9 +1619,9 @@ fn opaque_new_asset(
     )?))
 }
 
-/// Wrap an already-produced container as a single-entry mod block. Split from
-/// [`opaque_new_asset`] so the `replace_phy2` codepath (which produces `edited` in-Rust rather
-/// than reading a file) can share the block-emit half.
+/// Wrap an already-produced container as a single-entry mod block whose row names no finer rung.
+/// Split from [`opaque_new_asset`] so a codepath that produces the bytes in-Rust rather than reading a
+/// file can share the block-emit half. Not for a shipped model, whose rungs `emit_model_chain` carries.
 pub(crate) fn opaque_container_block(
     hash: u32,
     type_hash: u32,
@@ -2954,28 +3262,82 @@ pub fn emit_edited_layer(
     Ok(block)
 }
 
-/// Lower a single contribution into a patch block.
-fn lower(
+/// Re-emit a shipped model's whole LOD chain with `_P000`'s container replaced by `edited_p000`.
+///
+/// One single-entry block per rung the model's row names (`docs/modernization/model_chain_edits.md`):
+///
+/// - `_P000` carries `edited_p000`; each finer rung carries its retail container byte for byte.
+/// - Each entry's third word is the byte sum of the containers before it, the shape every retail model
+///   rung has (`mercs2_probe model-chains`), restated because `_P000` may have changed size.
+/// - Each block keeps its source block's tier byte: the engine copies it to the stream node as the
+///   block's eviction class, and a finer rung written as tier 0 could not be evicted by coarse requests.
+/// - Paths are new (`mod_<hash>.block`, then `mod_<hash>_P00N_Q<3-N>.block`), so no retail block is
+///   shadowed; the engine fetches a rung by the block index in its row, not by path.
+/// - Only `_P000` carries the ASET row. Its rungs name the group's blocks by group-local source indices
+///   `0..n`, which `build_patch_wad_multi` maps to their places once [`build`] has renumbered the group.
+pub fn emit_model_chain(chain: &crate::game::ModelChain, edited_p000: &[u8]) -> Result<Vec<PatchBlock>, String> {
+    let hash = chain.hash;
+    if chain.rungs.is_empty() || chain.rungs.len() > 4 {
+        return Err(format!("model 0x{hash:08X}: a chain has 1 to 4 rungs, this one {}", chain.rungs.len()));
+    }
+    let mut blocks = Vec::with_capacity(chain.rungs.len());
+    let mut before = 0u32;
+    for (n, rung) in chain.rungs.iter().enumerate() {
+        let container = if n == 0 { edited_p000 } else { &rung.container };
+        let len = u32::try_from(container.len()).map_err(|_| format!("model 0x{hash:08X} _P{n:03}: container over 4 GB"))?;
+        let mut data = Vec::with_capacity(20 + container.len());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&hash.to_le_bytes());
+        data.extend_from_slice(&TYPE_HASH_MODEL.to_le_bytes());
+        data.extend_from_slice(&before.to_le_bytes());
+        data.extend_from_slice(&len.to_le_bytes());
+        data.extend_from_slice(container);
+        before = before.checked_add(len).ok_or_else(|| format!("model 0x{hash:08X}: the chain's containers pass 4 GB"))?;
+        let (path, rows) = if n == 0 {
+            let slot = |r: usize| (r < chain.rungs.len()).then_some(r as u32);
+            let (secondary, p001) = mercs2_formats::patch_wad::rung_chain([slot(0), slot(1), slot(2), slot(3)]);
+            (format!("blocks\\VZ\\mod_{hash:08x}.block"), vec![AsetEntry::new(hash, secondary, p001, TYPE_ID_MODEL)])
+        } else {
+            (format!("blocks\\VZ\\mod_{hash:08x}_P{n:03}_Q{}.block", 3 - n), Vec::new())
+        };
+        let mut block = PatchBlock::from_decompressed(&data, path, rows, Some(rung.packed_field))?;
+        block.source_block_index = Some(n as u32);
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
+/// The rungs a re-emitted chain carries, for the build log: each with its source block and tier.
+fn chain_summary(chain: &crate::game::ModelChain) -> String {
+    let rungs: Vec<String> = chain
+        .rungs
+        .iter()
+        .enumerate()
+        .map(|(n, r)| format!("_P{n:03} from block {} tier {}", r.block, r.packed_field >> 24))
+        .collect();
+    format!("carries {} rung(s) of {}: {}", rungs.len(), chain.wad.display(), rungs.join(", "))
+}
+
+/// The block a texture contribution ships, with the texture's hash: what [`lower`] ships for it, and
+/// what the Workshop's Depot shows. `None` for a `replace_texture` of the `vfx` atlas: a repaint of
+/// the atlas is the base every sprite of the set is drawn on, and `build` and `link` write it into the
+/// resident block with the sprites ([`lower_fx`]); and for any other kind.
+///
+/// * `add_texture` — a standalone novel texture. Needs NO game stack: the dimensions and format
+///   come from the author's own image rather than from a target the way `replace_texture` does,
+///   which makes this (with `raw` and `add_movie`) one of the few kinds that exercises the whole
+///   emission contract hermetically — the shape template CI runs in.
+/// * `replace_texture` — the target's own dimensions and format are the spec.
+pub fn texture_block(
     index: usize,
     contribution: &Contribution,
     root: &Path,
     game: Option<&mut GameStack>,
-    // Host-provided, like the game stack — the crate never reaches into the filesystem for it.
-    // Load-bearing for the skinned path: without bone NAMES the retarget correction tables have
-    // nothing to match against and every build silently falls back to the generic automap.
-    names: Option<&NameTable>,
-    // `shipment.name`: an `add_runtime_dll` must be named after it.
-    shipment_name: &str,
-    // The whole manifest: `add_model`'s shader import resolves against the Shipment's own
-    // `add_shader` registrations.
-    manifest: &crate::manifest::Manifest,
     log: &mut Vec<String>,
-) -> Result<Lowering, BuildError> {
+) -> Result<Option<(PatchBlock, u32)>, BuildError> {
     let kind = contribution.kind();
     match contribution {
-        // A repaint of the `vfx` atlas is the base every sprite of the set is drawn on: `build` and
-        // `link` write it into the resident block with the sprites ([`lower_fx`]).
-        Contribution::ReplaceTexture { .. } if crate::fx::repaints_atlas(contribution) => Ok(Lowering::Nothing),
+        Contribution::ReplaceTexture { .. } if crate::fx::repaints_atlas(contribution) => Ok(None),
         Contribution::ReplaceTexture { target, image } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
@@ -3062,7 +3424,47 @@ fn lower(
                 kind,
                 message: m,
             })?;
-            Ok(Lowering::Block(block))
+            Ok(Some((block, hash)))
+        }
+        Contribution::AddTexture {
+            name,
+            image,
+            normal_map,
+        } => {
+            let (block, hash) =
+                build_named_texture(index, kind, name, &root.join(image), *normal_map)?;
+            log.push(format!(
+                "contributions[{index}] add_texture {name} 0x{hash:08X} <- {} ({})",
+                root.join(image).display(),
+                if *normal_map { "DXT5nm normal" } else { "colour" }
+            ));
+            Ok(Some((block, hash)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Lower a single contribution into a patch block.
+fn lower(
+    index: usize,
+    contribution: &Contribution,
+    root: &Path,
+    game: Option<&mut GameStack>,
+    // Host-provided, like the game stack — the crate never reaches into the filesystem for it.
+    // Load-bearing for the skinned path: without bone NAMES the retarget correction tables have
+    // nothing to match against and every build silently falls back to the generic automap.
+    names: Option<&NameTable>,
+    // `shipment.name`: an `add_runtime_dll` must be named after it.
+    shipment_name: &str,
+    // The whole manifest: `add_model`'s shader import resolves against the Shipment's own
+    // `add_shader` registrations.
+    manifest: &crate::manifest::Manifest,
+    log: &mut Vec<String>,
+) -> Result<Lowering, BuildError> {
+    let kind = contribution.kind();
+    match contribution {
+        Contribution::ReplaceTexture { .. } | Contribution::AddTexture { .. } => {
+            Ok(texture_block(index, contribution, root, game, log)?.map_or(Lowering::Nothing, |(block, _)| Lowering::Block(block)))
         }
 
         Contribution::AddModel {
@@ -3490,25 +3892,6 @@ fn lower(
         // ships both compressed `CFX` (61 assets) and uncompressed `GFX` (3), so there is no
         // encoding to normalise TO, and swapping an author's verified bytes for ones nobody has run
         // is exactly the kind of helpfulness that produces a WAD that looks fine and does nothing.
-        // A standalone novel texture. Needs NO game stack: the dimensions and format come from the
-        // author's own image rather than from a target the way `replace_texture` does, which makes
-        // this (with `raw` and `add_movie`) one of the few kinds that exercises the whole emission
-        // contract hermetically — the shape template CI runs in.
-        Contribution::AddTexture {
-            name,
-            image,
-            normal_map,
-        } => {
-            let (block, hash) =
-                build_named_texture(index, kind, name, &root.join(image), *normal_map)?;
-            log.push(format!(
-                "contributions[{index}] add_texture {name} 0x{hash:08X} <- {} ({})",
-                root.join(image).display(),
-                if *normal_map { "DXT5nm normal" } else { "colour" }
-            ));
-            Ok(Lowering::Block(block))
-        }
-
         // Encoded from the authored cues with the Shipment's other sound, after every contribution
         // (`sound::lower_shipment_sound`): the block ships to each `load_in` session's WAD, and that
         // session's loader loads it.
@@ -3541,69 +3924,67 @@ fn lower(
 
         // Contributes no block: its whole effect is a declared mutation, collected by
         // `script_mutations` and realised at link time.
-        Contribution::PatchLua { .. } => Ok(Lowering::Nothing),
+        Contribution::PatchLua { .. } | Contribution::SetSpawnLists { .. } => Ok(Lowering::Nothing),
         // Realised at link time by `script_additions` + `link_into_blocks`. Nothing to pack here.
         Contribution::AddScript { .. } => Ok(Lowering::Nothing),
         // Realised at link time by `script_replacements` + `link_into_blocks`. Nothing to pack here.
         Contribution::ReplaceLua { .. } => Ok(Lowering::Nothing),
 
         // Swap a shipped model's PHY2 collision in place. Uses the proven container primitive
-        // `phy2_container::replace_phy2_in_container`; the model asset hash is preserved.
+        // `phy2_container::replace_phy2_in_container`; the model asset hash is preserved. PHY2 lives
+        // in `_P000`, and the model's whole chain is re-emitted (`emit_model_chain`) so its finer rungs
+        // ship with it.
         Contribution::ReplacePhy2 { target, phy2 } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
             let hash = crate::manifest::asset_hash(target);
-            let container = game
-                .container_for_asset(hash, TYPE_HASH_MODEL, TYPE_ID_MODEL)
+            let chain = game
+                .model_chain(hash)
+                .map_err(|message| BuildError::Lower { index, kind, message })?
                 .ok_or_else(|| BuildError::Lower {
                     index,
                     kind,
                     message: format!("{target:?} (0x{hash:08X}) is not a model in the game stack"),
                 })?;
+            let container = &chain.rungs[0].container;
             let new_phy2 = std::fs::read(root.join(phy2)).map_err(|e| BuildError::Lower {
                 index,
                 kind,
                 message: format!("reading {}: {e}", root.join(phy2).display()),
             })?;
-            let (pstart, psize) = mercs2_formats::phy2_container::phy2_span_in_container(&container)
+            let (pstart, psize) = mercs2_formats::phy2_container::phy2_span_in_container(container)
                 .ok_or_else(|| BuildError::Lower {
                     index,
                     kind,
                     message: format!("model container for {target:?} has no PHY2 chunk to replace"),
                 })?;
             let edited = mercs2_formats::phy2_container::replace_phy2_in_container(
-                &container, pstart, psize, &new_phy2,
+                container, pstart, psize, &new_phy2,
             )
             .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             log.push(format!(
-                "contributions[{index}] replace_phy2 {target} 0x{hash:08X}: {} -> {} bytes",
+                "contributions[{index}] replace_phy2 {target} 0x{hash:08X}: _P000 container {} -> {} bytes; {}",
                 container.len(),
-                edited.len()
+                edited.len(),
+                chain_summary(&chain)
             ));
-            Ok(Lowering::Block(opaque_container_block(
-                hash,
-                TYPE_HASH_MODEL,
-                TYPE_ID_MODEL,
-                &edited,
-                index,
-                kind,
-            )?))
+            Ok(Lowering::Chain(
+                emit_model_chain(&chain, &edited).map_err(|message| BuildError::Lower { index, kind, message })?,
+            ))
         }
 
         // The passthrough kinds below all follow the same shape: read author-supplied bytes,
         // wrap them as a single-entry mod block with the right (type_hash, type_id) ASET row.
         // For each, the format side that would produce those bytes from a source description is
         // future work; the manifest side is real today for anyone who has the encoder.
-        Contribution::AddPlacement { layer, entity } => {
-            let Some(game) = game else { return Err(BuildError::GameRequired { index, kind }); };
-            let ents = read_entities_file(&root.join(entity)).map_err(|message| BuildError::Lower { index, kind, message })?;
-            lower_layer_append(game, layer, layer, &ents, index, kind)
-        }
-        Contribution::AddLayer { name, template, entities } => {
-            let Some(game) = game else { return Err(BuildError::GameRequired { index, kind }); };
-            let ents = read_entities_file(&root.join(entities)).map_err(|message| BuildError::Lower { index, kind, message })?;
-            lower_layer_append(game, template, name, &ents, index, kind)
+        // Lowered after the loop with the Shipment's other writes to the same layer block
+        // ([`lower_world`]).
+        Contribution::AddPlacement { .. } | Contribution::AddLayer { .. } => {
+            if game.is_none() {
+                return Err(BuildError::GameRequired { index, kind });
+            }
+            Ok(Lowering::Nothing)
         }
         // A new clip needs nothing from retail, so it lowers hermetically.
         Contribution::AddAnimation {
@@ -4139,12 +4520,11 @@ fn lower(
             })
         }
 
-        // The destruction state machine, EDITED in place. The container is a leaf inside a model
-        // block whose ASET row carries a LOD chain, but we do NOT shadow the whole base block: we
-        // emit ONLY this model's edited container as a single-entry block, copy its ASET row, and
-        // record the source block index. `build_patch_wad_multi` then re-points `_P000` at the new
-        // block and remaps or SENTINELS the finer rungs — a sentinel degrades the model to its coarse
-        // tier, it does not dangle — so no block-mate is carried and nothing hangs. `states:` is the
+        // The destruction state machine, EDITED in place. The machine lives in the model's `_P000`
+        // container; the model's ASET row also names finer rungs holding its near geometry. We do NOT
+        // shadow any base block: the model's whole chain is re-emitted as its own single-entry blocks
+        // (`emit_model_chain`), `_P000` edited and every finer rung carried byte for byte, so no
+        // block-mate is shadowed and no rung is dropped. `states:` is the
         // extracted-then-edited machine (see `crate::states`); `serialize_state_machine` REGENERATES
         // the whole family from it, so an edit may add or remove nodes and states, not only rewrite
         // them. What it cannot make safe is state IDENTITY: a state's hash is the engine's GLOBAL
@@ -4156,17 +4536,20 @@ fn lower(
                 return Err(BuildError::GameRequired { index, kind });
             };
             let hash = crate::manifest::asset_hash(target);
-            let inputs = game.model_container_for_edit(hash).ok_or_else(|| BuildError::Lower {
-                index,
-                kind,
-                message: format!(
-                    "{target:?} (0x{hash:08X}) is not a model in the configured game stack, or its \
-                     block carries no primary container — check the spelling; a name that does not \
-                     exist hashes to a lookup that simply misses"
-                ),
-            })?;
+            let chain = game
+                .model_chain(hash)
+                .map_err(|message| BuildError::Lower { index, kind, message })?
+                .ok_or_else(|| BuildError::Lower {
+                    index,
+                    kind,
+                    message: format!(
+                        "{target:?} (0x{hash:08X}) is not a model in the configured game stack — check \
+                         the spelling; a name that does not exist hashes to a lookup that simply misses"
+                    ),
+                })?;
+            let p000 = &chain.rungs[0].container;
 
-            let base = mercs2_formats::orchestrator::parse_state_machine(&inputs.container)
+            let base = mercs2_formats::orchestrator::parse_state_machine(p000)
                 .ok_or_else(|| BuildError::Lower {
                     index,
                     kind,
@@ -4214,7 +4597,7 @@ fn lower(
             }
 
             let edited = mercs2_formats::orchestrator::serialize_state_machine(
-                &inputs.container,
+                p000,
                 &edited_sm,
             )
             .map_err(|m| BuildError::Lower {
@@ -4234,150 +4617,29 @@ fn lower(
             log.push(format!(
                 "contributions[{index}] edit_state_machine {target} 0x{hash:08X}: \
                  {b_nodes}\u{2192}{n_nodes} node(s), {b_states}\u{2192}{n_states} state(s); \
-                 container {} -> {} bytes, emitted as a single-model block (finer LOD rungs sentinel \
-                 to coarse tier)",
-                inputs.container.len(),
-                edited.len()
+                 _P000 container {} -> {} bytes; {}",
+                p000.len(),
+                edited.len(),
+                chain_summary(&chain)
             ));
-
-            // Splice the edited container straight into a single-entry block — it is a full UCFX
-            // container (with its recomputed CSUM), not an opaque `data` leaf, so it is placed as-is
-            // with the ORIGINAL field_c so the entry matches what the loader expects.
-            let mut block_data = Vec::new();
-            block_data.extend_from_slice(&1u32.to_le_bytes());
-            block_data.extend_from_slice(&hash.to_le_bytes());
-            block_data.extend_from_slice(&TYPE_HASH_MODEL.to_le_bytes());
-            block_data.extend_from_slice(&inputs.field_c.to_le_bytes());
-            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
-            block_data.extend_from_slice(&edited);
-
-            // Copy the base model's LOD-chain row verbatim; the builder re-points `_P000` and
-            // remaps/sentinels the rest via `source_block_index`.
-            let aset = AsetEntry::new(
-                hash,
-                inputs.secondary_ref,
-                inputs.packed_block_ref,
-                TYPE_ID_MODEL,
-            );
-            let mut block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![aset],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            block.source_block_index = Some(inputs.source_block_index);
-            Ok(Lowering::Block(block))
+            Ok(Lowering::Chain(
+                emit_model_chain(&chain, &edited).map_err(|message| BuildError::Lower { index, kind, message })?,
+            ))
         }
 
         // Edit a placement LAYER (vz_state / layers_static): move / rotate / re-model its entities in
-        // place. Loads the whole layer block from the stack, applies each edit with the proven
-        // in-place `placement::patch_*` writer (matched by entity key, or by name via the layer's own
-        // Name COMP), and re-emits the block as an overlay shadowing the base path.
-        Contribution::EditWorld { layer, edits } => {
-            let Some(game) = game else {
+        // place, with the proven in-place `placement::patch_*` writer (matched by entity key, or by
+        // name via the layer's own Name COMP). Lowered after the loop with the Shipment's other
+        // writes to the same layer block ([`lower_world`]).
+        Contribution::EditWorld { .. } => {
+            if game.is_none() {
                 return Err(BuildError::GameRequired { index, kind });
-            };
-            let inputs = game.layer_block_for_edit(layer).ok_or_else(|| BuildError::Lower {
-                index,
-                kind,
-                message: format!(
-                    "no layer matching {layer:?} in the game stack — the target is a PTHS-path needle \
-                     like \"vz_state_pmccon004\" or \"layers_static\""
-                ),
-            })?;
-
-            let text = std::fs::read_to_string(root.join(edits)).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", root.join(edits).display()),
-            })?;
-            let doc = crate::world::parse(&text).map_err(|m| BuildError::Lower {
-                index,
-                kind,
-                message: format!("{}: {m}", root.join(edits).display()),
-            })?;
-
-            // Name → key, from the layer's own placements, so an author can target by entity name.
-            let places = mercs2_formats::placement::load_placements(&inputs.block).unwrap_or_default();
-            let key_by_name: std::collections::HashMap<&str, u32> = places
-                .iter()
-                .filter_map(|p| p.name.as_deref().map(|n| (n, p.key)))
-                .collect();
-
-            let mut edited = inputs.block.clone();
-            let (mut moved, mut reskinned) = (0usize, 0usize);
-            for e in &doc.edits {
-                // Resolve the target to a Transform record key.
-                let key = crate::manifest::bare_hash(&e.entity)
-                    .or_else(|| key_by_name.get(e.entity.as_str()).copied())
-                    .ok_or_else(|| BuildError::Lower {
-                        index,
-                        kind,
-                        message: format!(
-                            "edit_world: entity {:?} is neither a bare 0xKEY nor a name in {layer:?} \
-                             — extract a baseline with `qm extract-world` and edit that",
-                            e.entity
-                        ),
-                    })?;
-                if e.pos.is_some() || e.quat.is_some() {
-                    let n = mercs2_formats::placement::patch_transform(&mut edited, key, e.pos, e.quat);
-                    if n == 0 {
-                        return Err(BuildError::Lower {
-                            index,
-                            kind,
-                            message: format!(
-                                "edit_world: no Transform for entity {:?} (0x{key:08X}) in {layer:?}",
-                                e.entity
-                            ),
-                        });
-                    }
-                    moved += n;
-                }
-                if let Some(m) = &e.model {
-                    let mh = crate::manifest::asset_hash(m);
-                    let n = mercs2_formats::placement::patch_model(&mut edited, key, mh);
-                    if n == 0 {
-                        return Err(BuildError::Lower {
-                            index,
-                            kind,
-                            message: format!(
-                                "edit_world: entity {:?} (0x{key:08X}) has no ModelName to re-model in \
-                                 {layer:?}",
-                                e.entity
-                            ),
-                        });
-                    }
-                    reskinned += n;
-                }
             }
-            if edited == inputs.block {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{} declares no effective change to {layer:?} — an edit_world that moves nothing \
-                         would ship an overlay that only restates the base layer",
-                        root.join(edits).display()
-                    ),
-                });
-            }
-            log.push(format!(
-                "contributions[{index}] edit_world {layer}: {} edit(s) \u{2192} {moved} moved, \
-                 {reskinned} re-modelled; layer block {} B, shadowed at {}",
-                doc.edits.len(),
-                inputs.block.len(),
-                inputs.path
-            ));
-            Ok(Lowering::Block(emit_edited_layer(&inputs, &edited).map_err(|m| BuildError::Lower {
-                index,
-                kind,
-                message: m,
-            })?))
+            Ok(Lowering::Nothing)
         }
 
-        // Stand-ins are lowered after the loop, all of a Shipment's placements in one layer block
-        // together ([`crate::tiny::lower_shipment`]).
+        // Stand-ins are lowered after the loop: their models by [`crate::tiny::lower_shipment`], their
+        // placements with the Shipment's other writes to each layer block ([`lower_world`]).
         Contribution::AddTinyGeometry { .. } => Ok(Lowering::Nothing),
 
         // String tables are lowered after the loop, all of a Shipment's writes to one table
@@ -4446,40 +4708,10 @@ fn lower(
                 });
             }
 
-            let base_name = base.as_deref().unwrap_or("english");
-            let base_hash = crate::manifest::asset_hash(base_name);
-            let container = game
-                .container_for_asset(base_hash, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
-                .ok_or_else(|| BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "base table {base_name:?} (0x{base_hash:08X}) is not a string table in the \
-                         configured game stack — a new language forks a shipped table, so `base` must \
-                         name one that exists (default `english`)"
-                    ),
-                })?;
-
-            let text = std::fs::read_to_string(root.join(strings)).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", root.join(strings).display()),
-            })?;
-            let edits = parse_string_edits(&text)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            if edits.is_empty() {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!(
-                        "{} declares no strings — a language identical to {base_name} is not a new \
-                         language",
-                        root.join(strings).display()
-                    ),
-                });
-            }
-            let edited = mercs2_formats::stringdb::edit_container(&container, &edits)
-                .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+            let base_name = base.as_deref().unwrap_or(LANGUAGE_BASE);
+            let (edits, table) = language_table(game, root, strings, base.as_deref())
+                .map_err(|message| BuildError::Lower { index, kind, message })?;
+            let (base_hash, edited) = (table.table, table.merged);
             let hash = crate::manifest::asset_hash(name);
             let fail = |message: String| BuildError::Lower { index, kind, message };
 
@@ -4554,50 +4786,84 @@ fn auto_donor_for_wearer(wearer: &str) -> Option<&'static str> {
 /// Deliberately line-oriented rather than YAML: the values are UTF-16 UI text that routinely
 /// carries `:`, `%s`, quotes and colons, and a YAML parser would demand escaping the very
 /// characters the strings are made of. `#` begins a comment; blank lines are skipped. The key is the
-/// bracket key verbatim, hashed by the engine's own `pandemic_hash_m2`.
-fn parse_string_edits(text: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+/// bracket key verbatim, hashed by the engine's own `pandemic_hash_m2`. Each line is read by
+/// [`string_edit_line`].
+pub fn parse_string_edits(text: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
     let mut out = std::collections::BTreeMap::new();
     for (n, raw) in text.lines().enumerate() {
-        let line = raw.trim_end_matches(['\r', '\n']);
-        let t = line.trim_start();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
+        if let Some((key, value)) = string_edit_line(raw).map_err(|m| format!("line {}: {m}", n + 1))? {
+            out.insert(key, value);
         }
-        // The key is either a `[Bracket.Key]` token or a bare `0xHASH` — the same rule
-        // `stringdb::edit_container` resolves them by, since a bracket key's reverse is not always
-        // known and a dump gives only the hash.
-        let (key, rest) = if t.starts_with('[') {
-            let close = t
-                .find(']')
-                .ok_or_else(|| format!("line {}: unterminated `[` key", n + 1))?;
-            (t[..=close].to_string(), t[close + 1..].trim_start())
-        } else {
-            // A `0xHASH key = value`: split on the first `=`/`:`, then the left side is the key.
-            let sep = t
-                .find(['=', ':'])
-                .ok_or_else(|| format!("line {}: expected `=` or `:` after the key", n + 1))?;
-            let k = t[..sep].trim();
-            let is_hash = k
-                .strip_prefix("0x")
-                .or_else(|| k.strip_prefix("0X"))
-                .is_some_and(|h| !h.is_empty() && h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()));
-            if !is_hash {
-                return Err(format!(
-                    "line {}: expected a `[Bracket.Key]` or a bare `0xHASH`, got {k:?}",
-                    n + 1
-                ));
-            }
-            (k.to_string(), &t[sep..])
-        };
-        let value = rest
-            .trim_start()
-            .strip_prefix('=')
-            .or_else(|| rest.trim_start().strip_prefix(':'))
-            .ok_or_else(|| format!("line {}: expected `=` or `:` after the key", n + 1))?
-            .trim();
-        out.insert(key, value.to_string());
     }
     Ok(out)
+}
+
+/// One line of a string-edits file ([`parse_string_edits`]): `None` for a blank or `#` line, else the
+/// key as written and its text.
+pub fn string_edit_line(raw: &str) -> Result<Option<(String, String)>, String> {
+    let line = raw.trim_end_matches(['\r', '\n']);
+    let t = line.trim_start();
+    if t.is_empty() || t.starts_with('#') {
+        return Ok(None);
+    }
+    // The key is either a `[Bracket.Key]` token or a bare `0xHASH` — the same rule
+    // `stringdb::edit_container` resolves them by, since a bracket key's reverse is not always
+    // known and a dump gives only the hash.
+    let (key, rest) = if t.starts_with('[') {
+        let close = t.find(']').ok_or("unterminated `[` key")?;
+        (t[..=close].to_string(), t[close + 1..].trim_start())
+    } else {
+        // A `0xHASH key = value`: split on the first `=`/`:`, then the left side is the key.
+        let sep = t.find(['=', ':']).ok_or("expected `=` or `:` after the key")?;
+        let k = t[..sep].trim();
+        let is_hash = k
+            .strip_prefix("0x")
+            .or_else(|| k.strip_prefix("0X"))
+            .is_some_and(|h| !h.is_empty() && h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()));
+        if !is_hash {
+            return Err(format!("expected a `[Bracket.Key]` or a bare `0xHASH`, got {k:?}"));
+        }
+        (k.to_string(), &t[sep..])
+    };
+    let value = rest
+        .trim_start()
+        .strip_prefix('=')
+        .or_else(|| rest.trim_start().strip_prefix(':'))
+        .ok_or("expected `=` or `:` after the key")?
+        .trim();
+    Ok(Some((key, value.to_string())))
+}
+
+/// The string-edits line ([`string_edit_line`]) that sets `key` to `text`: `[Key] = text`. A key is
+/// a `[Bracket.Key]` or a bare `0xHASH`. Refused, with the reason, when the line cannot hold it: a
+/// newline in either, leading or trailing whitespace in the text (the reader trims it), a `]` inside
+/// a bracket key.
+pub fn string_edit_text(key: &str, text: &str) -> Result<String, String> {
+    let bracket = key.strip_prefix('[').and_then(|k| k.strip_suffix(']'));
+    let hash = key
+        .strip_prefix("0x")
+        .or_else(|| key.strip_prefix("0X"))
+        .is_some_and(|h| !h.is_empty() && h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()));
+    match bracket {
+        Some("") => return Err("the key is empty".into()),
+        Some(inner) if inner.contains([']', '\n', '\r']) => {
+            return Err(format!("{key}: a key cannot hold `]` or a line break"))
+        }
+        Some(_) => {}
+        None if hash => {}
+        None => return Err(format!("{key:?}: a key is a `[Bracket.Key]` or a bare `0xHASH`")),
+    }
+    if text.contains(['\n', '\r']) {
+        return Err("the text holds a line break, and a strings file holds one line per key".into());
+    }
+    if text.trim() != text {
+        return Err("the text starts or ends with whitespace, which a strings file trims".into());
+    }
+    let line = if text.is_empty() { format!("{key} =") } else { format!("{key} = {text}") };
+    match string_edit_line(&line) {
+        Ok(Some((k, v))) if k == key && v == text => Ok(line),
+        _ => Err(format!("{line:?} does not read back as {key} = {text:?}")),
+    }
 }
 
 /// The refusal for `replace_stringdb_text` pairs whose old text matches no entry: it names the
@@ -4619,29 +4885,63 @@ fn text_misses_message(shipment: &str, table: &str, misses: &[&String]) -> Strin
 /// table's text exactly, so a space or a `:` in it is part of it. A trailing `\r` (a CRLF file) is
 /// not part of the text. A line with no tab, more than one tab, or an empty old text is refused,
 /// naming `file` and the line.
-pub(crate) fn parse_text_pairs(text: &str, file: &str) -> Result<Vec<(String, String)>, String> {
+pub fn parse_text_pairs(text: &str, file: &str) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     for (n, raw) in text.split('\n').enumerate() {
-        let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if line.trim().is_empty() || line.starts_with('#') {
-            continue;
+        if let Some(pair) = text_pair_line(raw).map_err(|m| format!("{file}:{}: {m}", n + 1))? {
+            out.push(pair);
         }
-        let at = format!("{file}:{}", n + 1);
-        let mut parts = line.split('\t');
-        let (Some(old), Some(new)) = (parts.next(), parts.next()) else {
-            return Err(format!("{at}: no tab — each line is `old<TAB>new`"));
-        };
-        if parts.next().is_some() {
-            return Err(format!(
-                "{at}: more than one tab — each line is exactly `old<TAB>new`"
-            ));
-        }
-        if old.is_empty() {
-            return Err(format!("{at}: the old text is empty — there is nothing to match"));
-        }
-        out.push((old.to_string(), new.to_string()));
     }
     Ok(out)
+}
+
+/// One line of a pairs file ([`parse_text_pairs`]), split on `\n`: `None` for a blank or `#` line,
+/// else the old text and the new.
+pub fn text_pair_line(raw: &str) -> Result<Option<(String, String)>, String> {
+    let line = raw.strip_suffix('\r').unwrap_or(raw);
+    if line.trim().is_empty() || line.starts_with('#') {
+        return Ok(None);
+    }
+    let mut parts = line.split('\t');
+    let (Some(old), Some(new)) = (parts.next(), parts.next()) else {
+        return Err("no tab — each line is `old<TAB>new`".into());
+    };
+    if parts.next().is_some() {
+        return Err("more than one tab — each line is exactly `old<TAB>new`".into());
+    }
+    if old.is_empty() {
+        return Err("the old text is empty — there is nothing to match".into());
+    }
+    Ok(Some((old.to_string(), new.to_string())))
+}
+
+/// The pairs line ([`text_pair_line`]) that replaces `old` with `new`: `old<TAB>new`. Refused, with
+/// the reason, when the line cannot hold it: a tab or a line break in either text, an empty old text,
+/// an old text starting with `#` (a comment) or one that, with the new, is only whitespace (a blank
+/// line).
+pub fn text_pair_text(old: &str, new: &str) -> Result<String, String> {
+    if old.is_empty() {
+        return Err("the old text is empty — there is nothing to match".into());
+    }
+    for (what, t) in [("old", old), ("new", new)] {
+        if t.contains('\t') {
+            return Err(format!("the {what} text holds a tab, and a pairs line is `old<TAB>new`"));
+        }
+        if t.contains(['\n', '\r']) {
+            return Err(format!("the {what} text holds a line break, and a pairs file holds one pair per line"));
+        }
+    }
+    if old.starts_with('#') {
+        return Err("the old text starts with `#`, which makes the line a comment".into());
+    }
+    let line = format!("{old}\t{new}");
+    if line.trim().is_empty() {
+        return Err("both texts are only spaces, which makes the line blank".into());
+    }
+    match text_pair_line(&line) {
+        Ok(Some((o, n))) if o == old && n == new => Ok(line),
+        _ => Err(format!("{line:?} does not read back as the pair written")),
+    }
 }
 
 pub(crate) struct Rgba {
@@ -4828,6 +5128,7 @@ pub fn build(
     let mut blocks = Vec::new();
     // add_movie / add_ui blocks of `shell.wad` movies: they join the shell patch below.
     let mut shell_movies: Vec<PatchBlock> = Vec::new();
+    let mut chains: Vec<Vec<PatchBlock>> = Vec::new();
     let mut files = Vec::new();
     let mut lang_wads: Vec<(String, String, Vec<PatchBlock>, (String, String))> = Vec::new();
     let mut level_wads: Vec<(String, String, crate::level::Level)> = Vec::new();
@@ -4844,6 +5145,7 @@ pub fn build(
         )? {
             Lowering::Nothing => {}
             Lowering::Block(b) => blocks.push(b),
+            Lowering::Chain(bs) => chains.push(bs),
             Lowering::Blocks(bs) => blocks.extend(bs),
             Lowering::Movie(b, route) => {
                 use crate::retail_movies::MovieRoute;
@@ -4870,16 +5172,25 @@ pub fn build(
             } => files.push((name, relative, bytes)),
         }
     }
-    // Stand-ins: each add_tiny_geometry's model, and one overlay per layer block carrying every
-    // placement this Shipment adds to it.
-    if let Some(c) = crate::tiny::contributions(manifest).first() {
+    // World: each add_tiny_geometry's model, and one overlay per layer block carrying every write
+    // this Shipment makes to it — edit_world, add_placement, add_layer and the stand-ins'
+    // placements, in contribution order.
+    if let Some((index, c)) = manifest.contributions.iter().enumerate().find(|(_, c)| {
+        matches!(
+            c,
+            Contribution::EditWorld { .. }
+                | Contribution::AddPlacement { .. }
+                | Contribution::AddLayer { .. }
+                | Contribution::AddTinyGeometry { .. }
+        )
+    }) {
         let Some(game) = game.as_deref_mut() else {
-            return Err(BuildError::GameRequired { index: c.index, kind: "add_tiny_geometry" });
+            return Err(BuildError::GameRequired { index, kind: c.kind() });
         };
-        blocks.extend(
-            crate::tiny::lower_shipment(manifest, &shipment.root, game, &mut log)
-                .map_err(|(index, message)| BuildError::Lower { index, kind: "add_tiny_geometry", message })?,
-        );
+        let (models, stand_ins) = crate::tiny::lower_shipment(manifest, &shipment.root, game, &mut log)
+            .map_err(|(index, message)| BuildError::Lower { index, kind: "add_tiny_geometry", message })?;
+        blocks.extend(models);
+        blocks.extend(lower_world(manifest, &shipment.root, game, stand_ins, &mut log)?);
     }
     // String tables: every edit_stringdb / add_stringdb_keys / replace_stringdb_text of this
     // Shipment, per table, in contribution order — the same code `qm link` merges a set with. The
@@ -4980,6 +5291,7 @@ pub fn build(
                             .into(),
                 });
             };
+            check_spawn_lists(manifest, corpus, "")?;
             let mut targets: Vec<link::TargetBlock<'_>> = loaded
                 .iter_mut()
                 .map(|lb| link::TargetBlock {
@@ -5086,6 +5398,16 @@ pub fn build(
     // Every bank the engine loads ships its three tables in one block of the overlay.
     crate::sound::check_engine_banks(&engine_banks, &blocks.iter().collect::<Vec<_>>())
         .map_err(|message| BuildError::Lower { index: 0, kind: "sound", message })?;
+
+    // Model chains, each numbered after every block collected before it, earlier chains included. Two
+    // models whose finer rungs share a retail block would otherwise claim one source index, and
+    // `build_patch_wad_multi`'s source → patch map would point one model's rung at the other's block,
+    // which does not hold it: the engine's rung gate spins on that, a stream hang.
+    for mut chain in chains {
+        mercs2_formats::patch_wad::rebase_after(&mut chain, &blocks)
+            .map_err(|message| BuildError::Lower { index: 0, kind: "assemble", message })?;
+        blocks.extend(chain);
+    }
 
     // `level_asset` rows of the main campaign: their blocks, numbered after every other block of the
     // overlay (`patch_wad::rebase_after`).
@@ -5904,6 +6226,60 @@ fn merge_string_tables(
         StringMerge::Strict => "string tables",
         StringMerge::Upsert => "link",
     };
+    let fail = |message: String| BuildError::Lower { index: 0, kind: stage, message };
+    let mut out = MergedTables::default();
+    for t in apply_string_tables(shipments, game, mode, log)? {
+        let block = stringdb_block(t.table, &t.merged).map_err(fail)?;
+        let path = stringdb_block_path(t.table);
+        if out.paths.last() != Some(&path) {
+            out.paths.push(path);
+        }
+        match t.copy {
+            TableCopy::Vz => out.overlay.push(block),
+            TableCopy::Shell => out.shell.push((t.table, t.merged, block)),
+        }
+    }
+    Ok(out)
+}
+
+/// Which copy of a string table a write is to: the gameplay one in vz.wad's stack, or the front
+/// end's in shell.wad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableCopy {
+    Vz,
+    Shell,
+}
+
+/// One copy of a string table as a Shipment's build writes it: the table's asset hash, the target as
+/// the first contribution to it spells it, which copy, the shipped container and the container with
+/// every write applied.
+pub struct StringTableWrite {
+    pub table: u32,
+    pub target: String,
+    pub copy: TableCopy,
+    pub base: Vec<u8>,
+    pub merged: Vec<u8>,
+}
+
+/// Every string table `s`'s own build writes, as `qm build` writes it ([`merge_string_tables`],
+/// strict): each table's `edit_stringdb`, `add_stringdb_keys` and `replace_stringdb_text`
+/// contributions applied in contribution order to each copy of the table the game ships, the vz
+/// copy before the shell one. A write `qm build` refuses is the same error here.
+pub fn shipment_string_tables(s: &LoadedShipment, game: &mut GameStack) -> Result<Vec<StringTableWrite>, String> {
+    apply_string_tables(&[s], game, StringMerge::Strict, &mut Vec::new()).map_err(|e| e.to_string())
+}
+
+/// [`merge_string_tables`] up to the merged containers.
+fn apply_string_tables(
+    shipments: &[&LoadedShipment],
+    game: &mut GameStack,
+    mode: StringMerge,
+    log: &mut Vec<String>,
+) -> Result<Vec<StringTableWrite>, BuildError> {
+    let stage: &'static str = match mode {
+        StringMerge::Strict => "string tables",
+        StringMerge::Upsert => "link",
+    };
     let fail = |message: String| BuildError::Lower {
         index: 0,
         kind: stage,
@@ -5967,13 +6343,13 @@ fn merge_string_tables(
             }
         }
     }
-    let mut out = MergedTables::default();
+    let mut tables = Vec::new();
     let mut shell = if by_table.is_empty() { None } else { Some(game.open_sibling("shell.wad").map_err(fail)?) };
     for (table, (target, writes, contributors)) in by_table {
         // The gameplay copy (vz.wad's stack) and the front end's (shell.wad); each one present is edited.
-        let copies: Vec<(&'static str, Vec<u8>)> = [
-            ("vz", game.container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)),
-            ("shell", shell.as_mut().and_then(|s| s.container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB))),
+        let copies: Vec<(TableCopy, Vec<u8>)> = [
+            (TableCopy::Vz, game.container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)),
+            (TableCopy::Shell, shell.as_mut().and_then(|s| s.container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB))),
         ]
         .into_iter()
         .filter_map(|(at, c)| c.map(|c| (at, c)))
@@ -5985,17 +6361,12 @@ fn merge_string_tables(
                 contributors.join(", ")
             )));
         }
-        for (at, container) in copies {
+        for (copy, container) in copies {
             let merged = merge_table(&container, table, &target, &writes, &contributors, mode, log).map_err(&fail)?;
-            let block = stringdb_block(table, &merged).map_err(&fail)?;
-            match at {
-                "vz" => out.overlay.push(block),
-                _ => out.shell.push((table, merged, block)),
-            }
+            tables.push(StringTableWrite { table, target: target.clone(), copy, base: container, merged });
         }
-        out.paths.push(stringdb_block_path(table));
     }
-    Ok(out)
+    Ok(tables)
 }
 
 /// The string tables a set's writes were merged into: each table's block for the gameplay overlay (its
@@ -6609,6 +6980,7 @@ pub fn link_installed(
         sound_regs.extend(sound.registrations);
         shipped_overlay.extend(sound.overlay);
         shipped_shell.extend(sound.shell);
+        check_spawn_lists(&s.manifest, corpus_root, &format!("{}: ", s.manifest.shipment.name))?;
         mutations.extend(script_mutations(&s.manifest, &s.root, crate::level::VZ)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
@@ -7233,6 +7605,28 @@ mod placement_record {
 }
 
 #[cfg(test)]
+mod spawn_list_mutations {
+    /// A `set_spawn_lists` with rows is the wrapper, appended to its target as a `patch_lua` is; one
+    /// with none is no mutation, so it claims no scripts block.
+    #[test]
+    fn set_spawn_lists_appends_the_wrapper_and_no_rows_append_nothing() {
+        let yaml = "format: 2\nshipment:\n  name: s\n  version: \"1.0.0\"\n  target: retail\ncontributions:\n  \
+                    - kind: set_spawn_lists\n    target: gurcon002\n    lists:\n      \
+                    - function: SetupDangerousObjBuildings\n        building: TallCommBuild\n        group: Rooftop\n        \
+                    list: Spawnlist (VZ Elite)\n  \
+                    - kind: set_spawn_lists\n    target: gurcon003\n    lists: []\n";
+        let m = crate::from_str(yaml, crate::Format::Yaml).expect("parses");
+        let got = super::script_mutations(&m, std::path::Path::new("."), crate::level::VZ).unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!((got[0].shipment.as_str(), got[0].target.as_str()), ("s", "gurcon002"));
+        let crate::manifest::Contribution::SetSpawnLists { lists, .. } = &m.contributions[0] else { unreachable!() };
+        assert_eq!(got[0].append, crate::spawn_lists::wrapper(lists));
+        assert!(got[0].append.contains("Ai.TweakAttachedSpawnersInGroup(TallCommBuild, \"Rooftop\", {"), "{}", got[0].append);
+        assert_eq!(crate::blast::claims(&m).len(), 1, "only the contribution with rows claims its script");
+    }
+}
+
+#[cfg(test)]
 mod existing_model_outfit {
     use crate::manifest::Contribution;
 
@@ -7308,6 +7702,51 @@ mod text_pairs_tests {
             let e = parse_text_pairs(text, "src/p.txt").unwrap_err();
             assert!(e.starts_with(&format!("src/p.txt:{line}: ")), "{e}");
             assert!(e.contains(why), "{e}");
+        }
+    }
+
+    /// The writer's line reads back as the pair, and what a line cannot hold is refused.
+    #[test]
+    fn a_written_pair_reads_back_and_what_a_line_cannot_hold_is_refused() {
+        use super::{text_pair_line, text_pair_text};
+        for (old, new) in [("Press Start: to begin", "Press [A] = %s"), (" Leading space", ""), ("a", " b ")] {
+            let line = text_pair_text(old, new).unwrap();
+            assert_eq!(text_pair_line(&line), Ok(Some((old.to_string(), new.to_string()))));
+        }
+        for (old, new, why) in [
+            ("", "x", "empty"),
+            ("a\tb", "x", "tab"),
+            ("a", "b\nc", "line break"),
+            ("a", "b\r", "line break"),
+            ("#a", "x", "comment"),
+            (" ", " ", "blank"),
+        ] {
+            let e = text_pair_text(old, new).unwrap_err();
+            assert!(e.contains(why), "{old:?} {new:?}: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod string_edits_tests {
+    use super::{string_edit_line, string_edit_text};
+
+    #[test]
+    fn a_written_edit_reads_back_and_what_a_line_cannot_hold_is_refused() {
+        for (key, text) in [("[Menu.Play]", "Play: now = %s"), ("0x0000B29D", ""), ("[A]", "x")] {
+            let line = string_edit_text(key, text).unwrap();
+            assert_eq!(string_edit_line(&line), Ok(Some((key.to_string(), text.to_string()))));
+        }
+        for (key, text, why) in [
+            ("Menu.Play", "x", "`[Bracket.Key]`"),
+            ("[]", "x", "empty"),
+            ("[a]b]", "x", "`]`"),
+            ("[A]", "two\nlines", "line break"),
+            ("[A]", " padded", "whitespace"),
+            ("0xZZ", "x", "`[Bracket.Key]`"),
+        ] {
+            let e = string_edit_text(key, text).unwrap_err();
+            assert!(e.contains(why), "{key:?} {text:?}: {e}");
         }
     }
 }
