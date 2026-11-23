@@ -17,7 +17,7 @@ use std::collections::HashMap;
 /// `skin_census --wad --per-group` over 3,007 model assets / 2,052 skinned drawing groups gives a
 /// sharp wall at 48 — the tail runs 44:41 groups, 45:47, 46:32, 47:13, 48:8, and then stops dead.
 /// No shipped group weights a 49th bone. The census is committed at
-/// `docs/data/palette_census.csv` in the research repo.
+/// [`docs/data/palette_census.csv`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/data/palette_census.csv) in the research repo.
 ///
 /// History worth keeping, because the number moved twice for bad reasons: it was 46, described as
 /// "largest palette the shipped game uses", which was below retail and fired the finger-collapse
