@@ -52,6 +52,36 @@ pub struct UiState {
     pub shipment: Option<PathBuf>,
     /// The contribution to select in that Shipment, by index.
     pub contribution: Option<usize>,
+    /// A Depot workspace folder to read for this run, in place of the saved one.
+    pub depot: Option<PathBuf>,
+    /// The Depot item to select, by name.
+    pub depot_item: Option<String>,
+    /// Open `depot_item` in its editor rather than only selecting it.
+    #[serde(default)]
+    pub depot_open: bool,
+    /// Open the Depot's New item dialog with this kind chosen.
+    pub depot_new: Option<String>,
+    /// With `depot_item`: draw the picker with this label (as its field shows it) open.
+    pub depot_pick: Option<String>,
+    /// With `depot_item`, an `edit_state_machine` item: the switch node and the state of it to select.
+    pub depot_state: Option<[usize; 2]>,
+    /// With `depot_item`, a world item: the record of its first world file to select; for an
+    /// `activate_layer` item, the layer to draw (0 is the one it adds).
+    pub depot_world_row: Option<usize>,
+    /// The Depot's viewport draws the shipped asset rather than the item's (the edit_world,
+    /// replace_terrain_cell and replace_fx Shipped choice).
+    #[serde(default)]
+    pub depot_shipped: bool,
+    /// With `depot_item`, an effect item: the emitter of its first effect contribution to show.
+    pub depot_fx_emitter: Option<usize>,
+    /// Hold the right-hand inspector at this scroll offset, in points, to capture what is below.
+    pub inspector_scroll: Option<f32>,
+    /// With `depot_item`, an add_tiny_geometry item: what the viewport draws, `intact`, `ruined` or
+    /// `objects`.
+    pub depot_tiny_shown: Option<String>,
+    /// Tint a stand-in's object parts by slot.
+    #[serde(default)]
+    pub depot_tint: bool,
     /// A bench by its title ("Retarget rig", "Fit to donor"), opened with `donor` as its donor.
     pub bench: Option<String>,
     /// The bench's donor model, by name.
@@ -95,14 +125,18 @@ impl UiState {
         if st.donor.is_some() != st.bench.is_some() {
             return Err(format!("{}: `bench` and `donor` go together", path.display()));
         }
+        if (st.depot_pick.is_some() || st.depot_state.is_some() || st.depot_world_row.is_some()) && st.depot_item.is_none() {
+            return Err(format!("{}: `depot_pick`, `depot_state` and `depot_world_row` need a `depot_item`", path.display()));
+        }
         if st.contribution.is_some() && st.shipment.is_none() {
             return Err(format!("{}: `contribution` needs a `shipment`", path.display()));
         }
         if st.entity.is_some() && !(st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("WORLD LAYERS"))) {
             return Err(format!("{}: `entity` needs `\"tab\": \"WORLD LAYERS\"` and a `load`", path.display()));
         }
-        if st.fx_time.is_some() && !(st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("EFFECTS"))) {
-            return Err(format!("{}: `fx_time` needs `\"tab\": \"EFFECTS\"` and a `load`", path.display()));
+        let effects_tab = st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("EFFECTS"));
+        if st.fx_time.is_some() && !(effects_tab || (st.depot_item.is_some() && st.depot_open)) {
+            return Err(format!("{}: `fx_time` needs `\"tab\": \"EFFECTS\"` and a `load`, or an open `depot_item`", path.display()));
         }
         let ui_load = st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("UI / GFX"));
         for (key, set) in [("export", st.export.is_some()), ("stage_clip", st.stage_clip.is_some())] {
@@ -198,6 +232,8 @@ mod tests {
         let p = write("fx_time_tab.json", r#"{ "load": "global_explosion_c4", "fx_time": 0.5, "capture": "out.png" }"#);
         assert!(UiState::load(&p).unwrap_err().contains("fx_time"));
         let p = write("fx_time_ok.json", r#"{ "tab": "EFFECTS", "load": "global_explosion_c4", "fx_time": 0.5, "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().fx_time, Some(0.5));
+        let p = write("fx_time_depot.json", r#"{ "page": "Depot", "depot_item": "fx", "depot_open": true, "fx_time": 0.5, "capture": "out.png" }"#);
         assert_eq!(UiState::load(&p).unwrap().fx_time, Some(0.5));
     }
 
