@@ -39,6 +39,8 @@ pub struct WadImages {
     scripts: HashMap<u32, Vec<u8>>,
     /// Sound banks and their cue tables, by `(type, name)`.
     sound: HashMap<(u32, u32), (usize, u16)>,
+    /// String tables, by name (`pandemic_hash_m2` of the language): the WAD mounted last holds it.
+    tables: HashMap<u32, (usize, u16)>,
 }
 
 /// The asset types [`WadImages::sound_data`] reads.
@@ -52,6 +54,7 @@ impl WadImages {
         let mut movies = HashMap::new();
         let mut scripts = HashMap::new();
         let mut sound = HashMap::new();
+        let mut tables = HashMap::new();
         for (w, path) in paths.iter().enumerate() {
             let mut wad = crate::wad::open(path)?;
             for block in 0..wad.block_count() {
@@ -66,6 +69,8 @@ impl WadImages {
                         movies.entry(e.name_hash).or_insert((w, block));
                     } else if SOUND_TYPES.contains(&e.type_hash) {
                         sound.entry((e.type_hash, e.name_hash)).or_insert((w, block));
+                    } else if e.type_hash == mercs2_formats::types::TYPE_HASH_STRINGDB {
+                        tables.entry(e.name_hash).or_insert((w, block));
                     } else if e.type_hash == mercs2_formats::types::TYPE_HASH_SCRIPT && !scripts.contains_key(&e.name_hash) {
                         let container = bytes.get(at..end).ok_or_else(|| format!("a script overruns block {block} of {path}"))?;
                         let lay = mercs2_formats::scripts_block::parse_container(container).map_err(|e| format!("a script in {path}: {e}"))?;
@@ -76,7 +81,7 @@ impl WadImages {
             }
             wads.push(wad);
         }
-        Ok(WadImages { wads, index, movies, scripts, sound })
+        Ok(WadImages { wads, index, movies, scripts, sound, tables })
     }
 
     /// The `data` body of a sound bank or cue table, by type and name; `None` when no WAD has it.
@@ -121,29 +126,41 @@ impl WadImages {
         Err(format!("block {block} lost movie {stem}"))
     }
 
-    /// The `language` string tables of these WADs, by key hash: what a movie's `[0x…]` keys read.
+    /// The `language` string tables of these WADs, by key hash: what a movie's `[0x…]` keys read. First
+    /// the table named `language` (`pandemic_hash_m2`, as the engine keys it) from the WAD mounted last
+    /// that holds one, whatever block it is in (a patch's `mod_<hash>` block); then, for keys it does not
+    /// have, every string table in a block whose path names the language (`english_P000_Q3`,
+    /// `english_dlc01_P000_Q3`, …), the WAD mounted last first.
     pub fn strings(&mut self, language: &str) -> Result<HashMap<u32, String>, String> {
         use mercs2_formats::ucfx::{extract_chunk_body, parse_block_entry_table};
+        let hash = mercs2_formats::hash::pandemic_hash_m2(language);
+        let named = self.tables.get(&hash).copied();
         let mut out = HashMap::new();
+        let read = |wad: &mut crate::wad::Wad, block: u16, only: Option<u32>, out: &mut HashMap<u32, String>| -> Result<(), String> {
+            let bytes = crate::wad::decompress_block_index(wad, block)?;
+            let (count, entries) = parse_block_entry_table(&bytes);
+            let mut at = 4 + count as usize * 16;
+            for e in &entries {
+                let end = at + e.chunk_size as usize;
+                if e.type_hash == mercs2_formats::types::TYPE_HASH_STRINGDB && only.is_none_or(|h| h == e.name_hash) {
+                    let chunk = bytes.get(at..end).ok_or("a string table overruns its block")?;
+                    let keys = extract_chunk_body(chunk, b"KEYS").ok_or("a string table with no KEYS")?;
+                    let text = extract_chunk_body(chunk, b"STRS").ok_or("a string table with no STRS")?;
+                    for row in mercs2_formats::stringdb::parse(&keys, &text)?.entries {
+                        out.entry(row.key_hash).or_insert(row.text);
+                    }
+                }
+                at = end;
+            }
+            Ok(())
+        };
+        if let Some((w, block)) = named {
+            read(&mut self.wads[w], block, Some(hash), &mut out)?;
+        }
         for wad in &mut self.wads {
             for block in 0..wad.block_count() {
-                if !wad.block_path(block).to_ascii_lowercase().contains(language) {
-                    continue;
-                }
-                let bytes = crate::wad::decompress_block_index(wad, block)?;
-                let (count, entries) = parse_block_entry_table(&bytes);
-                let mut at = 4 + count as usize * 16;
-                for e in &entries {
-                    let end = at + e.chunk_size as usize;
-                    if e.type_hash == mercs2_formats::types::TYPE_HASH_STRINGDB {
-                        let chunk = bytes.get(at..end).ok_or("a string table overruns its block")?;
-                        let keys = extract_chunk_body(chunk, b"KEYS").ok_or("a string table with no KEYS")?;
-                        let text = extract_chunk_body(chunk, b"STRS").ok_or("a string table with no STRS")?;
-                        for row in mercs2_formats::stringdb::parse(&keys, &text)?.entries {
-                            out.entry(row.key_hash).or_insert(row.text);
-                        }
-                    }
-                    at = end;
+                if wad.block_path(block).to_ascii_lowercase().contains(language) {
+                    read(wad, block, None, &mut out)?;
                 }
             }
         }
