@@ -216,7 +216,7 @@ impl WadStack {
 
     /// An ECS container in the named form its readers take. A compact one, as the DLC stores it,
     /// inflates through the layouts of the game's `vz.wad` beside the base, whichever level is open,
-    /// with the names boot resolves: the bundle's, then the checkout's name homes where there is one.
+    /// with the names boot resolves: the bundle's, then the checkout's name home where there is one.
     fn named_ecs(&mut self, container: Vec<u8>) -> Result<Vec<u8>, String> {
         use mercs2_formats::be_to_le::ecs::{is_compact, ComponentSchemas};
         if !is_compact(&container) {
@@ -227,7 +227,7 @@ impl WadStack {
             let vz = mercs2_quartermaster::sound::sibling_wad(std::path::Path::new(base), "vz.wad")?;
             let mut schemas = ComponentSchemas::from_vz_wad(&vz)?;
             schemas.add_names(crate::index::load_all_names()?.into_values());
-            if let Ok((_, held)) = crate::statenamer::StateNamer::open() {
+            if let Some((_, held)) = crate::statenamer::StateNamer::open()? {
                 schemas.add_names(held.into_values());
             }
             self.schemas = Some(schemas);
@@ -889,7 +889,7 @@ enum Act {
     TierNext,
     ClipSel(usize),
     ClipNav(i32),
-    /// Write `.1` — a name that hashes to the table value `.0` — into both name homes
+    /// Write `.1` — a name that hashes to the table value `.0` — into the name home
     /// (`crate::statenamer`), then relabel the preview's clips.
     NameValue(u32, String),
     /// Play this clip (hash, label) on the loaded model, adding it to the model's clip list.
@@ -1731,7 +1731,7 @@ struct BootData {
     /// The bundle's Japanese face (`theme::read_cjk_font`).
     cjk_font: Vec<u8>,
     /// What the clip panel names unnamed table values with, or why it cannot (a released binary has
-    /// no checkout to write into). Its homes' names are already in `names`.
+    /// no checkout to write into). Its home's names are already in `names`.
     namer: Result<crate::statenamer::StateNamer, String>,
     secs: f32,
 }
@@ -1777,13 +1777,14 @@ fn spawn_boot(archive: Option<(String, Vec<String>)>, level: Option<String>, dat
             let mut names = crate::index::load_all_names_staged(|f, stage| {
                 let _ = tx.send(Boot::Prog(f, stage));
             })?;
-            // Names cracked since the bundle was packed live in the checkout's name homes; a hash
+            // Names cracked since the bundle was packed live in the checkout's name home; a hash
             // the bundle already names keeps its name.
-            let namer = crate::statenamer::StateNamer::open().map(|(n, held)| {
+            let namer = crate::statenamer::StateNamer::open().and_then(|opened| {
+                let (n, held) = opened.ok_or_else(crate::statenamer::StateNamer::no_checkout)?;
                 for (h, s) in held {
                     names.entry(h).or_insert(s);
                 }
-                n
+                Ok(n)
             });
             let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
             let lua = crate::index::load_lua_corpus()?;
@@ -8204,7 +8205,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     (Ok(_), false) => {
                                         format!("0x{value:08X} not named: {name:?} hashes to 0x{hashed:08X}")
                                     }
-                                    (Ok(n), true) => match n.homes.append(&name) {
+                                    (Ok(n), true) => match n.home.append(&name) {
                                         Err(e) => format!("0x{value:08X} not named: {e}"),
                                         Ok(_) => {
                                             let mut names = std::mem::take(&mut index.names);
@@ -8229,9 +8230,8 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                                 }
                                             }
                                             format!(
-                                                "0x{value:08X} = {name} — written to {} and {}",
-                                                n.homes.docs.display(),
-                                                n.homes.krate.display()
+                                                "0x{value:08X} = {name} — written to {}",
+                                                n.home.path.display()
                                             )
                                         }
                                     },
@@ -11322,7 +11322,7 @@ mod side_wad_retail_tests {
     }
 
     /// A texture vz.wad and shell.wad both ship (`_shell_font_glyphs_f0`, IDENTICAL in
-    /// `docs/fixpack/wad_duplicate_inventory.md`) lists both copies, previews vz.wad's, reads the
+    /// [`docs/fixpack/wad_duplicate_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/wad_duplicate_inventory.md)) lists both copies, previews vz.wad's, reads the
     /// same from either, and is not marked as differing.
     #[test]
     fn a_texture_in_two_wads_offers_both_copies() {
