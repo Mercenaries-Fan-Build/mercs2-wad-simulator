@@ -182,7 +182,7 @@ fn render_file(global: &str, metas: &[&NamespaceMeta]) -> (String, usize) {
 /// bindings knows which one shipped scripts actually use (`Pg.Spawn` is called from many sites;
 /// `Pg.SpawnDelayed` from a handful). The parameter is left un-annotated (`...`) rather than
 /// typed — misannotating an arg is worse than not annotating it, and structural arg-type
-/// recovery is a separate RE task (see `docs/lua_call_sites_from_scripts.md`).
+/// recovery is a separate RE task (see [`docs/lua_call_sites_from_scripts.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/lua_call_sites_from_scripts.md)).
 fn render_function(s: &mut String, global: &str, name: &str, req: &Required) {
     s.push_str("--- ");
     if req.corpus_calls == 0 {
