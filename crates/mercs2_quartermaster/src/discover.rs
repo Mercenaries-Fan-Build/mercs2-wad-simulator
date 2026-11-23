@@ -323,6 +323,8 @@ impl Contribution {
             Contribution::AddUi { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
             Contribution::PatchLua { append, .. } => out.push(("append", append.as_path())),
+            // Rows naming calls of a shipped script: qm writes the Lua, so no file of its own.
+            Contribution::SetSpawnLists { .. } => {}
             Contribution::AddScript { source, .. } => out.push(("source", source.as_path())),
             Contribution::ReplaceLua { source, .. } => out.push(("source", source.as_path())),
             Contribution::ReplacePhy2 { phy2, .. } => out.push(("phy2", phy2.as_path())),
