@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "corpus": {
-      "command": "node",
-      "args": ["C:\\Users\\Shadow\\Desktop\\notes-on-the-released-game\\tools\\corpus_mcp\\src\\server.js"]
-    }
-  }
-}
