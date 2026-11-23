@@ -177,6 +177,13 @@ contributions:
     streams:
       - src/level/arena_streaming.pws
 
+  - kind: add_menu_item
+    menu: shell.main
+    label: Arena.Menu.Play
+    after: SHELL.MainMenu.Options
+    help: Arena.Menu.PlayHelp
+    action: arenamenu.Open
+
   - kind: level_asset
     level: arena
     type: script
@@ -454,6 +461,14 @@ const JSON: &str = r#"
       "name": "arena",
       "display": "The Arena",
       "streams": ["src/level/arena_streaming.pws"]
+    },
+    {
+      "kind": "add_menu_item",
+      "menu": "shell.main",
+      "label": "Arena.Menu.Play",
+      "after": "SHELL.MainMenu.Options",
+      "help": "Arena.Menu.PlayHelp",
+      "action": "arenamenu.Open"
     },
     {
       "kind": "level_asset",
@@ -764,6 +779,14 @@ display = "The Arena"
 streams = ["src/level/arena_streaming.pws"]
 
 [[contributions]]
+kind = "add_menu_item"
+menu = "shell.main"
+label = "Arena.Menu.Play"
+after = "SHELL.MainMenu.Options"
+help = "Arena.Menu.PlayHelp"
+action = "arenamenu.Open"
+
+[[contributions]]
 kind = "level_asset"
 level = "arena"
 type = "script"
@@ -972,6 +995,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "edit_stringdb",
             "add_language",
             "add_level",
+            "add_menu_item",
             "level_asset",
             "fetch_package",
             "level_asset",
