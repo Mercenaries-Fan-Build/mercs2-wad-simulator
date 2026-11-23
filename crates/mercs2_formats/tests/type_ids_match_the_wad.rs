@@ -8,7 +8,7 @@
 //! It had drifted. Measured 2026-08-01 against retail `vz.wad`: **12 of 35 rows in
 //! `aset_type_ids` and 7 of 23 paired constants in `types` were wrong** — `fxdict` and `watermap`
 //! were transposed, `level` said 20 for 26, `musicstatemap` 26 for 8, `worldentity` 8 for 17. This
-//! reproduces a finding `docs/fixpack/wad_duplicate_inventory.md` Appendix C recorded in July
+//! reproduces a finding [`docs/fixpack/wad_duplicate_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/wad_duplicate_inventory.md) Appendix C recorded in July
 //! ("wrong for 12 of 36 type ids … validated 139 hit / 0 miss"), which had never been applied to
 //! the code.
 //!
