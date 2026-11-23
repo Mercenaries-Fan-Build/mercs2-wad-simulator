@@ -37,6 +37,8 @@ sha2 = "0.10"
 # Guard: `mercs2_engine/tests/one_lua.rs` links the runtime and the compiler together on purpose.
 mercs2_luac = { workspace = true }
 png = "0.17"  # decode source images for texture lowering (same version the workspace already uses)
+# Draws the menu lettering's SVG letters (`label_art`); paths only, so no text, fonts or raster images.
+resvg = { version = "0.50", default-features = false }
 # M0003's predicate. `texture::texture_buffer_too_small` carries two retail-verified false-positive
 # gates — without them the rule fires on the 9,562 streamed bodies retail legitimately ships short —
 # so this is a dependency rather than a second copy. `wad_simulator` links no Lua runtime, so it does
@@ -108,9 +110,4 @@ required-features = ["retail"]
 
 [[test]]
 name = "outfits_retail"
-required-features = ["retail"]
-
-# Not the game: the notes repo this workspace is checked out inside, which CI does not have.
-[[test]]
-name = "doc_links_retail"
 required-features = ["retail"]
