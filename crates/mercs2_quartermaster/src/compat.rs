@@ -114,7 +114,7 @@ pub fn declared_languages<'a>(
 /// The WADs to open for `manifests`, in mount order: `vz_wad`, then the WAD of each declared
 /// language ([`declared_languages`]) from the same folder, `<token>.wad` matched
 /// case-insensitively. The engine mounts the language WAD above the level WAD
-/// (`docs/fixpack/wad_duplicate_inventory.md` §B.2), and [`crate::game::GameStack`] resolves the
+/// ([`docs/fixpack/wad_duplicate_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/wad_duplicate_inventory.md) §B.2), and [`crate::game::GameStack`] resolves the
 /// last-opened WAD first, so the stack reads as the game does. A declared language whose WAD is not
 /// there is an error.
 pub fn game_stack_paths<'a>(
