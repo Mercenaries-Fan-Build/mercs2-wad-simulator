@@ -31,7 +31,7 @@ Concretely the crate provides:
 
 Provenance as the source states it:
 
-- `docs/reverse_engineer/water_code_map.md` (the sky/decal/water PC code maps).
+- [`docs/reverse_engineer/water_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/water_code_map.md) (the sky/decal/water PC code maps).
 - `docs/watermap_format.md` — the recovered `watr` layout: header (`layer_count`, `grid_width` 257,
   `grid_height` 257, `cell_size_m` 32.0, `height_min_m` −50.0, `height_max_m` ≈325.26, 3 unknown
   trailing fields), Layer 0 heights, Layer 1 wet mask. The type hash is asserted in-crate to equal
@@ -39,11 +39,11 @@ Provenance as the source states it:
 - `FUN_00480440` — the exe's waterline query. Its *exact* return packing (height vs boolean) is a
   SecuROM-island confirm-live item (code map §5), so the crate returns **both** facts and lets the
   caller pick.
-- `docs/reverse_engineer/vehicle_code_map.md` §3/§5 — the buoyancy `hkpUnaryAction` `FUN_00458ac0`
+- [`docs/reverse_engineer/vehicle_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/vehicle_code_map.md) §3/§5 — the buoyancy `hkpUnaryAction` `FUN_00458ac0`
   (8 AABB-corner sample points, waterline query per frame, buoyant impulses every other frame, a "sunk"
   latch) and the boat driver `FUN_00447260` which applies buoyancy + `WaterDrag{Fwd,Side,Up}`. The
   `Buoyancy` component: hash `0xb9659f7b`, builder `FUN_006395e0`, stride `0x14` (5 floats).
-- `docs/reverse_engineer/ai_code_map.md` §3/§4 — `AiWaterZone` hash `0xdf6533de`, builders
+- [`docs/reverse_engineer/ai_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/ai_code_map.md) §3/§4 — `AiWaterZone` hash `0xdf6533de`, builders
   `FUN_0065c520` / `FUN_00641560`, stride `0x04`.
 
 ## Usage
