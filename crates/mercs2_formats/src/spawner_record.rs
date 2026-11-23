@@ -2,7 +2,7 @@
 //! through its `schm`, whether it comes from a placed block's COMP or a worldentity template.
 //!
 //! A record is inert data: retail turns it into a runtime spawner only when its owner goes live or a
-//! script tweaks its group on (`docs/reverse_engineer/population_spawner_code_map.md` §6). Init
+//! script tweaks its group on ([`docs/reverse_engineer/population_spawner_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/population_spawner_code_map.md) §6). Init
 //! `FUN_004E2840` copies these fields into the runtime spawner; the byte fields keep the raw byte, and
 //! each consumer applies retail's own sign handling.
 
