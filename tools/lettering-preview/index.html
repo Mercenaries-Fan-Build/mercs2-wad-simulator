@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stencil lettering</title>
+    <style>
+      :root {
+        --bg: #6f6f6a;
+        --panel: #2a2a27;
+        --text: #e8e6dd;
+        --muted: #a9a79c;
+        --line: #44443f;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+      header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line); padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+      header label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+      header input[type="text"] { font: 16px monospace; width: 22ch; padding: 4px 6px; background: #1b1b19; color: var(--text); border: 1px solid var(--line); }
+      header input[type="number"] { width: 6ch; background: #1b1b19; color: var(--text); border: 1px solid var(--line); }
+      main { padding: 16px; display: grid; gap: 20px; }
+      section h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+      .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+      .card { background: rgba(0, 0, 0, 0.18); border: 1px solid rgba(0, 0, 0, 0.25); padding: 10px; }
+      .card .caption { color: var(--muted); font: 12px monospace; margin-top: 6px; }
+      canvas.pixels, img.pixels { image-rendering: pixelated; display: block; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+      .missing { color: #ff8b7a; font: 12px monospace; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <label>Text <input id="text" type="text" spellcheck="false" /></label>
+      <label>Zoom <input id="zoom" type="range" min="2" max="12" step="1" /> <span id="zoom-v"></span></label>
+      <label>Letter gap <input id="gap" type="number" step="0.5" /> tx</label>
+      <label>Word space <input id="space" type="number" step="0.5" /> tx</label>
+      <label>Ring <input id="ring" type="number" step="0.25" /> tx</label>
+      <label><input id="retail" type="checkbox" /> Retail reference</label>
+    </header>
+    <main>
+      <section>
+        <h2>Label, vector</h2>
+        <div id="vector" class="row"></div>
+      </section>
+      <section>
+        <h2>Label at menu size (27 px cap), magnified</h2>
+        <div id="pixels" class="row"></div>
+      </section>
+      <section>
+        <h2>Letters</h2>
+        <div id="letters" class="grid"></div>
+      </section>
+    </main>
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
