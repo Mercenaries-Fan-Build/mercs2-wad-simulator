@@ -1,0 +1,44 @@
+Type = "Time"
+SubtitleData = {
+  {
+    0.09,
+    "[Solano-Briefing-Cinematic-BlancoRevenge-01]"
+  },
+  {
+    3.09,
+    "[Blanco-Briefing-Cinematic-BlancoRevenge-03]"
+  },
+  {
+    6.38,
+    "[Blanco-Briefing-Cinematic-BlancoRevenge-04]",
+    1
+  },
+  {
+    9.96,
+    "[Blanco-Briefing-Cinematic-BlancoRevenge-19]"
+  },
+  {
+    11,
+    "[Mattias-Briefing-Cinematic-BlancoRevenge-07]"
+  },
+  {
+    14.75,
+    "[Blanco-Briefing-Cinematic-BlancoRevenge-10]"
+  },
+  {
+    18.02,
+    "[Mattias-Briefing-Cinematic-BlancoRevenge-11]"
+  },
+  {
+    19.49,
+    "[Mattias-Briefing-Cinematic-BlancoRevenge-14]"
+  },
+  {
+    21.97,
+    "[VZBrass-Briefing-Cinematic-BlancoRevenge-17]"
+  },
+  {
+    25.21,
+    "[Blanco-Briefing-Cinematic-BlancoRevenge-18]"
+  }
+}
