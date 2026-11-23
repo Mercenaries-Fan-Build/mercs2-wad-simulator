@@ -1,4 +1,4 @@
-//! CPU billboard particle system — the FX runtime (registry §7 / `docs/rendering_fx_lighting_gap.md`
+//! CPU billboard particle system — the FX runtime (registry §7 / `docs/modernization/rendering_fx_lighting_gap.md`
 //! subsystem E).
 //!
 //! Draws two things in a pass *after* the opaque forward pass (particles read depth, don't write
