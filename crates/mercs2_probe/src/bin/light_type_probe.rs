@@ -4,7 +4,7 @@
 //! (`placement::LightObject` keeps all 9 floats raw). The WildStar `WSLight` recovery names the
 //! parameter SET a Pandemic cone light carries — `ConeColor`, `ConeLength`, `ConeFallOffMin/Max`,
 //! `ConeEdgeFade`, `ConeAlphaMultiplier`, `ConeOnly`
-//! (`docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`) — so we know what to look for.
+//! ([`docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md)) — so we know what to look for.
 //!
 //! This histograms every real `LightObject` in the world: how many distinct `light_type` values exist,
 //! and per type which param slots are ever non-zero (+ their ranges). If a type shows extra non-zero
