@@ -22,6 +22,28 @@ use crate::render::{ClipAnim, GpuLight, TexMap, DEPTH_FORMAT, MAX_LIGHTS};
 use crate::mesh::{self, Vertex};
 use crate::pose;
 
+/// Which `World` an entity belongs to. Every `World` numbers its entities from the same start, so a
+/// Scene that draws more than one (a game's world and a tool's preview world) keeps each entity's GPU
+/// buffers and render state by `(scope, entity)`: one world's entity never takes another's palette or
+/// hidden parts. The owner of a `World` makes one scope for it ([`WorldScope::new`]) and passes it
+/// with every per-entity call and every render of that world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WorldScope(u32);
+
+impl WorldScope {
+    /// A scope no other world in this process has.
+    pub fn new() -> WorldScope {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        WorldScope(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Default for WorldScope {
+    fn default() -> WorldScope {
+        WorldScope::new()
+    }
+}
+
 /// Per-cascade shadow tile edge (px). The exe's `FUN_00755d90` builds a **1024×4096** shadow atlas =
 /// four vertically-stacked 1024² tiles (`shadow_code_map.md` §1). We mirror that exactly: a
 /// `SHADOW_TILE × (SHADOW_TILE*SHADOW_CASCADES)` depth atlas, one 1024² tile per cascade. Kept in sync
@@ -288,7 +310,7 @@ struct PlacedScrub {
 
 /// One range of instances the frame draws.
 struct ScrubFrameDraw {
-    key: u32,
+    key: (WorldScope, u32),
     range: mesh::ScrubRange,
     blended: bool,
 }
@@ -324,7 +346,8 @@ enum GeomKind {
 
 /// One tree species' billboards.
 struct TreeBatch {
-    /// The model its quads are uploaded under.
+    /// The world it belongs to, and the model its quads are uploaded under in that world.
+    scope: WorldScope,
     key: u32,
     instances: wgpu::Buffer,
     count: u32,
@@ -505,8 +528,8 @@ pub struct Scene {
     camera_bgl: wgpu::BindGroupLayout,
     bone_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
-    /// The textures terrain cells share, by hash ([`Self::load_terrain_model`]).
-    terrain_views: HashMap<u32, wgpu::TextureView>,
+    /// The textures terrain cells share, by world and hash ([`Self::load_terrain_model`]).
+    terrain_views: HashMap<(WorldScope, u32), wgpu::TextureView>,
     /// The material parameters (binding 4) of a bind with no material: not alpha-tested.
     no_material_params: wgpu::Buffer,
     /// Every retail pixel shader's samplers, which decide what each material slot binds
@@ -562,26 +585,29 @@ pub struct Scene {
     blob_params_buf: wgpu::Buffer,
     blob_bind: wgpu::BindGroup,
     blobs: Vec<BlobInstance>,
-    models: HashMap<u32, ModelGpu>,
-    entities: HashMap<Entity, EntityGpu>,
+    /// Uploaded models, by the world that loaded them and their hash: two worlds may hold different
+    /// models under one hash (the Workshop's Depot draws an author's asset beside Inspect's shipped
+    /// one), and one world's unload never takes another's.
+    models: HashMap<(WorldScope, u32), ModelGpu>,
+    entities: HashMap<(WorldScope, Entity), EntityGpu>,
     /// Per-model set of draw-call indices to SKIP at render. This is a MODEL-level authoring/streaming
     /// override, not object state: the terrain LOD swap (low-res tiles hidden where the hi-res
     /// terrainmesh is resident) and the workshop's isolate-a-group tool. It is deliberately NOT how
     /// destruction or LOD work — those are per-object, and live in `entity_state`.
-    hidden_draws: HashMap<u32, HashSet<usize>>,
+    hidden_draws: HashMap<(WorldScope, u32), HashSet<usize>>,
     /// Per-ENTITY render state: the LOD-rung `view_state` and the destruction node-enable table that
     /// the draw gate tests (`crate::render_state`). Keyed by entity, never by model hash, so two
     /// instances of the same model can sit at different rungs and different damage states — which is
     /// exactly what `hidden_draws` could never express.
-    entity_state: HashMap<Entity, crate::render_state::RenderState>,
+    entity_state: HashMap<(WorldScope, Entity), crate::render_state::RenderState>,
     start: std::time::Instant,
     /// Explicit view matrix + (near, far) supplied per frame by a caller-driven camera
     /// (the fly / third-person camera). `None` = default close orbit around the origin (`--ecs`).
     view_cam: Option<(glam::Mat4, f32, f32)>,
     /// The image centre's move in clip units ([`set_view_shift`](Self::set_view_shift)).
     view_shift: glam::Vec2,
-    /// Terrain is not drawn: the base mesh's model ([`set_terrain_hidden`](Self::set_terrain_hidden)).
-    terrain_hidden: Option<u32>,
+    /// Terrain is not drawn: the base mesh's model, in its world ([`set_terrain_hidden`](Self::set_terrain_hidden)).
+    terrain_hidden: Option<(WorldScope, u32)>,
     /// Distance-fog params (color, density, start). `None` = fog + sky pass disabled, so the
     /// `--ecs` / `--animate` visuals are unchanged. PLACEHOLDER for PgSky/PgSun/PgCloud.
     fog: Option<([f32; 3], f32, f32)>,
@@ -610,9 +636,10 @@ pub struct Scene {
     /// and cull mode a loaded material draws with.
     blend_pipelines: HashMap<(wgpu::TextureFormat, BlendKey), wgpu::RenderPipeline>,
     scrub_pipelines: HashMap<(wgpu::TextureFormat, ScrubPipelineKey), wgpu::RenderPipeline>,
-    scrub_packs: HashMap<u32, ScrubPack>,
-    /// By entity key.
-    scrub_placed: HashMap<u32, PlacedScrub>,
+    /// By world and pack hash.
+    scrub_packs: HashMap<(WorldScope, u32), ScrubPack>,
+    /// By world and entity key.
+    scrub_placed: HashMap<(WorldScope, u32), PlacedScrub>,
     scrub_frame: Vec<ScrubFrameDraw>,
     /// Group 2 of a ground cover or billboard draw, whose matrices are per instance.
     scrub_bones: wgpu::BindGroup,
@@ -641,6 +668,8 @@ pub struct Scene {
     /// Billboard particle / FX runtime (registry §7). Drawn AFTER the opaque forward pass.
     /// Empty by default (zero cost) until an effect is started via `fx_start*`.
     particles: crate::particles::ParticleSystem,
+    /// `MERCS2_FX_TEST`: the demo plume starts in the first world a frame draws.
+    fx_demo_pending: bool,
     /// Last-frame timestamp for the particle sim's per-frame dt.
     last_frame: std::time::Instant,
     /// Registered render nodes (reflection / water / decals / sky-as-pass), each plugged
@@ -1360,17 +1389,11 @@ impl Scene {
         });
 
         let ui = crate::ui::UiPass::new(&device, &queue, config.format);
-        let mut particles = crate::particles::ParticleSystem::new(&device, config.format, DEPTH_FORMAT);
+        let particles = crate::particles::ParticleSystem::new(&device, config.format, DEPTH_FORMAT);
         // Opt-in visible smoke test: `MERCS2_FX_TEST=1` starts a demo smoke plume + fire jet at the
-        // origin (framed by the default orbit camera in `--ecs`/`--animate`). Off by default so no
-        // existing path changes.
-        if std::env::var("MERCS2_FX_TEST").is_ok() {
-            particles.start_emitter_desc(crate::particles::EmitterDesc::demo_smoke(), glam::Vec3::ZERO);
-            particles.start_emitter_desc(
-                crate::particles::EmitterDesc::demo_fire(),
-                glam::Vec3::new(1.2, 0.0, 0.0),
-            );
-        }
+        // origin of the first world drawn (framed by the default orbit camera in
+        // `--ecs`/`--animate`). Off by default so no existing path changes.
+        let fx_demo_pending = std::env::var("MERCS2_FX_TEST").is_ok();
 
         Scene {
             window,
@@ -1458,6 +1481,7 @@ impl Scene {
             loading_art_aspect: 0.0,
             ui,
             particles,
+            fx_demo_pending,
             last_frame: std::time::Instant::now(),
             render_nodes: Vec::new(),
             decal_feed: None,
@@ -1733,8 +1757,8 @@ impl Scene {
 
     /// Stop drawing terrain, `base` being the base mesh's model, the only terrain not loaded through
     /// [`load_terrain_model`](Self::load_terrain_model); `None` draws it again.
-    pub fn set_terrain_hidden(&mut self, base: Option<u32>) {
-        self.terrain_hidden = base;
+    pub fn set_terrain_hidden(&mut self, scope: WorldScope, base: Option<u32>) {
+        self.terrain_hidden = base.map(|b| (scope, b));
     }
 
     /// Enable distance fog + the sky pass (PLACEHOLDER for PgSky/PgSun/PgCloud).
@@ -1766,29 +1790,35 @@ impl Scene {
         self.sky_enabled = true;
     }
 
-    /// Set what effects draw from: the `vfx` atlas and the `fxdict`'s rectangles. An error when the
-    /// atlas will not upload.
-    pub fn fx_set_atlas(&mut self, atlas: &mercs2_formats::texture::TextureData, rects: &[mercs2_formats::fxdict::FxRect]) -> Result<(), String> {
+    /// Set what world `scope`'s effects draw from: the `vfx` atlas and the `fxdict`'s rectangles. An
+    /// error when the atlas will not upload.
+    pub fn fx_set_atlas(
+        &mut self,
+        scope: WorldScope,
+        atlas: &mercs2_formats::texture::TextureData,
+        rects: &[mercs2_formats::fxdict::FxRect],
+    ) -> Result<(), String> {
         let view = make_bc_view(&self.device, &self.queue, atlas, false)
             .ok_or_else(|| format!("the vfx atlas ({}x{}) will not upload", atlas.width, atlas.height))?;
-        self.particles.set_atlas(&self.device, &view, rects);
+        self.particles.set_atlas(&self.device, scope, &view, rects);
         Ok(())
     }
 
-    /// Whether [`Self::fx_set_atlas`] has run.
-    pub fn fx_has_atlas(&self) -> bool {
-        self.particles.has_atlas()
+    /// Whether [`Self::fx_set_atlas`] has run for world `scope`.
+    pub fn fx_has_atlas(&self, scope: WorldScope) -> bool {
+        self.particles.has_atlas(scope)
     }
 
-    /// Start an authored effect ([`crate::fx_sim`]) at `pos`.
+    /// Start an authored effect ([`crate::fx_sim`]) in world `scope` at `pos`.
     pub fn fx_start_effect(
         &mut self,
+        scope: WorldScope,
         effect: &mercs2_formats::fxdict::EffectContainer,
         starter: crate::fx_sim::Starter,
         pos: [f32; 3],
         repeat: bool,
     ) -> Result<crate::particles::EmitterId, String> {
-        self.particles.start_effect(effect, starter, glam::Vec3::from(pos), glam::Quat::IDENTITY, repeat)
+        self.particles.start_effect(scope, effect, starter, glam::Vec3::from(pos), glam::Quat::IDENTITY, repeat)
     }
 
     /// A started effect, for its transport.
@@ -1807,15 +1837,15 @@ impl Scene {
         self.particles.register_template(name_hash, desc);
     }
 
-    /// Start a registered effect at a world position (mirrors `ObjectState.StartEmitter`). `None` if
-    /// no template with that hash is registered.
-    pub fn fx_start(&mut self, name_hash: u32, pos: [f32; 3]) -> Option<crate::particles::EmitterId> {
-        self.particles.start_emitter(name_hash, glam::Vec3::from(pos))
+    /// Start a registered effect in world `scope` at a position (mirrors `ObjectState.StartEmitter`).
+    /// `None` if no template with that hash is registered.
+    pub fn fx_start(&mut self, scope: WorldScope, name_hash: u32, pos: [f32; 3]) -> Option<crate::particles::EmitterId> {
+        self.particles.start_emitter(scope, name_hash, glam::Vec3::from(pos))
     }
 
-    /// Start an ad-hoc effect from an explicit descriptor at a world position.
-    pub fn fx_start_desc(&mut self, desc: crate::particles::EmitterDesc, pos: [f32; 3]) -> crate::particles::EmitterId {
-        self.particles.start_emitter_desc(desc, glam::Vec3::from(pos))
+    /// Start an ad-hoc effect from an explicit descriptor in world `scope` at a position.
+    pub fn fx_start_desc(&mut self, scope: WorldScope, desc: crate::particles::EmitterDesc, pos: [f32; 3]) -> crate::particles::EmitterId {
+        self.particles.start_emitter_desc(scope, desc, glam::Vec3::from(pos))
     }
 
     /// Stop a started effect (ceases spawning; live particles finish). Mirrors `StopEmitter`.
@@ -1835,16 +1865,16 @@ impl Scene {
         self.model_alpha = a.clamp(0.0, 1.0);
     }
 
-    /// Set the authored static environmental glow cards (`global_particle_env_godray2` etc.). Replaces
-    /// any prior set; an empty slice clears them. Rendered as additive soft billboards in the
-    /// transparent FX pass (see `particles::GlowCard`).
-    pub fn set_glow_cards(&mut self, cards: &[crate::particles::GlowCard]) {
-        self.particles.set_glow_cards(cards);
+    /// Set world `scope`'s authored static environmental glow cards (`global_particle_env_godray2`
+    /// etc.). Replaces any prior set; an empty slice clears them. Rendered as additive soft
+    /// billboards in the transparent FX pass (see `particles::GlowCard`).
+    pub fn set_glow_cards(&mut self, scope: WorldScope, cards: &[crate::particles::GlowCard]) {
+        self.particles.set_glow_cards(scope, cards);
     }
 
-    /// Number of active glow cards (diagnostic).
-    pub fn glow_card_count(&self) -> usize {
-        self.particles.glow_card_count()
+    /// Number of world `scope`'s glow cards (diagnostic).
+    pub fn glow_card_count(&self, scope: WorldScope) -> usize {
+        self.particles.glow_card_count(scope)
     }
 
     /// Set the world-space dynamic light set (harvested from `LightObject` COMPs via
@@ -1924,9 +1954,11 @@ impl Scene {
         self.shadow_configured = true;
     }
 
-    /// Upload a model's geometry + materials into the store, keyed by hash. Idempotent per hash.
+    /// Upload a model's geometry + materials into world `scope`'s store, keyed by hash. Idempotent per
+    /// world and hash.
     pub fn load_model(
         &mut self,
+        scope: WorldScope,
         hash: u32,
         verts: &[Vertex],
         indices: &[u32],
@@ -1934,12 +1966,38 @@ impl Scene {
         textures: &TexMap,
         skin: &mesh::SkinData,
     ) {
-        self.load_model_inner(hash, verts, indices, draws, textures, skin, false);
+        self.load_model_inner((scope, hash), verts, indices, draws, textures, skin, false);
     }
 
-    /// Whether a terrain cell's texture `hash` is already uploaded, so a later cell need not read it.
-    pub fn has_terrain_view(&self, hash: u32) -> bool {
-        self.terrain_views.contains_key(&hash)
+    /// The bounding sphere of model `hash` kept under `scope`, `(centre, radius)`, as an entity at the
+    /// origin draws it: its rest pose's ([`rest_bounds`]), through the model's fit.
+    pub fn model_bounds(&self, scope: WorldScope, hash: u32) -> Option<(glam::Vec3, f32)> {
+        let mg = self.models.get(&(scope, hash))?;
+        let scale = mg.fit.x_axis.truncate().length();
+        Some((mg.fit.transform_point3(mg.bounds.0), mg.bounds.1 * scale))
+    }
+
+    /// Whether a terrain cell's texture `hash` is already uploaded in `scope`, so a later cell need not
+    /// read it.
+    pub fn has_terrain_view(&self, scope: WorldScope, hash: u32) -> bool {
+        self.terrain_views.contains_key(&(scope, hash))
+    }
+
+    /// Drop everything world `scope` uploaded and placed: its models, entities and their render state,
+    /// hidden draws, terrain textures, ground cover and trees. For a world that is discarded.
+    pub fn forget_scope(&mut self, scope: WorldScope) {
+        self.models.retain(|(s, _), _| *s != scope);
+        self.entities.retain(|(s, _), _| *s != scope);
+        self.entity_state.retain(|(s, _), _| *s != scope);
+        self.hidden_draws.retain(|(s, _), _| *s != scope);
+        self.terrain_views.retain(|(s, _), _| *s != scope);
+        self.scrub_packs.retain(|(s, _), _| *s != scope);
+        self.scrub_placed.retain(|(s, _), _| *s != scope);
+        self.trees.retain(|t| t.scope != scope);
+        self.particles.forget_scope(scope);
+        if self.terrain_hidden.is_some_and(|(s, _)| s == scope) {
+            self.terrain_hidden = None;
+        }
     }
 
     /// Upload a hi-res terrainmesh TILE — same as [`Self::load_model`], and hidden with the terrain by
@@ -1947,6 +2005,7 @@ impl Scene {
     /// `PgTerrainMesh*` textures and constants; its overlays are ordinary material draws.
     pub fn load_terrain_model(
         &mut self,
+        scope: WorldScope,
         hash: u32,
         verts: &[Vertex],
         indices: &[u32],
@@ -1954,12 +2013,12 @@ impl Scene {
         textures: &TexMap,
         skin: &mesh::SkinData,
     ) {
-        self.load_model_inner(hash, verts, indices, draws, textures, skin, true);
+        self.load_model_inner((scope, hash), verts, indices, draws, textures, skin, true);
     }
 
     fn load_model_inner(
         &mut self,
-        hash: u32,
+        (scope, hash): (WorldScope, u32),
         verts: &[Vertex],
         indices: &[u32],
         draws: &[mesh::DrawGroup],
@@ -1967,7 +2026,7 @@ impl Scene {
         skin: &mesh::SkinData,
         terrain_blend: bool,
     ) {
-        if self.models.contains_key(&hash) {
+        if self.models.contains_key(&(scope, hash)) {
             return;
         }
         // Decode each texture to a view (normal + specular maps linear, diffuse sRGB). The base
@@ -2016,7 +2075,7 @@ impl Scene {
             let srgb = !terrain_atlas && !linear.contains(h);
             if let Some(v) = make_bc_view(&self.device, &self.queue, td, srgb) {
                 if terrain_blend && !own.contains(h) {
-                    self.terrain_views.insert(*h, v);
+                    self.terrain_views.insert((scope, *h), v);
                 } else {
                     views.insert(*h, v);
                 }
@@ -2038,7 +2097,7 @@ impl Scene {
         for (d, s) in draws.iter().zip(&slots) {
             let idx = tex_binds.len();
             {
-                let view = |h: Option<u32>| h.and_then(|h| views.get(&h).or_else(|| self.terrain_views.get(&h)));
+                let view = |h: Option<u32>| h.and_then(|h| views.get(&h).or_else(|| self.terrain_views.get(&(scope, h))));
                 let black = &self.black;
                 let (bound, params) = match &d.ground {
                     Some(g) => (
@@ -2120,7 +2179,7 @@ impl Scene {
         let bounds = rest_bounds(verts, &rest, !skin.rig.is_empty());
 
         self.models.insert(
-            hash,
+            (scope, hash),
             ModelGpu {
                 vbuf,
                 ibuf,
@@ -2153,23 +2212,23 @@ impl Scene {
         Ok(())
     }
 
-    /// Whether a ground cover pack is uploaded.
-    pub fn has_scrub(&self, hash: u32) -> bool {
-        self.scrub_packs.contains_key(&hash)
+    /// Whether a ground cover pack is uploaded in `scope`.
+    pub fn has_scrub(&self, scope: WorldScope, hash: u32) -> bool {
+        self.scrub_packs.contains_key(&(scope, hash))
     }
 
-    /// Upload a ground cover pack. Its textures join the ones terrain cells share, for the scene's
-    /// life; `textures` holds those no earlier cell or pack brought.
-    pub fn load_scrub(&mut self, hash: u32, geometry: mesh::ScrubGeometry, textures: &TexMap) {
-        if self.scrub_packs.contains_key(&hash) {
+    /// Upload a ground cover pack into world `scope`. Its textures join the ones that world's terrain
+    /// cells share; `textures` holds those no earlier cell or pack of it brought.
+    pub fn load_scrub(&mut self, scope: WorldScope, hash: u32, geometry: mesh::ScrubGeometry, textures: &TexMap) {
+        if self.scrub_packs.contains_key(&(scope, hash)) {
             return;
         }
         let mesh::ScrubGeometry { verts, indices, draws, instances, patches } = geometry;
         if instances.is_empty() {
-            self.scrub_packs.insert(hash, ScrubPack { instances: None, meshes: Vec::new(), patches, placed: 0 });
+            self.scrub_packs.insert((scope, hash), ScrubPack { instances: None, meshes: Vec::new(), patches, placed: 0 });
             return;
         }
-        self.load_model_inner(hash, &verts, &indices, &draws, textures, &mesh::SkinData::identity(), true);
+        self.load_model_inner((scope, hash), &verts, &indices, &draws, textures, &mesh::SkinData::identity(), true);
         let bytes: &[u8] = bytemuck::cast_slice(&instances);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scrub instances"),
@@ -2181,7 +2240,7 @@ impl Scene {
         buffer.unmap();
         let meshes: Vec<ScrubMeshGpu> = draws
             .iter()
-            .zip(&self.models[&hash].draw_calls)
+            .zip(&self.models[&(scope, hash)].draw_calls)
             .map(|(d, dc)| ScrubMeshGpu {
                 depths: d.scrub.expect("build_scrub marks every draw"),
                 bind: dc.bind,
@@ -2196,7 +2255,7 @@ impl Scene {
                 self.ensure_scrub_pipelines(hash, (m.blend, m.cull));
             }
         }
-        self.scrub_packs.insert(hash, ScrubPack { instances: Some(buffer), meshes, patches, placed: 0 });
+        self.scrub_packs.insert((scope, hash), ScrubPack { instances: Some(buffer), meshes, patches, placed: 0 });
     }
 
     /// Build the ground cover pipelines for `key` in every target format the colour pass draws into, once.
@@ -2229,10 +2288,10 @@ impl Scene {
 
     /// Upload a tree species' billboard, as model `key`, with room for `capacity` trees. Billboards are
     /// alpha-tested and keep the target's alpha, as solid ground cover does.
-    pub fn load_trees(&mut self, key: u32, geometry: &mesh::TreeGeometry, textures: &TexMap, capacity: usize) {
-        assert!(!self.models.contains_key(&key), "tree species 0x{key:08X} collides with a loaded model");
+    pub fn load_trees(&mut self, scope: WorldScope, key: u32, geometry: &mesh::TreeGeometry, textures: &TexMap, capacity: usize) {
+        assert!(!self.models.contains_key(&(scope, key)), "tree species 0x{key:08X} collides with a loaded model");
         let draws = std::slice::from_ref(&geometry.draw);
-        self.load_model(key, &geometry.verts, &geometry.indices, draws, textures, &mesh::SkinData::identity());
+        self.load_model(scope, key, &geometry.verts, &geometry.indices, draws, textures, &mesh::SkinData::identity());
         let formats: Vec<wgpu::TextureFormat> =
             std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
         for format in formats {
@@ -2257,23 +2316,27 @@ impl Scene {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.trees.push(TreeBatch { key, instances, count: 0 });
+        self.trees.push(TreeBatch { scope, key, instances, count: 0 });
     }
 
-    /// The trees of species `key` that draw as billboards.
-    pub fn set_trees(&mut self, key: u32, trees: &[mesh::TreeInstance]) {
-        let batch = self.trees.iter_mut().find(|t| t.key == key).unwrap_or_else(|| panic!("tree species 0x{key:08X} set before it loaded"));
+    /// The trees of species `key` in world `scope` that draw as billboards.
+    pub fn set_trees(&mut self, scope: WorldScope, key: u32, trees: &[mesh::TreeInstance]) {
+        let batch = self
+            .trees
+            .iter_mut()
+            .find(|t| t.scope == scope && t.key == key)
+            .unwrap_or_else(|| panic!("tree species 0x{key:08X} set before it loaded"));
         batch.count = trees.len() as u32;
         self.queue.write_buffer(&batch.instances, 0, bytemuck::cast_slice(trees));
     }
 
-    /// Record the billboards into `pass`.
-    fn draw_trees<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, format: wgpu::TextureFormat) {
-        for t in self.trees.iter().filter(|t| t.count > 0) {
+    /// Record world `scope`'s billboards into `pass`.
+    fn draw_trees<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, scope: WorldScope, format: wgpu::TextureFormat) {
+        for t in self.trees.iter().filter(|t| t.scope == scope && t.count > 0) {
             let Some(p) = self.tree_pipelines.get(&format) else {
                 panic!("no billboard pipeline into {format:?}")
             };
-            let model = &self.models[&t.key];
+            let model = &self.models[&(scope, t.key)];
             let dc = &model.draw_calls[0];
             pass.set_pipeline(p);
             pass.set_bind_group(0, &self.tree_camera_bind, &[]);
@@ -2286,9 +2349,9 @@ impl Scene {
         }
     }
 
-    /// Place a loaded ground cover pack as entity `key`, at its cell's position.
-    pub fn place_scrub(&mut self, key: u32, hash: u32, pos: [f32; 3]) {
-        let pack = self.scrub_packs.get_mut(&hash).unwrap_or_else(|| panic!("ground cover 0x{hash:08X} placed before it loaded"));
+    /// Place a pack loaded in world `scope` as that world's entity `key`, at its cell's position.
+    pub fn place_scrub(&mut self, scope: WorldScope, key: u32, hash: u32, pos: [f32; 3]) {
+        let pack = self.scrub_packs.get_mut(&(scope, hash)).unwrap_or_else(|| panic!("ground cover 0x{hash:08X} placed before it loaded"));
         pack.placed += 1;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scrub camera"),
@@ -2301,26 +2364,26 @@ impl Scene {
             layout: &self.camera_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
         });
-        self.scrub_placed.insert(key, PlacedScrub { hash, pos: glam::Vec3::from(pos), buffer, bind });
+        self.scrub_placed.insert((scope, key), PlacedScrub { hash, pos: glam::Vec3::from(pos), buffer, bind });
     }
 
-    /// Take entity `key`'s ground cover away, and its pack with the last placement of it.
-    pub fn remove_scrub(&mut self, key: u32) {
-        let Some(placed) = self.scrub_placed.remove(&key) else { return };
-        let Some(pack) = self.scrub_packs.get_mut(&placed.hash) else { return };
+    /// Take world `scope`'s entity `key`'s ground cover away, and its pack with the last placement of it.
+    pub fn remove_scrub(&mut self, scope: WorldScope, key: u32) {
+        let Some(placed) = self.scrub_placed.remove(&(scope, key)) else { return };
+        let Some(pack) = self.scrub_packs.get_mut(&(scope, placed.hash)) else { return };
         pack.placed -= 1;
         if pack.placed == 0 {
-            self.scrub_packs.remove(&placed.hash);
-            self.unload_model(placed.hash);
+            self.scrub_packs.remove(&(scope, placed.hash));
+            self.unload_model(scope, placed.hash);
         }
     }
 
-    /// The ground cover draws of this frame ([`scrub_blended`]), and their camera uniforms.
-    fn prepare_scrub(&mut self, view: glam::Mat4, view_proj: glam::Mat4, cam_world: glam::Vec3, planes: &[glam::Vec4; 6]) {
+    /// World `scope`'s ground cover draws of this frame ([`scrub_blended`]), and their camera uniforms.
+    fn prepare_scrub(&mut self, scope: WorldScope, view: glam::Mat4, view_proj: glam::Mat4, cam_world: glam::Vec3, planes: &[glam::Vec4; 6]) {
         let mut draws = std::mem::take(&mut self.scrub_frame);
         draws.clear();
-        for (key, placed) in &self.scrub_placed {
-            let Some(pack) = self.scrub_packs.get(&placed.hash) else { continue };
+        for (key, placed) in self.scrub_placed.iter().filter(|((s, _), _)| *s == scope) {
+            let Some(pack) = self.scrub_packs.get(&(scope, placed.hash)) else { continue };
             let first = draws.len();
             for patch in &pack.patches {
                 if !sphere_in_view(planes, placed.pos + glam::Vec3::from(patch.centre), patch.radius) {
@@ -2345,8 +2408,8 @@ impl Scene {
     fn draw_scrub<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, format: wgpu::TextureFormat, blended: bool) {
         for d in self.scrub_frame.iter().filter(|d| d.blended == blended) {
             let placed = &self.scrub_placed[&d.key];
-            let pack = &self.scrub_packs[&placed.hash];
-            let (Some(model), Some(instances)) = (self.models.get(&placed.hash), &pack.instances) else { continue };
+            let pack = &self.scrub_packs[&(d.key.0, placed.hash)];
+            let (Some(model), Some(instances)) = (self.models.get(&(d.key.0, placed.hash)), &pack.instances) else { continue };
             let m = &pack.meshes[d.range.mesh as usize];
             let key = (if blended { m.blend } else { None }, m.cull);
             let Some(p) = self.scrub_pipelines.get(&(format, key)) else {
@@ -2387,15 +2450,15 @@ impl Scene {
         self.pixel_samplers = Some(samplers);
     }
 
-    /// Whether a model is currently uploaded (keyed by hash).
-    pub fn has_model(&self, hash: u32) -> bool {
-        self.models.contains_key(&hash)
+    /// Whether a model is currently uploaded in world `scope`.
+    pub fn has_model(&self, scope: WorldScope, hash: u32) -> bool {
+        self.models.contains_key(&(scope, hash))
     }
 
-    /// Hide or show a single draw call of a model (by draw-call index). Used for the terrain LOD
-    /// swap: hide a low-res tile's draw group while its hi-res terrainmesh is resident.
-    pub fn set_draw_hidden(&mut self, hash: u32, draw_index: usize, hidden: bool) {
-        let set = self.hidden_draws.entry(hash).or_default();
+    /// Hide or show a single draw call of world `scope`'s model (by draw-call index). Used for the
+    /// terrain LOD swap: hide a low-res tile's draw group while its hi-res terrainmesh is resident.
+    pub fn set_draw_hidden(&mut self, scope: WorldScope, hash: u32, draw_index: usize, hidden: bool) {
+        let set = self.hidden_draws.entry((scope, hash)).or_default();
         if hidden {
             set.insert(draw_index);
         } else {
@@ -2406,25 +2469,25 @@ impl Scene {
     /// Install this entity's render state — the LOD rung it is at and its destruction node-enable
     /// table. The draw loop gates every segment of its model against it. Clearing it (or never
     /// setting it) draws the model whole.
-    pub fn set_entity_render_state(&mut self, e: Entity, rs: crate::render_state::RenderState) {
-        self.entity_state.insert(e, rs);
+    pub fn set_entity_render_state(&mut self, scope: WorldScope, e: Entity, rs: crate::render_state::RenderState) {
+        self.entity_state.insert((scope, e), rs);
     }
 
     /// Read back an entity's render state, e.g. to advance only its LOD rung.
-    pub fn entity_render_state(&self, e: Entity) -> Option<&crate::render_state::RenderState> {
-        self.entity_state.get(&e)
+    pub fn entity_render_state(&self, scope: WorldScope, e: Entity) -> Option<&crate::render_state::RenderState> {
+        self.entity_state.get(&(scope, e))
     }
 
-    pub fn clear_entity_render_state(&mut self, e: Entity) {
-        self.entity_state.remove(&e);
+    pub fn clear_entity_render_state(&mut self, scope: WorldScope, e: Entity) {
+        self.entity_state.remove(&(scope, e));
     }
 
     /// The `SkinPalette` an instance of a loaded model starts at: its rest palette, one entry per bone
     /// the verts reference (identity for an unrigged model). A rigged prop or vehicle no clip drives
     /// keeps it — retail holds such a node at its `+16` reference pose, which an identity palette (the
     /// `+80` bind) is not. Panics if the model isn't loaded: an entity is spawned after its model.
-    pub fn model_rest_palette(&self, hash: u32) -> Vec<[[f32; 4]; 4]> {
-        match self.models.get(&hash) {
+    pub fn model_rest_palette(&self, scope: WorldScope, hash: u32) -> Vec<[[f32; 4]; 4]> {
+        match self.models.get(&(scope, hash)) {
             Some(m) => m.rest.clone(),
             None => panic!("model 0x{hash:08X}: an instance is spawned before the model is loaded"),
         }
@@ -2434,20 +2497,20 @@ impl Scene {
     /// executor calls this once the last entity referencing a model hibernates/unloads — net-new
     /// GPU UNLOAD (nothing in the codebase freed GPU before the streaming runtime). wgpu buffers
     /// and bind groups drop with the removed `ModelGpu`.
-    pub fn unload_model(&mut self, hash: u32) {
-        self.models.remove(&hash);
+    pub fn unload_model(&mut self, scope: WorldScope, hash: u32) {
+        self.models.remove(&(scope, hash));
     }
 
     /// Drop a despawned entity's per-entity GPU resources (its MVP uniform + bone palette buffer).
     /// Call when the ECS entity is despawned so its buffers/bind groups are freed and the entity
     /// map does not leak. Safe to call for an unknown entity.
-    pub fn forget_entity(&mut self, e: Entity) {
-        self.entities.remove(&e);
-        self.entity_state.remove(&e);
+    pub fn forget_entity(&mut self, scope: WorldScope, e: Entity) {
+        self.entities.remove(&(scope, e));
+        self.entity_state.remove(&(scope, e));
     }
 
     /// Create per-entity GPU resources (MVP + bone palette) sized to the model, once.
-    fn ensure_entity(&mut self, e: Entity, bone_count: usize) {
+    fn ensure_entity(&mut self, e: (WorldScope, Entity), bone_count: usize) {
         if self.entities.contains_key(&e) {
             return;
         }
@@ -2518,6 +2581,12 @@ impl Scene {
         if !matches!(self.capture, Capture::Pending) {
             return None;
         }
+        Some(self.encode_readback(encoder, texture))
+    }
+
+    /// Queue the copy of a frame's texture, shaped like the surface, into a read-back buffer: the
+    /// buffer and its padded row length.
+    fn encode_readback(&self, encoder: &mut wgpu::CommandEncoder, texture: &wgpu::Texture) -> (wgpu::Buffer, u32) {
         let (w, h) = (self.config.width, self.config.height);
         let padded = padded_row_bytes(w);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2534,12 +2603,18 @@ impl Scene {
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        Some((buffer, padded))
+        (buffer, padded)
     }
 
     /// Finish a capture queued by [`Scene::encode_capture`], once its commands are submitted.
     fn finish_capture(&mut self, readback: Option<(wgpu::Buffer, u32)>) {
         let Some((buffer, padded)) = readback else { return };
+        self.capture = Capture::Done(self.read_back(&buffer, padded));
+    }
+
+    /// The frame a read-back queued by [`Scene::encode_readback`] holds, once its commands are
+    /// submitted.
+    fn read_back(&self, buffer: &wgpu::Buffer, padded: u32) -> Result<CapturedFrame, String> {
         let (w, h) = (self.config.width, self.config.height);
         let slice = buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2547,10 +2622,9 @@ impl Scene {
             let _ = tx.send(r);
         });
         if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
-            self.capture = Capture::Done(Err(format!("waiting for the frame capture failed: {e}")));
-            return;
+            return Err(format!("waiting for the frame capture failed: {e}"));
         }
-        let result = match rx.recv() {
+        match rx.recv() {
             Ok(Ok(())) => {
                 let rgba = slice
                     .get_mapped_range()
@@ -2561,8 +2635,7 @@ impl Scene {
             }
             Ok(Err(e)) => Err(format!("mapping the frame capture failed: {e}")),
             Err(_) => Err("the frame capture's map callback never ran".into()),
-        };
-        self.capture = Capture::Done(result);
+        }
     }
 
     /// Present at once (`[Render] PresentImmediate`, vsync off) or on the vertical blank, as retail's
@@ -2602,6 +2675,7 @@ impl Scene {
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         items: &[DrawItem],
+        scope: WorldScope,
         pipeline: &'a wgpu::RenderPipeline,
         format: wgpu::TextureFormat,
     ) {
@@ -2610,8 +2684,8 @@ impl Scene {
         pass.set_bind_group(3, &self.lights_bind, &[]);
         for blended in [false, true] {
             for (e, _m, model_hash, _p) in items {
-                let Some(mg) = self.models.get(model_hash) else { continue };
-                let Some(eg) = self.entities.get(e) else { continue };
+                let Some(mg) = self.models.get(&(scope, *model_hash)) else { continue };
+                let Some(eg) = self.entities.get(&(scope, *e)) else { continue };
                 if blended && !mg.draw_calls.iter().any(|dc| dc.blend.is_some()) {
                     continue;
                 }
@@ -2620,11 +2694,11 @@ impl Scene {
                 pass.set_vertex_buffer(0, mg.vbuf.slice(..));
                 if let Some(ib) = &mg.ibuf {
                     pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    let hidden = self.hidden_draws.get(model_hash);
+                    let hidden = self.hidden_draws.get(&(scope, *model_hash));
                     // The engine's per-segment draw gate, evaluated against THIS ENTITY's render state:
                     // clause 2 (LOD-rung overlap) and clause 3 (destruction node-enable). An entity with
                     // no state draws everything, which is what unskinned/synthetic geometry wants.
-                    let rs = self.entity_state.get(e);
+                    let rs = self.entity_state.get(&(scope, *e));
                     for (di, dc) in mg.draw_calls.iter().enumerate() {
                         if dc.blend.is_some() != blended {
                             continue;
@@ -2655,7 +2729,7 @@ impl Scene {
             }
             self.draw_scrub(pass, format, blended);
             if !blended {
-                self.draw_trees(pass, format);
+                self.draw_trees(pass, scope, format);
             }
         }
     }
@@ -2674,7 +2748,7 @@ impl Scene {
     /// shader gates on the same condition. Each caster is gated into ONLY the cascades whose box
     /// contains it (the distance-LOD caster gate, `FUN_00858150` analog) — near casters land in the
     /// tight cascades, far ones only in the wide ones, mirroring the per-cascade caster list.
-    fn record_shadow_cascade(&self, encoder: &mut wgpu::CommandEncoder, items: &[DrawItem]) {
+    fn record_shadow_cascade(&self, encoder: &mut wgpu::CommandEncoder, items: &[DrawItem], scope: WorldScope) {
         if self.sun_intensity <= 0.0 {
             return;
         }
@@ -2703,7 +2777,7 @@ impl Scene {
             let offset = (cascade as u64 * CASCADE_STRIDE) as wgpu::DynamicOffset;
             spass.set_bind_group(1, &self.shadow_vp_bind, &[offset]);
             for (e, entity_model, model_hash, _p) in items {
-                let Some(mg) = self.models.get(model_hash) else { continue };
+                let Some(mg) = self.models.get(&(scope, *model_hash)) else { continue };
                 // Distance-LOD caster gate: skip this caster in cascade `c` unless its ground point is
                 // inside cascade `c`'s box (near casters → tight cascades, far → wide only). `shadow_configured`
                 // guarantees `cascade_vps` are real (not identity) here.
@@ -2721,7 +2795,7 @@ impl Scene {
                         }
                     }
                 }
-                let Some(eg) = self.entities.get(e) else { continue };
+                let Some(eg) = self.entities.get(&(scope, *e)) else { continue };
                 spass.set_bind_group(0, &eg.mvp_bind, &[]);
                 spass.set_bind_group(2, &eg.bone_bind, &[]);
                 spass.set_vertex_buffer(0, mg.vbuf.slice(..));
@@ -2789,6 +2863,7 @@ impl Scene {
         encoder: &mut wgpu::CommandEncoder,
         view_tex: &wgpu::TextureView,
         items: &[DrawItem],
+        scope: WorldScope,
         hdr_world: bool,
     ) {
         if hdr_world {
@@ -2823,7 +2898,7 @@ impl Scene {
                 } else {
                     self.world_pipeline.as_ref().unwrap()
                 };
-                self.draw_geometry(&mut pass, items, pl, crate::post::HDR_FORMAT);
+                self.draw_geometry(&mut pass, items, scope, pl, crate::post::HDR_FORMAT);
             }
             post.run(encoder, view_tex); // bright-pass → blur → composite + tone-map → swapchain
         } else {
@@ -2853,7 +2928,7 @@ impl Scene {
                 pass.draw(0..3, 0..1);
             }
             let pl = if self.model_alpha < 0.999 { &self.pipeline_t } else { &self.pipeline };
-            self.draw_geometry(&mut pass, items, pl, self.config.format);
+            self.draw_geometry(&mut pass, items, scope, pl, self.config.format);
         }
     }
 
@@ -2862,10 +2937,7 @@ impl Scene {
     /// Depth = the scene depth (read-only test), so both are occluded by nearer opaque geometry. No-op
     /// when nothing is live.
     fn record_transparent_fx(&self, encoder: &mut wgpu::CommandEncoder, view_tex: &wgpu::TextureView) {
-        let has_fx = self.particles.active_emitter_count() > 0
-            || self.particles.live_particle_count() > 0
-            || self.particles.glow_card_count() > 0;
-        if has_fx {
+        if self.particles.has_draws() {
             let mut ppass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("transparent fx pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2952,9 +3024,10 @@ impl Scene {
         }
     }
 
-    /// Draw every drawable entity in the world. Auto-orbit camera framing the origin.
-    pub fn render(&mut self, world: &World) -> Result<(), SurfaceError> {
-        self.render_with(world, None)
+    /// Draw every drawable entity in the world, whose entities' state is kept under `scope`.
+    /// Auto-orbit camera framing the origin.
+    pub fn render(&mut self, scope: WorldScope, world: &World) -> Result<(), SurfaceError> {
+        self.render_with(scope, world, None)
     }
 
     /// [`Self::render`] with an external OVERLAY hook: called with the frame's device/queue/
@@ -2963,23 +3036,66 @@ impl Scene {
     /// about them. `None` = plain render.
     pub fn render_with(
         &mut self,
+        scope: WorldScope,
+        world: &World,
+        overlay: Option<Overlay<'_>>,
+    ) -> Result<(), SurfaceError> {
+        self.draw(scope, world, overlay, None).map(|_| ())
+    }
+
+    /// One still frame of the entities of `world` kept under `scope`, seen through `view` with the
+    /// engine's projection (`near`, `far`), drawn into a texture shaped like the surface and read
+    /// back. Every pass of a frame runs as [`Self::render_with`] runs it; nothing is presented, the
+    /// particle sim is not stepped, the staged 2D UI is not drawn, and the window's camera is
+    /// untouched.
+    pub fn render_still(
+        &mut self,
+        scope: WorldScope,
+        world: &World,
+        view: glam::Mat4,
+        near: f32,
+        far: f32,
+    ) -> Result<CapturedFrame, String> {
+        match self.draw(scope, world, None, Some((view, near, far))) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => Err("internal error: a still frame drew and read nothing back".into()),
+            Err(e) => Err(format!("drawing the still frame: {e:?}")),
+        }
+    }
+
+    /// Draw one frame: to the window (`still` `None`), presenting it and stepping the particle sim,
+    /// or, for a [`Self::render_still`], to an offscreen texture through `still`'s camera, read back.
+    fn draw(
+        &mut self,
+        scope: WorldScope,
         world: &World,
         mut overlay: Option<Overlay<'_>>,
-    ) -> Result<(), SurfaceError> {
+        still: Option<(glam::Mat4, f32, f32)>,
+    ) -> Result<Option<Result<CapturedFrame, String>>, SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
-        // Advance the particle sim by the real inter-frame dt (clamped so a stall doesn't teleport
-        // particles), then reap finished emitters. No-op when no effect is active.
-        let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
-        self.last_frame = std::time::Instant::now();
-        self.particles.update(dt);
+        if still.is_none() {
+            // Advance the particle sim by the real inter-frame dt (clamped so a stall doesn't teleport
+            // particles), then reap finished emitters. No-op when no effect is active.
+            let dt = self.last_frame.elapsed().as_secs_f32().min(0.1);
+            self.last_frame = std::time::Instant::now();
+            if std::mem::take(&mut self.fx_demo_pending) {
+                self.particles.start_emitter_desc(scope, crate::particles::EmitterDesc::demo_smoke(), glam::Vec3::ZERO);
+                self.particles.start_emitter_desc(scope, crate::particles::EmitterDesc::demo_fire(), glam::Vec3::new(1.2, 0.0, 0.0));
+            }
+            self.particles.update(scope, dt);
+        }
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let (raw_vp, view) = if let Some((view, near, far)) = self.view_cam {
+        let (cam, shift) = match still {
+            Some(c) => (Some(c), glam::Vec2::ZERO),
+            None => (self.view_cam, self.view_shift),
+        };
+        let (raw_vp, view) = if let Some((view, near, far)) = cam {
             // Caller-driven fly / third-person camera: explicit view, projection from aspect.
             // Vertical FOV tuned to the retail over-the-shoulder framing (60° and 55° both read too
             // wide-angle vs vanilla). 45° gives the tighter, more zoomed retail look.
             let mut proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, near, far);
-            proj.z_axis.x = self.view_shift.x;
-            proj.z_axis.y = self.view_shift.y;
+            proj.z_axis.x = shift.x;
+            proj.z_axis.y = shift.y;
             (proj * view, view)
         } else {
             let angle = t * 0.5;
@@ -3004,8 +3120,8 @@ impl Scene {
         // Snapshot the drawable entities (copy out to release the world borrow before touching self).
         let mut items: Vec<DrawItem> = Vec::new();
         for (e, xform, mref, pal) in world.query::<(Entity, &Transform, &ModelRef, &SkinPalette)>().iter() {
-            if let Some(base) = self.terrain_hidden {
-                if mref.model == base || self.models.get(&mref.model).is_some_and(|m| m.terrain_blend) {
+            if let Some((_, base)) = self.terrain_hidden.filter(|(s, _)| *s == scope) {
+                if mref.model == base || self.models.get(&(scope, mref.model)).is_some_and(|m| m.terrain_blend) {
                     continue;
                 }
             }
@@ -3017,7 +3133,7 @@ impl Scene {
         // still shadows what is in front of it.
         let planes = frustum_planes(view_proj);
         let (mut seen, unseen): (Vec<DrawItem>, Vec<DrawItem>) = items.into_iter().partition(|(_, entity_model, model_hash, _)| {
-            self.models.get(model_hash).is_none_or(|mg| {
+            self.models.get(&(scope, *model_hash)).is_none_or(|mg| {
                 let world = *entity_model * mg.fit;
                 let scale = world.x_axis.truncate().length().max(world.y_axis.truncate().length()).max(world.z_axis.truncate().length());
                 sphere_in_view(&planes, world.transform_point3(mg.bounds.0), mg.bounds.1 * scale)
@@ -3029,13 +3145,13 @@ impl Scene {
 
         // Phase 1: ensure per-entity resources and upload their MVP + palette.
         for (i, (e, entity_model, model_hash, palette)) in items.iter().enumerate() {
-            let Some(mg) = self.models.get(model_hash) else { continue };
+            let Some(mg) = self.models.get(&(scope, *model_hash)) else { continue };
             let (bone_count, fit) = (mg.bone_count, mg.fit);
-            self.ensure_entity(*e, bone_count);
+            self.ensure_entity((scope, *e), bone_count);
             let model = *entity_model * fit; // model -> world (fit=identity in the streaming/world path)
             // Entity transform placed in fitted world space, + handedness flip.
             let uni = self.camera_uniform(view_proj * model, model, cam_world);
-            let eg = self.entities.get_mut(e).expect("ensure_entity made it");
+            let eg = self.entities.get_mut(&(scope, *e)).expect("ensure_entity made it");
             // Out of view only the shadow pass reads this entity, and it reads the model matrix alone.
             if i < in_view || eg.written_model != Some(model) {
                 eg.written_model = Some(model);
@@ -3053,8 +3169,8 @@ impl Scene {
             }
         }
 
-        self.prepare_scrub(view, view_proj, cam_world, &planes);
-        if !self.trees.is_empty() {
+        self.prepare_scrub(scope, view, view_proj, cam_world, &planes);
+        if self.trees.iter().any(|t| t.scope == scope) {
             let uniform = self.camera_uniform(view_proj, glam::Mat4::IDENTITY, cam_world);
             self.queue.write_buffer(&self.tree_camera, 0, bytemuck::cast_slice(&uniform));
         }
@@ -3159,7 +3275,7 @@ impl Scene {
         self.blobs.clear();
         if self.shadow_configured && self.sun_intensity > 0.0 {
             for (_e, entity_model, model_hash, _pal) in &items {
-                let Some(mg) = self.models.get(model_hash) else { continue };
+                let Some(mg) = self.models.get(&(scope, *model_hash)) else { continue };
                 let world = *entity_model * mg.fit;
                 let wpos = world.w_axis.truncate();
                 if select_cascade(&self.cascade_vps, wpos).is_none() {
@@ -3211,8 +3327,8 @@ impl Scene {
         let cam_up = view_inv.transform_vector3(glam::Vec3::Y);
         let cam_forward = view_inv.transform_vector3(glam::Vec3::Z);
         let eye = view_inv.transform_point3(glam::Vec3::ZERO);
-        self.particles
-            .prepare(&self.device, &self.queue, view_proj, cam_right, cam_up, cam_forward, eye);
+        let fx_cam = crate::particles::FxCamera { view_proj, right: cam_right, up: cam_up, forward: cam_forward, eye };
+        self.particles.prepare(&self.device, &self.queue, scope, &fx_cam);
 
         // Phase 2: record the frame's passes by walking the canonical per-viewport scene order
         // (`render_graph::SCENE_ORDER`, the recovered `FUN_00466d40` body sequence — render_core §5).
@@ -3221,7 +3337,19 @@ impl Scene {
         // NOTHING today, so this loop reduces to the engine's prior command sequence (shadow-depth →
         // color → transparent-fx → ui → overlay) — a behaviour-preserving carve. Each node's Xbox↔PC
         // anchor lives on `render_graph::PassId::anchor`.
-        let output = self.acquire()?;
+        let output = match still {
+            None => self.acquire()?,
+            Some(_) => FrameTarget::Offscreen(self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("still frame"),
+                size: wgpu::Extent3d { width: self.config.width, height: self.config.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &self.config.view_formats,
+            })),
+        };
         let view_tex = output.texture().create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
@@ -3237,14 +3365,18 @@ impl Scene {
 
         // Stage this frame's 2D UI overlay before recording (a queue buffer write; ordering among the
         // frame's queue writes is immaterial). Non-zero only when a caller staged `ui_rect`/`ui_text`.
-        let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
+        // A still frame draws no UI.
+        let ui_count = match still {
+            None => self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height),
+            Some(_) => 0,
+        };
 
         use crate::render_graph::PassId;
         for &node in crate::render_graph::SCENE_ORDER {
             match node {
                 // --- realized world passes ---
-                PassId::ShadowCascade => self.record_shadow_cascade(&mut encoder, &items),
-                PassId::Color => self.record_color(&mut encoder, &view_tex, &items[..in_view], hdr_world),
+                PassId::ShadowCascade => self.record_shadow_cascade(&mut encoder, &items, scope),
+                PassId::Color => self.record_color(&mut encoder, &view_tex, &items[..in_view], scope, hdr_world),
                 // --- engine composite tail ---
                 PassId::TransparentFx => self.record_transparent_fx(&mut encoder, &view_tex),
                 PassId::Ui => {
@@ -3287,13 +3419,18 @@ impl Scene {
             self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world, t);
         }
 
+        if still.is_some() {
+            let (buffer, padded) = self.encode_readback(&mut encoder, output.texture());
+            self.queue.submit(std::iter::once(encoder.finish()));
+            return Ok(Some(self.read_back(&buffer, padded)));
+        }
         let readback = self.encode_capture(&mut encoder, output.texture());
         self.queue.submit(std::iter::once(encoder.finish()));
         self.finish_capture(readback);
         if let FrameTarget::Surface(surface) = output {
             self.queue.present(surface);
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -3622,6 +3759,16 @@ fn light_anim_factor(a: &LightAnim, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two worlds hand out the same entities, which is why the scene keys per-entity state by
+    /// `(WorldScope, Entity)`; and each world's scope is its own.
+    #[test]
+    fn two_worlds_share_entity_ids_and_their_scopes_differ() {
+        let (mut a, mut b) = (World::new(), World::new());
+        assert_eq!(a.spawn((1u32,)), b.spawn((2u32,)), "a fresh world's first entity is every world's first entity");
+        let scopes: HashSet<WorldScope> = (0..64).map(|_| WorldScope::new()).collect();
+        assert_eq!(scopes.len(), 64);
+    }
 
     /// A sphere is in view when any of it is: in front of the camera it passes, behind or wholly off to
     /// the side it does not, and a sphere whose edge crosses the side plane still passes.
