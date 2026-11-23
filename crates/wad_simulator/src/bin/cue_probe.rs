@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let rb = {
         let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let data = mercs2_formats::game_paths::repo_root().join("docs").join("data");
         let t: Vec<PathBuf> = vec![
             mercs2_formats::game_paths::local_config_rainbow_table(start)?,
             data.join("aset_block_strings.json"),
