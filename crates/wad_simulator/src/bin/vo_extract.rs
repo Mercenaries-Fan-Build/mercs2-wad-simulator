@@ -171,12 +171,12 @@ struct Cli {
 }
 
 /// `rainbow_table` from `.mercs2-local.toml`, the workshop crate's `data/aset_discovered_names.json`,
-/// the identifier-shaped `data/aset_block_strings.json` names under its `notes_docs_dir` (minus the
+/// the identifier-shaped names of this repository's `docs/data/aset_block_strings.json` (minus the
 /// workshop crate's `data/rejected_names.json`), and its `data/aset_expanded_names.json`. Every
 /// table must load.
 fn rainbow() -> Result<RainbowTable, String> {
     let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+    let notes = mercs2_formats::game_paths::repo_root().join("docs").join("data");
     let names = start.join("../mercs2_workshop/data");
     let tables: Vec<PathBuf> = vec![
         mercs2_formats::game_paths::local_config_rainbow_table(start)?,
