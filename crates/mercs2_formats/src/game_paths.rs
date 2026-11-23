@@ -108,10 +108,9 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 /// * `jul08_strings` — the Jul-08 Xbox 360 devkit strings dump,
 ///   `mercs2_xenon_p.pe_full_strings.txt`. Read only by `mercs2_workshop --pack-data`
 ///   ([`local_config_jul08_strings`]).
-/// * `notes_docs_dir` — a **directory**: the `docs` folder of the notes repo
-///   (notes-on-the-released-game), holding `data/`, `mercs2-ecs/`, `mercs2-luacd/` and
-///   `mercs2-dlc-luacd/`. Read only by `mercs2_workshop --pack-data`
-///   ([`local_config_notes_docs_dir`]).
+/// * `bone_name_candidates` — `bone_name_candidates.txt`, a generated list of candidate bone names,
+///   one per line. Read only by `mercs2_workshop --pack-data` when it merges the raw name corpora
+///   ([`local_config_bone_name_candidates`]).
 /// * `unluac_jar` — the unluac jar whose disassemble/assemble round-trip of console Lua bytecode is
 ///   the oracle the Rust conversion is checked against. Read only by `mercs2_probe
 ///   lua-convert-check` ([`local_config_unluac_jar`]).
@@ -178,8 +177,8 @@ pub const PS3_EU_DISC_DIR_KEY: &str = "ps3_eu_disc_dir";
 pub const RAINBOW_TABLE_KEY: &str = "rainbow_table";
 /// The `jul08_strings` key of [`LOCAL_CONFIG`]: the devkit strings dump.
 pub const JUL08_STRINGS_KEY: &str = "jul08_strings";
-/// The `notes_docs_dir` key of [`LOCAL_CONFIG`]: the notes repo docs folder.
-pub const NOTES_DOCS_DIR_KEY: &str = "notes_docs_dir";
+/// The `bone_name_candidates` key of [`LOCAL_CONFIG`]: the generated bone-name candidate list.
+pub const BONE_NAME_CANDIDATES_KEY: &str = "bone_name_candidates";
 /// The `unluac_jar` key of [`LOCAL_CONFIG`]: the unluac jar.
 pub const UNLUAC_JAR_KEY: &str = "unluac_jar";
 /// The `java_binary` key of [`LOCAL_CONFIG`]: the java executable.
@@ -437,12 +436,19 @@ pub fn local_config_jul08_strings(start: &Path) -> Result<PathBuf, String> {
     local_config_file(start, JUL08_STRINGS_KEY, "write `jul08_strings = \"/path/to/output/jul08_prototype/mercs2_xenon_p.pe_full_strings.txt\"` into it by hand")
 }
 
-/// The notes repo docs folder for a **dev tool or game-gated test**: `notes_docs_dir` in the nearest [`LOCAL_CONFIG`].
+/// The bone-name candidate list for a **dev tool**: `bone_name_candidates` in the nearest [`LOCAL_CONFIG`].
 ///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
-/// must be a directory. No script writes this key.
-pub fn local_config_notes_docs_dir(start: &Path) -> Result<PathBuf, String> {
-    local_config_path(start, NOTES_DOCS_DIR_KEY, Want::Dir, "write `notes_docs_dir = \"/path/to/notes-on-the-released-game/docs\"` into it by hand")
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_bone_name_candidates(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, BONE_NAME_CANDIDATES_KEY, "write `bone_name_candidates = \"/path/to/bone_name_candidates.txt\"` into it by hand")
+}
+
+/// This repository's root, for a **dev tool or test run from a checkout**: the workspace this crate was
+/// built in (`crates/mercs2_formats` in it). Its `docs/data/` holds the tooling tables the dev tools read
+/// and write (`aset_names.csv`, `aset_export.csv`, `aset_block_strings.json`, …). A crate built from the
+/// registry has no checkout around it; a tool reading a file under this root then fails naming the path.
+pub fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
 /// The unluac jar for a **dev tool or game-gated test**: `unluac_jar` in the nearest [`LOCAL_CONFIG`].
@@ -865,10 +871,10 @@ mod tests {
         assert!(e.contains("has no `jul08_strings` key"), "{e}");
         std::fs::write(&config, format!("jul08_strings = \"{}\"\n", eboot.display())).unwrap();
         assert_eq!(local_config_jul08_strings(&deep), Ok(eboot.clone()));
-        let e = local_config_notes_docs_dir(&deep).unwrap_err();
-        assert!(e.contains("has no `notes_docs_dir` key"), "{e}");
-        std::fs::write(&config, format!("notes_docs_dir = \"{}\"\n", pkgs.display())).unwrap();
-        assert_eq!(local_config_notes_docs_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_bone_name_candidates(&deep).unwrap_err();
+        assert!(e.contains("has no `bone_name_candidates` key"), "{e}");
+        std::fs::write(&config, format!("bone_name_candidates = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_bone_name_candidates(&deep), Ok(eboot.clone()));
         let e = local_config_unluac_jar(&deep).unwrap_err();
         assert!(e.contains("has no `unluac_jar` key"), "{e}");
         std::fs::write(&config, format!("unluac_jar = \"{}\"\n", eboot.display())).unwrap();
