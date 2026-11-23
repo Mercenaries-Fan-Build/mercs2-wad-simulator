@@ -1819,7 +1819,7 @@ pub(crate) fn hero_name(index: u8) -> &'static str {
 }
 
 /// `1`/`2`/`3` → the hero's **base** spawn model. Per `_tCharacterMap[hero].base` in
-/// `docs/mercs2-luacd/src/resident/mrxplayer.lua:22,43,59` — the model the engine spawns
+/// `crates/mercs2_script/corpus/mercs2-luacd/src/resident/mrxplayer.lua:22,43,59` — the model the engine spawns
 /// when `iUpgrade == 0`, which is what the HERO dropdown shows alongside the display name.
 fn hero_base_model(index: u8) -> &'static str {
     match index {
@@ -1831,7 +1831,7 @@ fn hero_base_model(index: u8) -> &'static str {
 }
 
 /// `_tOutfits[hero]` — the base-game costumes a hero can switch to at the mirror. All three
-/// heroes' tables extracted verbatim from `docs/mercs2-luacd/src/vz/wifpmcinterior.lua`:
+/// heroes' tables extracted verbatim from `crates/mercs2_script/corpus/mercs2-luacd/src/vz/wifpmcinterior.lua`:
 ///   - Mattias: lines 215-241 (5 outfits)
 ///   - Chris:   lines 156-182 (5 outfits)
 ///   - Jen:     lines 183-214 (6 outfits — Jen is the only hero with ChickenSuit AND five
@@ -1868,7 +1868,7 @@ fn hero_outfits(index: u8) -> &'static [(&'static str, &'static str)] {
 }
 
 /// Format a Unix-epoch `u32` as `YYYY-MM-DD HH:MM UTC`. The `.profile` field at `@0x24`
-/// is a UTC timestamp (`docs/reverse_engineer/save_serialize_code_map.md` §4). Hand-rolled
+/// is a UTC timestamp ([`docs/reverse_engineer/save_serialize_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/save_serialize_code_map.md) §4). Hand-rolled
 /// civil-from-days conversion (Howard Hinnant's standard trick) so the Workshop doesn't
 /// take a chrono / humantime dep just for one line in the inspector.
 pub(crate) fn timestamp_utc(t: u32) -> String {
