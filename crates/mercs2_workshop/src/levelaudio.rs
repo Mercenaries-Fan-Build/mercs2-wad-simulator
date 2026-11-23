@@ -6,10 +6,9 @@
 //! under the bank's entry name (`vo_stream_dlctest.english.pws`), the file `dlc_port` writes there.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use mercs2_audio::wave::{decode_ima_mono, decode_ima_stereo, WaveData, WavebankFile};
+use mercs2_audio::wave::WavebankFile;
 use mercs2_engine::wad;
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
 use mercs2_formats::types::{TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK};
@@ -86,18 +85,7 @@ impl LevelAudio {
 
     /// Each line's length in seconds.
     fn lengths_s(&self) -> Vec<f32> {
-        self.lines
-            .iter()
-            .map(|&(b, r)| {
-                let rec = &self.banks[b].file.records[r];
-                let frames = match rec.data {
-                    // A streamed record's `+0x10` counts decoded PCM16 bytes.
-                    WaveData::Streamed { .. } => rec.frames / (2 * u32::from(rec.channels.max(1))),
-                    WaveData::Embedded(_) => rec.frames,
-                };
-                frames as f32 / rec.sample_rate.max(1) as f32
-            })
-            .collect()
+        self.lines.iter().map(|&(b, r)| crate::vostream::record_seconds(&self.banks[b].file.records[r])).collect()
     }
 
     /// The page's clip rows, one per line. A record's hash is its only name.
@@ -138,21 +126,7 @@ impl LevelAudio {
     /// One line's samples.
     pub fn clip_pcm(&self, line: u32) -> Result<Pcm, String> {
         let (bank, rec) = self.line(line).ok_or_else(|| format!("line {line} is past the {} lines", self.lines.len()))?;
-        let channels = rec.channels.max(1);
-        let samples = match &rec.data {
-            WaveData::Embedded(bytes) => bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect(),
-            WaveData::Streamed { offset, size, .. } => {
-                let pws = bank.pws.as_ref().ok_or_else(|| format!("{} has no .pws", bank.name))?;
-                let mut f = std::fs::File::open(pws).map_err(|e| format!("{}: {e}", pws.display()))?;
-                f.seek(SeekFrom::Start(u64::from(*offset))).map_err(|e| format!("{}: {e}", pws.display()))?;
-                let mut buf = vec![0u8; *size as usize];
-                f.read_exact(&mut buf).map_err(|e| format!("{}: {size} bytes at {offset}: {e}", pws.display()))?;
-                let mut pcm = if channels >= 2 { decode_ima_stereo(&buf) } else { decode_ima_mono(&buf) };
-                pcm.truncate(rec.frames as usize / 2);
-                pcm
-            }
-        };
-        Ok(Pcm { samples, rate: rec.sample_rate, channels })
+        crate::vostream::record_pcm(rec, bank.pws.as_deref()).map_err(|e| format!("{}: {e}", bank.name))
     }
 
     /// The `.pws` a line streams from, or that its samples are in the bank.
@@ -173,7 +147,7 @@ impl LevelAudio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mercs2_audio::wave::WaveRecord;
+    use mercs2_audio::wave::{WaveData, WaveRecord};
 
     fn audio(dir: &Path, stream: Vec<u8>) -> LevelAudio {
         let pws = dir.join("vo_x.english.pws");
