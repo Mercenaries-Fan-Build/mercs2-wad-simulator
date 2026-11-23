@@ -133,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rb = {
         let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let notes = mercs2_formats::game_paths::repo_root().join("docs").join("data");
         let names = start.join("../mercs2_workshop/data");
         let t: Vec<PathBuf> = vec![
             mercs2_formats::game_paths::local_config_rainbow_table(start)?,
@@ -345,7 +345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         // ★ The PC `.pws` is raw IMA ADPCM — 36-byte mono blocks / 72-byte stereo
-        // (docs/pandemic_audio_system_design.md §8), NOT PCM and NOT MP3 (that is the CONSOLE
+        // (https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/pandemic_audio_system_design.md §8), NOT PCM and NOT MP3 (that is the CONSOLE
         // stream). The data agrees: every clip size is an exact multiple of 36 (41040 = 36x1140,
         // 43200 = 36x1200, …) and the measured 0.281 bytes/sample rules PCM16 (2.0) out outright.
         // Writing these bytes as PCM is what produced static.

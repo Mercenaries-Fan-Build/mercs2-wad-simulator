@@ -3,7 +3,7 @@
 //!
 //! `Player` has its own crate rather than folding into vehicle or faction: it is the 2nd-highest-traffic
 //! Lua namespace at 107 cfuncs and spans economy + player-controller, which cuts across both.
-//! **Code map:** `docs/reverse_engineer/player_code_map.md` (all 107 cfunc bodies read; §10 is a
+//! **Code map:** [`docs/reverse_engineer/player_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/player_code_map.md) (all 107 cfunc bodies read; §10 is a
 //! requirements list written for this crate), with `save_serialize_code_map.md` owning the `.profile`
 //! disk layout and `camera_code_map.md` the viewport arrays.
 //! **Owned Lua namespace(s):** `Player` (107 cfuncs, `luaL_Reg` table `0x00B98FC0`).

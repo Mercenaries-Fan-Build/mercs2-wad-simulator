@@ -1,0 +1,29 @@
+Type = "Time"
+SubtitleData = {
+  {
+    0.18,
+    "[Newscaster-Briefing-Cinematic-SolanoReaction-01]"
+  },
+  {
+    3.6,
+    "[Senator-Briefing-Cinematic-SolanoReaction-02]",
+    5.38
+  },
+  {
+    9.15,
+    "[Solano-Briefing-Cinematic-SolanoReaction-03]"
+  },
+  {
+    10.5,
+    "[Carmona-Briefing-Cinematic-SolanoReaction-04]"
+  },
+  {
+    14.04,
+    "[Solano-Briefing-Cinematic-SolanoReaction-05]",
+    11
+  },
+  {
+    25.02,
+    "[Carmona-Briefing-Cinematic-SolanoReaction-06]"
+  }
+}

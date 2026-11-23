@@ -68,6 +68,7 @@ mod audioexport; // VO clips out as WAV + captions.csv
 mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
 mod layerview; // Inspect's LAYERS tab: every entity of a layer in 3D, where the layer places it
 mod textpage; // Inspect's TEXT tab: every string table side by side by key
+mod movieview; // Inspect's UI tab: a Scaleform movie playing in the viewport, on the engine's player
 mod vfxview; // Inspect's VFX tab: an effect playing on the pedestal, run by the retail sim
 mod heroidx; // every model's skeleton, for ranking the hero clips and faces play on
 mod levelaudio; // A level's wavebanks as the Audio page's lines
@@ -2373,20 +2374,18 @@ fn copy_repo_bundle_files(src_dir: &std::path::Path, out: &std::path::Path) -> R
 
 /// `--pack-data <dir>`: assemble the reference bundle into `out`, a portable directory.
 ///
-/// Sources outside this repo are dev-machine files named by `.mercs2-local.toml`, searched upward
-/// from the CWD; a missing key or file is an error naming it:
-/// * `notes_docs_dir` — the notes repo's `docs/`: `data/live_registry_hashes.csv`,
-///   `data/spawnable_templates.csv`, `mercs2-ecs/`, `mercs2-luacd/src/` and `mercs2-dlc-luacd/src/`
-///   are copied into the bundle.
-/// * The names come from this crate's `data/production_names.json` (see
-///   [`load_production_names`]). Only when that file is absent are they merged from the raw corpora
-///   ([`index::load_all_names_raw`]): this crate's name fragments, the `jul08_strings` and
-///   `rainbow_table` keys, and the name corpora in `notes_docs_dir`'s `data/`.
+/// Every source is read from the checkout this binary was built from:
+/// * this crate's `data/live_registry_hashes.csv`, `data/spawnable_templates.csv` and
+///   `data/mercs2-ecs/`, copied into the bundle;
+/// * the script corpora vendored in `mercs2_script` (`corpus::root`, `corpus::dlc_root`), copied
+///   into the bundle's `lua/` and `lua_dlc/`;
+/// * the [`REPO_BUNDLE_FILES`] committed in the repo's `workshop_data/` ([`repo_root`]), copied into
+///   the bundle;
+/// * the names, from this crate's `data/production_names.json` (see [`load_production_names`]).
+///   Only when that file is absent are they merged from the raw corpora
+///   ([`index::load_all_names_raw`]), which adds dev-machine files named by `.mercs2-local.toml`.
 ///
-/// In-repo sources are read from the checkout this binary was built from: this crate's
-/// `data/production_names.json`, and the [`REPO_BUNDLE_FILES`] committed in the repo's
-/// `workshop_data/` ([`repo_root`]), which are copied into the bundle. A missing one of those files
-/// is an error naming it, raised before anything is written.
+/// A missing source is an error naming it, raised before anything is written.
 ///
 /// An existing `manifest.json` is removed before anything else is written, and the new one is
 /// written last; its presence marks `out` as a complete bundle for [`index::data_home`].
@@ -2399,29 +2398,28 @@ fn pack_data(
     // trim drops every patch-only name. See `referenced_hashes`.
     overlays: &[String],
 ) -> Result<(), String> {
-    use mercs2_formats::game_paths::{local_config_notes_docs_dir, LOCAL_CONFIG};
+    use mercs2_engine::script::corpus;
+    use mercs2_formats::game_paths::LOCAL_CONFIG;
     let start = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-    let notes_docs = local_config_notes_docs_dir(&start)?;
     let mut files: Vec<(std::path::PathBuf, &str)> = Vec::new();
     for name in ["live_registry_hashes.csv", "spawnable_templates.csv"] {
-        files.push((index::notes_data_file(&notes_docs, name)?, name));
+        files.push((index::crate_data_file(name)?, name));
     }
-    let mut trees: Vec<(std::path::PathBuf, &str)> = Vec::new();
-    for (rel, dest) in [
-        ("mercs2-ecs", "ecs_schemas"),
-        ("mercs2-luacd/src", "lua"),
-        ("mercs2-dlc-luacd/src", "lua_dlc"),
-    ] {
-        let src = notes_docs.join(rel);
-        if !src.is_dir() {
-            return Err(format!(
-                "{} is not a directory (`notes_docs_dir` in {LOCAL_CONFIG} names {})",
-                src.display(),
-                notes_docs.display()
-            ));
-        }
-        trees.push((src, dest));
+    let ecs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join("mercs2-ecs");
+    if !ecs.is_dir() {
+        return Err(format!(
+            "{} is not a directory (committed in the checkout {} was built from)",
+            ecs.display(),
+            env!("CARGO_PKG_NAME")
+        ));
     }
+    let lua = corpus::root().ok_or(format!(
+        "the script corpus mercs2_script/corpus/mercs2-luacd/src (or {}) is not a directory",
+        corpus::CORPUS_ENV
+    ))?;
+    let lua_dlc = corpus::dlc_root()
+        .ok_or("the DLC script corpus mercs2_script/corpus/mercs2-dlc-luacd/src is not a directory")?;
+    let trees: Vec<(std::path::PathBuf, &str)> = vec![(ecs, "ecs_schemas"), (lua, "lua"), (lua_dlc, "lua_dlc")];
     let repo = repo_root();
     let repo_bundle = repo.join("workshop_data");
     for name in REPO_BUNDLE_FILES {

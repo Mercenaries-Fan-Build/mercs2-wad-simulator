@@ -1,6 +1,6 @@
 //! `AiWaterZone` — the AI water-zone reflection component.
 //!
-//! Cross-ref [`ai_code_map.md`](../../../../docs/reverse_engineer/ai_code_map.md) §3/§4: `AiWaterZone`
+//! Cross-ref [`ai_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/ai_code_map.md) §3/§4: `AiWaterZone`
 //! is a real AI reflection component — m2 hash **`0xdf6533de`**, descriptor builder `FUN_0065c520` /
 //! `FUN_00641560`, **stride `0x04`** (a single enum column). It tags a region of the world with an AI
 //! water-type so navigation/behaviour can react to water (e.g. avoid, or allow amphibious traversal).

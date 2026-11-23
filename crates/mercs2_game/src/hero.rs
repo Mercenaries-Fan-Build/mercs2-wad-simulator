@@ -13,7 +13,7 @@
 //!
 //! Upgrade-template MODELS: tier 0 = the hero base model (verified in vz.wad). The tier 1-3 template
 //! models are NOT yet extracted from their templates (registry handles 0x8000A1BE..,
-//! docs/data/live_registry_hashes.csv), so a save is drawn in its costume's model or the base model.
+//! crates/mercs2_workshop/data/live_registry_hashes.csv), so a save is drawn in its costume's model or the base model.
 
 pub struct Hero {
     /// `_tCharacterMap.base` id.

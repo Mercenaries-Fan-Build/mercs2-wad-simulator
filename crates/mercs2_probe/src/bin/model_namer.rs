@@ -23,7 +23,10 @@
 //! set — probability ~1e-8 per model. Every hit is additionally corroborated by the fact that the
 //! name came out of the model's own MTRL.
 //!
-//! usage: model_namer [--emit <fragment.json>] [--limit N]
+//! Names and model hashes come from this repository's `docs/data/aset_names.csv`. `--block-strings`
+//! is the string corpus `block_string_harvest --corpus` writes.
+//!
+//! usage: model_namer --block-strings <block_strings.txt> [--emit <fragment.json>] [--limit N]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -59,14 +62,15 @@ fn candidates(name: &str) -> Vec<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let emit = args.iter().position(|a| a == "--emit").and_then(|i| args.get(i + 1)).cloned();
+    let Some(block_strings) = args.iter().position(|a| a == "--block-strings").and_then(|i| args.get(i + 1)).cloned()
+    else {
+        eprintln!("usage: model_namer --block-strings <block_strings.txt> [--emit <fragment.json>] [--limit N]");
+        std::process::exit(2);
+    };
 
     // hash -> name, and the set of model hashes, from the ASET export (the WAD's own dictionary).
-    let csv = ["docs/data/aset_names.csv", "../../docs/data/aset_names.csv"]
-        .iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.is_file())
-        .expect("aset_names.csv");
-    let text = std::fs::read_to_string(&csv).expect("read aset_names.csv");
+    let csv = mercs2_formats::game_paths::repo_root().join("docs").join("data").join("aset_names.csv");
+    let text = std::fs::read_to_string(&csv).unwrap_or_else(|e| panic!("read {}: {e}", csv.display()));
 
     let mut name_of: HashMap<u32, String> = HashMap::new();
     let mut models: Vec<u32> = Vec::new();
@@ -117,8 +121,8 @@ fn main() {
     // against the unnamed model set only, so a hit is a verified preimage of that specific model.
     let mut by_string: BTreeMap<u32, String> = BTreeMap::new();
     let unnamed_set: std::collections::HashSet<u32> = unnamed.iter().copied().collect();
-    for p in ["output/block_strings.txt", "../../output/block_strings.txt"] {
-        let Ok(text) = std::fs::read_to_string(p) else { continue };
+    {
+        let text = std::fs::read_to_string(&block_strings).unwrap_or_else(|e| panic!("read {block_strings}: {e}"));
         let mut scanned = 0usize;
         for line in text.lines() {
             let s = line.trim();
@@ -132,7 +136,6 @@ fn main() {
             }
         }
         eprintln!("block strings: {scanned} scanned, {} unnamed models named", by_string.len());
-        break;
     }
 
     // ── DECORATIONS, mined from the corpus rather than guessed ───────────────────────

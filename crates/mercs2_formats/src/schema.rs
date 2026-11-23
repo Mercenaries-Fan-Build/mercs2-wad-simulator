@@ -122,7 +122,7 @@ impl SchemaFieldType {
 /// Retail: `HibernationControl` packs two 1-bit fields in byte 5 (starts 0 and 1), `Health` three
 /// 1-bit fields in the u32 at 4, `HumanInventory` fields of widths 1/7/8/8/8 at starts 0/1/8/16/24
 /// in the u32 at 20. Over every bit-field unit of the retail `worldentity`, no bit outside the
-/// declared fields is set. See `docs/spatial_hash_crash_analysis.md` (the RCA that established the
+/// declared fields is set. See [`docs/spatial_hash_crash_analysis.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/spatial_hash_crash_analysis.md) (the RCA that established the
 /// low-16 convention) and `docs/schm_type_codes.md`.
 #[derive(Debug, Clone)]
 pub struct SchemaField {

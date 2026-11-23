@@ -83,7 +83,7 @@ struct Cli {
     /// by `asset_gap_probe --emit`). When given, these tables are exactly the set
     /// loaded. When absent, the set is `rainbow_table` from `.mercs2-local.toml`,
     /// the `aset_*_names.json` fragments in `crates/mercs2_workshop/data/`, and the
-    /// identifier-shaped names of `data/aset_block_strings.json` under its `notes_docs_dir`
+    /// identifier-shaped names of this repository's `docs/data/aset_block_strings.json`
     /// minus `crates/mercs2_workshop/data/rejected_names.json`. Every table must load.
     #[arg(long)]
     rainbow: Vec<PathBuf>,
@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         // The name fragments are committed in the workshop crate (its `data/README.md`).
         let data = start.join("../mercs2_workshop/data");
-        let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let notes = mercs2_formats::game_paths::repo_root().join("docs").join("data");
         let first = [mercs2_formats::game_paths::local_config_rainbow_table(start)?, data.join("aset_discovered_names.json")];
         // Fragments cracked from the WAD itself:
         //   asset_gap_probe      — texture-base -> model convention

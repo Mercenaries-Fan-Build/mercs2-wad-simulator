@@ -31,9 +31,9 @@ Pandemic's Pimp multi-CPU job library (Xbox source path `d:\mainline\mercs2\pimp
 a "true novel system" — **100% string-only on the Xbox build** (zero decomp hits). The PC
 build keeps the real architecture, and that is what was recovered:
 
-- Code map: `docs/reverse_engineer/pimp_job_system_code_map.md` (companion to the Keystone PC
+- Code map: [`docs/reverse_engineer/pimp_job_system_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/pimp_job_system_code_map.md) (companion to the Keystone PC
   code-map recovery: master tick order, event bus, Pimp jobs).
-- Xbox oracle: `docs/mercs2-pdb-analysis/jobs-threading.md`.
+- Xbox oracle: [`docs/mercs2-pdb-analysis/jobs-threading.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/jobs-threading.md).
 
 Everything in the crate traces to a section of that code map:
 

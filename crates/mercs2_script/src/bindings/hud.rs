@@ -2,7 +2,7 @@
 //!
 //! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
-//! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
+//! `corpus_calls` = call sites observed in `corpus/mercs2-luacd/src`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
 //! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
@@ -418,25 +418,31 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // A widget location is a RECT `[x1, y1, x2, y2]`, and `Widget:GetLocation()` destructures four
     // values back out (`mrxguibase.lua:759`).
     //
-    // The bottom-right corner is **optional**: `Widget:SetLocation(x, y, x1, y1)` forwards whatever
-    // it was given, and auto-sizing widgets are placed by top-left alone — e.g.
-    // `MrxGuiLoadScreen.InitSaveIcon` does `oText:SetLocation(128, 68)`, so args #4/#5 arrive nil.
-    // A trailing "resize children" flag is also optional (`mrxguibase.lua:747/756` pass it,
+    // `FUN_005B4FA0` (`https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hud_widget_code_map.md` §3.2) reads the current rect, then
+    // each of the four coordinates through `FUN_0059F780` (`lua_isnumber`, then `lua_tonumber`): one
+    // that is not a number keeps the current value. Given `x1` and `y1` and neither far corner, it
+    // moves the widget (vtbl `+0x14`, `0x00627270`: the offset is added to all four, so the size is
+    // kept), as `MrxGuiLoadScreen.InitSaveIcon`'s `oText:SetLocation(128, 68)` does; any other mix
+    // sets the whole rect (vtbl `+0x10`), as `MrxGuiHudFactionGauge`'s `SetLocation(nX2, nil, nX2, nil)`
+    // does. A trailing "resize children" flag is optional (`mrxguibase.lua:747/756` pass it,
     // `TextWidget:SetLocation` at :949 does not).
-    //
-    // When the far corner is omitted we collapse it onto the near corner (a zero-size rect at the
-    // requested position) rather than leaving zeros, so that `OffsetLocation`'s `nX2 + x` arithmetic
-    // stays meaningful. The retail cfunc's own nil handling is unverified — confirm-live.
-    fn rect(x1: f32, y1: f32, x2: Option<f32>, y2: Option<f32>) -> [f32; 4] {
-        [x1, y1, x2.unwrap_or(x1), y2.unwrap_or(y1)]
+    fn rect(current: [f32; 4], args: [Option<f32>; 4]) -> [f32; 4] {
+        match args {
+            [Some(x), Some(y), None, None] => {
+                let (dx, dy) = (x - current[0], y - current[1]);
+                [x, y, current[2] + dx, current[3] + dy]
+            }
+            _ => std::array::from_fn(|i| args[i].unwrap_or(current[i])),
+        }
     }
-    b.real("SetWidgetLocation", lua.create_function(move |_, (wid, x1, y1, x2, y2, _resize): (i64, f32, f32, Option<f32>, Option<f32>, Option<bool>)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.location = rect(x1, y1, x2, y2); } }
+    b.real("SetWidgetLocation", lua.create_function(move |_, (wid, x1, y1, x2, y2, _resize): (i64, Value, Value, Value, Value, Option<bool>)| {
+        let args = [&x1, &y1, &x2, &y2].map(|v| super::pg::lua_number(Some(v)));
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.location = rect(w.location, args); } }
         Ok(())
     })?)?;
     let hh = host.clone();
     b.real("SetWidgetCorrectedLocation", lua.create_function(move |_, (wid, x1, y1, x2, y2): (i64, f32, f32, Option<f32>, Option<f32>)| {
-        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.corrected_location = rect(x1, y1, x2, y2); } }
+        if let Some(t) = hh.borrow_mut().hud() { if let Some(w) = t.get_mut(wid as u64) { w.corrected_location = [x1, y1, x2.unwrap_or(x1), y2.unwrap_or(y1)]; } }
         Ok(())
     })?)?;
     let hh = host.clone();

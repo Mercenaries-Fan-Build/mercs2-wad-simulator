@@ -22,7 +22,7 @@ use mercs2_formats::texture::TextureData;
 /// `FUN_004BFAF0` dispatches one slot per state pair, and teardown closes them in exact reverse.
 /// Because the readers always open as a group and claim array slots in order,
 /// **slot index == mount order == resolution rank**
-/// (`docs/fixpack/wad_duplicate_inventory.md` §B.1–B.3, evidence: `proven`).
+/// ([`docs/fixpack/wad_duplicate_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/wad_duplicate_inventory.md) §B.1–B.3, evidence: `proven`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MountSlot {
     /// 0 — `Loading.wad`. Boot archive: the minimum needed to draw a loading screen.

@@ -1,0 +1,47 @@
+Type = "Time"
+SubtitleData = {
+  {
+    0.73,
+    "[Jennifer-Briefing-Cinematic-YourNewHome-11]"
+  },
+  {
+    6.06,
+    "[Fiona-Briefing-Cinematic-YourNewHome-14]"
+  },
+  {
+    9.31,
+    "[Fiona-Briefing-Cinematic-YourNewHome-19]"
+  },
+  {
+    12,
+    "[Jennifer-Briefing-Cinematic-YourNewHome-21]"
+  },
+  {
+    13.44,
+    "[Fiona-Briefing-Cinematic-YourNewHome-23]"
+  },
+  {
+    16.69,
+    "[Jennifer-Briefing-Cinematic-YourNewHome-25]"
+  },
+  {
+    18.22,
+    "[Fiona-Briefing-Cinematic-YourNewHome-27]"
+  },
+  {
+    21.2,
+    "[Jennifer-Briefing-Cinematic-YourNewHome-29]"
+  },
+  {
+    24.43,
+    "[Fiona-Briefing-Cinematic-YourNewHome-31]"
+  },
+  {
+    27.38,
+    "[Fiona-Briefing-Cinematic-YourNewHome-32]"
+  },
+  {
+    29,
+    "[Jennifer-Briefing-Cinematic-YourNewHome-34]"
+  }
+}

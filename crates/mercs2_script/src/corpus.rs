@@ -45,19 +45,20 @@ pub fn root() -> Option<PathBuf> {
     vendored.is_dir().then(|| vendored.canonicalize().unwrap_or(vendored))
 }
 
-/// The stand-in root (`<crate>/corpus/stubs`) for shipped modules the 370/382 decompile lacks.
+/// The DLC corpus root (`<crate>/corpus/mercs2-dlc-luacd/src`): the decompiled Lua of the console
+/// DLC levels, one folder per level. Not a module root of the retail script host.
 ///
-/// Search it **after** [`root`], so a module that later decompiles automatically shadows its stand-in.
-pub fn stubs() -> Option<PathBuf> {
-    let dir = crate_root().join("corpus").join("stubs");
-    dir.is_dir().then(|| dir.canonicalize().unwrap_or(dir))
+/// `None` only if the vendored tree is absent.
+pub fn dlc_root() -> Option<PathBuf> {
+    let vendored = crate_root().join("corpus").join("mercs2-dlc-luacd").join("src");
+    vendored.is_dir().then(|| vendored.canonicalize().unwrap_or(vendored))
 }
 
-/// The module roots a script host should be built with: the corpus first, then the stand-ins.
+/// The module roots a script host should be built with: the corpus.
 ///
 /// Empty when the corpus is absent, which callers treat as "skip, do not fail".
 pub fn roots() -> Vec<PathBuf> {
-    root().into_iter().chain(stubs()).collect()
+    root().into_iter().collect()
 }
 
 /// The one-line message a test or example should print when [`root`] returns `None`, naming the
@@ -88,15 +89,36 @@ mod tests {
         assert!(root.join("shell").is_dir(), "shell/ present");
     }
 
-    /// The stand-in root resolves too, and [`roots`] orders the corpus ahead of it so a real module
-    /// always wins a name collision against our stand-in.
+    /// The DLC corpus is vendored beside it, one folder per DLC level.
     #[test]
-    fn stubs_resolve_and_are_searched_after_the_corpus() {
-        assert!(stubs().expect("stub root is vendored").is_dir());
-        let roots = roots();
-        assert_eq!(roots.len(), 2);
-        assert!(roots[0].ends_with("src"), "the corpus is searched first");
-        assert!(roots[1].ends_with("stubs"), "the stand-ins are searched second");
+    fn the_vendored_dlc_corpus_resolves() {
+        let root = dlc_root().expect("the DLC corpus is vendored in-tree and must resolve");
+        assert!(root.join("dlc01").is_dir(), "dlc01/ present");
+        assert!(root.join("dlctest01").is_dir(), "dlctest01/ present");
+    }
+
+    /// The script host's module roots are the corpus alone.
+    #[test]
+    fn the_module_roots_are_the_corpus() {
+        assert_eq!(roots(), vec![root().expect("the corpus is vendored in-tree")]);
+    }
+
+    /// The subtitle modules `MrxGuiCinematic.ShowMovie` imports ship in the corpus, each with its
+    /// `SubtitleData` table (`resident/mrxguicinematic.lua` re-enters `ShowMovie` until it has one).
+    #[test]
+    fn the_subtitle_modules_are_in_the_corpus() {
+        let dir = root().expect("the corpus is vendored in-tree").join("vz_subtitles");
+        let mut n = 0;
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            if name.starts_with("subtitles_") && name.ends_with(".lua") {
+                let text = std::fs::read_to_string(&p).unwrap();
+                assert!(text.contains("SubtitleData = {"), "{name} has a SubtitleData table");
+                n += 1;
+            }
+        }
+        assert_eq!(n, 35, "the 35 subtitle modules in {}", dir.display());
     }
 
     /// The skip notice names the override, because that string is the only guidance a consumer without

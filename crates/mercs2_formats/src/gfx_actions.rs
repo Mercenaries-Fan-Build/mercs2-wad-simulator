@@ -1,4 +1,10 @@
 //! Edits to the action blocks of a GFx movie, every other byte of the movie copied unchanged.
+//! [`read_actions`] / [`write_actions`], [`push_values`] / [`push_payload`] and [`pool`] / [`pool_payload`]
+//! read a block's records, a `Push`'s values and a `ConstantPool`'s strings as stored and write them back
+//! to the same bytes (every block of every movie: the workshop's `every_action_block_writes_back`).
+//! [`Program`] holds a block's records with every branch target and body end as a record index, so
+//! records can be inserted anywhere and the block encoded again with every position recomputed (the
+//! same gate checks every block encodes back to its bytes).
 //! [`swap_constant`] replaces one string of the `ConstantPool` in chosen action blocks; [`patch_actions`]
 //! finds and replaces whole actions in chosen action blocks, remapping every branch and function size
 //! across the changed lengths. `mercs2_probe gfx-swap-constant` and `gfx-patch-actions` run them on a file.
@@ -16,7 +22,8 @@
 //! length counts the bytes through `End`; bytes after `End` (retail SHELL has 1285) are kept verbatim
 //! and stay uncounted.
 
-use std::io::{Read, Write};
+use crate::gfx_stream::{Tag, TagBody, TagStream};
+use crate::gfx_tags;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -39,68 +46,8 @@ impl Target {
     }
 }
 
-const TAG_END: u16 = 0;
-const TAG_SHOW_FRAME: u16 = 1;
-const TAG_DO_ACTION: u16 = 12;
-const TAG_DEFINE_SPRITE: u16 = 39;
 const ACTION_CONSTANT_POOL: u8 = 0x88;
 const ACTION_PUSH: u8 = 0x96;
-
-struct Tag<'a> {
-    code: u16,
-    long: bool,
-    body: &'a [u8],
-}
-
-/// The tags up to and including `End`, and the offset just past `End` (`data.len()` when there is none).
-fn read_tags_to_end(data: &[u8]) -> Result<(Vec<Tag<'_>>, usize), String> {
-    let tags = read_tags(data)?;
-    let end = tags.iter().map(|t| 2 + if t.long { 4 } else { 0 } + t.body.len()).sum();
-    Ok((tags, end))
-}
-
-fn read_tags(data: &[u8]) -> Result<Vec<Tag<'_>>, String> {
-    let mut tags = Vec::new();
-    let mut off = 0;
-    while off < data.len() {
-        if off + 2 > data.len() {
-            return Err(format!("tag header truncated at {off:#x}"));
-        }
-        let rh = u16::from_le_bytes([data[off], data[off + 1]]);
-        off += 2;
-        let code = rh >> 6;
-        let mut len = usize::from(rh & 0x3f);
-        let long = len == 0x3f;
-        if long {
-            if off + 4 > data.len() {
-                return Err(format!("long tag length truncated at {off:#x}"));
-            }
-            len = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as usize;
-            off += 4;
-        }
-        if off + len > data.len() {
-            return Err(format!("tag {code} at {off:#x} overruns its stream ({len} bytes)"));
-        }
-        tags.push(Tag { code, long, body: &data[off..off + len] });
-        off += len;
-        if code == TAG_END {
-            break;
-        }
-    }
-    Ok(tags)
-}
-
-fn write_tag(out: &mut Vec<u8>, code: u16, long: bool, body: &[u8]) -> Result<(), String> {
-    if long || body.len() >= 0x3f {
-        let len = u32::try_from(body.len()).map_err(|_| format!("tag {code} body above 4 GiB"))?;
-        out.extend_from_slice(&((code << 6) | 0x3f).to_le_bytes());
-        out.extend_from_slice(&len.to_le_bytes());
-    } else {
-        out.extend_from_slice(&((code << 6) | body.len() as u16).to_le_bytes());
-    }
-    out.extend_from_slice(body);
-    Ok(())
-}
 
 /// The action records of a block as `(code, offset of the record, payload)`.
 fn actions(block: &[u8]) -> Result<Vec<(u8, usize, &[u8])>, String> {
@@ -150,32 +97,626 @@ fn pool_strings(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
     Ok(strings)
 }
 
-/// The inline strings of a `Push` payload.
-fn push_strings(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
+/// One action record as written: its code and, for a code of `0x80` or more, its payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Action {
+    pub code: u8,
+    pub payload: Vec<u8>,
+}
+
+/// A block's action records through its `End` (code 0), and the bytes after that `End`.
+pub fn read_actions(block: &[u8]) -> Result<(Vec<Action>, Vec<u8>), String> {
+    let acts = actions(block)?;
+    let read: usize = acts.iter().map(|(c, _, p)| record_len(*c, p)).sum();
+    Ok((acts.into_iter().map(|(code, _, payload)| Action { code, payload: payload.to_vec() }).collect(), block[read..].to_vec()))
+}
+
+/// The records and the bytes after them, as [`read_actions`] reads them.
+pub fn write_actions(actions: &[Action], after: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for a in actions {
+        out.push(a.code);
+        if a.code >= 0x80 {
+            let len = u16::try_from(a.payload.len()).map_err(|_| format!("action {:#x}: a {}-byte payload past 65535", a.code, a.payload.len()))?;
+            out.extend(len.to_le_bytes());
+            out.extend(&a.payload);
+        } else if !a.payload.is_empty() {
+            return Err(format!("action {:#x} is below 0x80 and has no payload to carry {} bytes", a.code, a.payload.len()));
+        }
+    }
+    out.extend(after);
+    Ok(out)
+}
+
+/// One value of a `Push`, as stored: numbers keep their bits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushValue {
+    /// Type 0.
+    Str(Vec<u8>),
+    /// Type 1: an `f32`'s bits.
+    Float(u32),
+    /// Type 2.
+    Null,
+    /// Type 3.
+    Undefined,
+    /// Type 4.
+    Register(u8),
+    /// Type 5.
+    Bool(u8),
+    /// Type 6: SWF's double, its two 32-bit halves swapped, as stored.
+    Double([u8; 8]),
+    /// Type 7.
+    Int(u32),
+    /// Type 8: a constant-pool index in one byte.
+    Constant8(u8),
+    /// Type 9: a constant-pool index in two bytes.
+    Constant16(u16),
+}
+
+/// The values of a `Push` payload.
+pub fn push_values(payload: &[u8]) -> Result<Vec<PushValue>, String> {
     let mut out = Vec::new();
     let mut off = 0;
     while off < payload.len() {
         let ty = payload[off];
         off += 1;
-        let size = match ty {
+        let take = |off: &mut usize, n: usize| -> Result<&[u8], String> {
+            let b = payload.get(*off..*off + n).ok_or_else(|| format!("Push value type {ty} overruns its action"))?;
+            *off += n;
+            Ok(b)
+        };
+        out.push(match ty {
             0 => {
                 let end = payload[off..].iter().position(|&b| b == 0).ok_or("Push string has no terminator")?;
-                out.push(&payload[off..off + end]);
-                end + 1
+                let s = payload[off..off + end].to_vec();
+                off += end + 1;
+                PushValue::Str(s)
             }
-            1 | 7 => 4,
-            2 | 3 => 0,
-            4 | 5 | 8 => 1,
-            6 => 8,
-            9 => 2,
+            1 => PushValue::Float(u32::from_le_bytes(take(&mut off, 4)?.try_into().expect("4 bytes"))),
+            2 => PushValue::Null,
+            3 => PushValue::Undefined,
+            4 => PushValue::Register(take(&mut off, 1)?[0]),
+            5 => PushValue::Bool(take(&mut off, 1)?[0]),
+            6 => PushValue::Double(take(&mut off, 8)?.try_into().expect("8 bytes")),
+            7 => PushValue::Int(u32::from_le_bytes(take(&mut off, 4)?.try_into().expect("4 bytes"))),
+            8 => PushValue::Constant8(take(&mut off, 1)?[0]),
+            9 => PushValue::Constant16(u16::from_le_bytes(take(&mut off, 2)?.try_into().expect("2 bytes"))),
             _ => return Err(format!("Push value type {ty} is not an SWF 8 type")),
-        };
-        if off + size > payload.len() {
-            return Err(format!("Push value type {ty} overruns its action"));
-        }
-        off += size;
+        });
     }
     Ok(out)
+}
+
+/// The payload of a `Push` of `values`.
+pub fn push_payload(values: &[PushValue]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for v in values {
+        match v {
+            PushValue::Str(s) => {
+                if s.contains(&0) {
+                    return Err(format!("a pushed string {:?} holds a zero byte", String::from_utf8_lossy(s)));
+                }
+                out.push(0);
+                out.extend(s);
+                out.push(0);
+            }
+            PushValue::Float(bits) => {
+                out.push(1);
+                out.extend(bits.to_le_bytes());
+            }
+            PushValue::Null => out.push(2),
+            PushValue::Undefined => out.push(3),
+            PushValue::Register(r) => out.extend([4, *r]),
+            PushValue::Bool(b) => out.extend([5, *b]),
+            PushValue::Double(d) => {
+                out.push(6);
+                out.extend(d);
+            }
+            PushValue::Int(i) => {
+                out.push(7);
+                out.extend(i.to_le_bytes());
+            }
+            PushValue::Constant8(i) => out.extend([8, *i]),
+            PushValue::Constant16(i) => {
+                out.push(9);
+                out.extend(i.to_le_bytes());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The strings of a `ConstantPool` payload.
+pub fn pool(payload: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    Ok(pool_strings(payload)?.into_iter().map(<[u8]>::to_vec).collect())
+}
+
+/// The payload of a `ConstantPool` of `strings`.
+pub fn pool_payload(strings: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let count = u16::try_from(strings.len()).map_err(|_| format!("{} pool strings do not fit a u16 count", strings.len()))?;
+    let mut out = count.to_le_bytes().to_vec();
+    for s in strings {
+        if s.contains(&0) {
+            return Err(format!("a pool string {:?} holds a zero byte", String::from_utf8_lossy(s)));
+        }
+        out.extend(s);
+        out.push(0);
+    }
+    Ok(out)
+}
+
+/// One record of a [`Program`]. Its payload is kept as stored except the bytes that hold a position (a
+/// `Jump`/`If` offset, a function's code size, a `With` size, a `Try`'s three sizes): those are zero in
+/// the program and written from `to` by [`Program::encode`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Op {
+    pub code: u8,
+    pub payload: Vec<u8>,
+    /// Record indices: a `Jump`/`If`'s target; the end of a function's or a `With`'s body; the ends of a
+    /// `Try`'s try, catch and finally blocks. The block's end is `ops.len()`.
+    pub to: Vec<usize>,
+}
+
+/// A block's records with every position held as a record index, so records can be inserted, removed
+/// or replaced anywhere and [`Program::encode`] lays the block out again with every branch and size
+/// recomputed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    pub ops: Vec<Op>,
+    /// The bytes after `End`, kept verbatim.
+    pub after: Vec<u8>,
+}
+
+/// The byte offsets of the size fields of a `Try` payload: try, catch, finally.
+const TRY_SIZES: [usize; 3] = [1, 3, 5];
+
+impl Program {
+    /// `block` read as records; every position must land on a record's first byte or the block's end.
+    pub fn decode(block: &[u8]) -> Result<Program, String> {
+        let acts = actions(block)?;
+        let read: usize = acts.iter().map(|(c, _, p)| record_len(*c, p)).sum();
+        let index_of = |pos: isize, what: &str, start: usize| -> Result<usize, String> {
+            if pos == read as isize {
+                return Ok(acts.len());
+            }
+            usize::try_from(pos)
+                .ok()
+                .and_then(|p| acts.binary_search_by_key(&p, |(_, s, _)| *s).ok())
+                .ok_or_else(|| format!("the {what} of the record at {start:#x} lands at {pos:#x}, not on a record"))
+        };
+        let mut ops = Vec::with_capacity(acts.len());
+        for (code, start, payload) in &acts {
+            let next = start + record_len(*code, payload);
+            let u16_at = |at: usize| -> Result<usize, String> {
+                payload
+                    .get(at..at + 2)
+                    .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+                    .ok_or_else(|| format!("the record {code:#x} at {start:#x} is too short for its sizes"))
+            };
+            let to = match *code {
+                ACTION_JUMP | ACTION_IF => vec![index_of(branch_target(*start, payload)?, "branch", *start)?],
+                ACTION_DEFINE_FUNCTION | ACTION_DEFINE_FUNCTION2 => {
+                    let (_, end) = function_body(*start, payload)?;
+                    vec![index_of(end as isize, "function end", *start)?]
+                }
+                ACTION_WITH => vec![index_of((next + u16_at(0)?) as isize, "With end", *start)?],
+                ACTION_TRY => {
+                    let mut end = next;
+                    let mut ends = Vec::with_capacity(3);
+                    for at in TRY_SIZES {
+                        end += u16_at(at)?;
+                        ends.push(index_of(end as isize, "Try block end", *start)?);
+                    }
+                    ends
+                }
+                _ => Vec::new(),
+            };
+            // The position bytes are written by `encode` from `to`; held as zero, two programs that
+            // differ only in layout compare equal.
+            let mut payload = payload.to_vec();
+            let n = payload.len();
+            let zero: &[usize] = match *code {
+                ACTION_JUMP | ACTION_IF | ACTION_WITH => &[0],
+                ACTION_DEFINE_FUNCTION | ACTION_DEFINE_FUNCTION2 => &[n - 2],
+                ACTION_TRY => &TRY_SIZES,
+                _ => &[],
+            };
+            for &at in zero {
+                payload[at..at + 2].fill(0);
+            }
+            ops.push(Op { code: *code, payload, to });
+        }
+        Ok(Program { ops, after: block[read..].to_vec() })
+    }
+
+    /// The block's bytes: every record laid out in order, every position written from its `to`.
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let mut at = Vec::with_capacity(self.ops.len() + 1);
+        let mut pos = 0usize;
+        for op in &self.ops {
+            at.push(pos);
+            pos += record_len(op.code, &op.payload);
+        }
+        at.push(pos);
+        let place = |i: usize, to: usize| -> Result<usize, String> {
+            at.get(to).copied().ok_or_else(|| format!("record {i} points at record {to}, past the block's {} records", self.ops.len()))
+        };
+        let mut out = Vec::with_capacity(pos + self.after.len());
+        for (i, op) in self.ops.iter().enumerate() {
+            let next = at[i + 1];
+            let mut payload = op.payload.clone();
+            let size = |from: usize, to: usize| -> Result<[u8; 2], String> {
+                let n = to.checked_sub(from).ok_or_else(|| format!("record {i}: a block that ends before it starts"))?;
+                Ok(u16::try_from(n).map_err(|_| format!("record {i}: a {n}-byte block past 65535"))?.to_le_bytes())
+            };
+            let want = match op.code {
+                ACTION_JUMP | ACTION_IF | ACTION_DEFINE_FUNCTION | ACTION_DEFINE_FUNCTION2 | ACTION_WITH => 1,
+                ACTION_TRY => 3,
+                _ => 0,
+            };
+            if op.to.len() != want {
+                return Err(format!("record {i} ({:#x}) has {} positions, not {want}", op.code, op.to.len()));
+            }
+            match op.code {
+                ACTION_JUMP | ACTION_IF => {
+                    if payload.len() != 2 {
+                        return Err(format!("record {i}: a branch with a {}-byte payload, not 2", payload.len()));
+                    }
+                    let delta = place(i, op.to[0])? as isize - next as isize;
+                    let off = i16::try_from(delta).map_err(|_| format!("record {i}: a branch of {delta} bytes past 16 bits"))?;
+                    payload.copy_from_slice(&off.to_le_bytes());
+                }
+                ACTION_DEFINE_FUNCTION | ACTION_DEFINE_FUNCTION2 => {
+                    let n = payload.len();
+                    if n < 2 {
+                        return Err(format!("record {i}: a function with no code size"));
+                    }
+                    let s = size(next, place(i, op.to[0])?)?;
+                    payload[n - 2..].copy_from_slice(&s);
+                }
+                ACTION_WITH => {
+                    let s = size(next, place(i, op.to[0])?)?;
+                    payload.get_mut(0..2).ok_or_else(|| format!("record {i}: a With with no size"))?.copy_from_slice(&s);
+                }
+                ACTION_TRY => {
+                    let mut from = next;
+                    for (k, at_field) in TRY_SIZES.into_iter().enumerate() {
+                        let end = place(i, op.to[k])?;
+                        let s = size(from, end)?;
+                        payload.get_mut(at_field..at_field + 2).ok_or_else(|| format!("record {i}: a Try too short for its sizes"))?.copy_from_slice(&s);
+                        from = end;
+                    }
+                }
+                _ => {}
+            }
+            out.push(op.code);
+            if op.code >= 0x80 {
+                let len = u16::try_from(payload.len()).map_err(|_| format!("record {i}: a {}-byte payload past 65535", payload.len()))?;
+                out.extend(len.to_le_bytes());
+                out.extend(&payload);
+            } else if !payload.is_empty() {
+                return Err(format!("record {i} ({:#x}) is below 0x80 and cannot carry a payload", op.code));
+            }
+        }
+        out.extend(&self.after);
+        Ok(out)
+    }
+
+    /// Inserts `new` before record `at`, so a position that named record `at` or later now names the same
+    /// record. A position held by `new` is relative to `new` itself (0 = its first record, `new.len()` =
+    /// the record after it) unless it is listed in `outside`, which keeps absolute positions of the
+    /// program as it was before the insert.
+    pub fn insert(&mut self, at: usize, new: Vec<Op>, outside: &[(usize, usize)]) -> Result<(), String> {
+        if at > self.ops.len() {
+            return Err(format!("insert at record {at}, past the block's {} records", self.ops.len()));
+        }
+        let n = new.len();
+        for op in &mut self.ops {
+            for t in &mut op.to {
+                if *t >= at {
+                    *t += n;
+                }
+            }
+        }
+        let mut new = new;
+        for (k, op) in new.iter_mut().enumerate() {
+            for (j, t) in op.to.iter_mut().enumerate() {
+                if outside.contains(&(k, j)) {
+                    if *t > self.ops.len() {
+                        return Err(format!("inserted record {k} points at record {t}, past the block"));
+                    }
+                    if *t >= at {
+                        *t += n;
+                    }
+                } else {
+                    if *t > n {
+                        return Err(format!("inserted record {k} points at its record {t}, past the {n} inserted"));
+                    }
+                    *t += at;
+                }
+            }
+        }
+        self.ops.splice(at..at, new);
+        Ok(())
+    }
+
+    /// Records `from..to` replaced by `new`. A position elsewhere that named record `from` now names the
+    /// first new record; one that named a later record in the range is refused. Positions held by `new`
+    /// follow [`Program::insert`]'s rule: relative to `new` unless listed in `outside`, which are positions
+    /// of the program as it was.
+    pub fn replace(&mut self, from: usize, to: usize, new: Vec<Op>, outside: &[(usize, usize)]) -> Result<(), String> {
+        if from > to || to > self.ops.len() {
+            return Err(format!("replace records {from}..{to} of a block of {}", self.ops.len()));
+        }
+        let n = new.len();
+        let gone = to - from;
+        let map = |t: usize, who: &str| -> Result<usize, String> {
+            if t <= from {
+                Ok(t)
+            } else if t < to {
+                Err(format!("{who} points at record {t}, inside the replaced records {from}..{to}"))
+            } else {
+                Ok(t - gone + n)
+            }
+        };
+        for (i, op) in self.ops.iter_mut().enumerate() {
+            if (from..to).contains(&i) {
+                continue;
+            }
+            for t in &mut op.to {
+                *t = map(*t, &format!("record {i}"))?;
+            }
+        }
+        let mut new = new;
+        for (k, op) in new.iter_mut().enumerate() {
+            for (j, t) in op.to.iter_mut().enumerate() {
+                if outside.contains(&(k, j)) {
+                    *t = map(*t, &format!("new record {k}"))?;
+                } else if *t > n {
+                    return Err(format!("new record {k} points at its record {t}, past the {n} new"));
+                } else {
+                    *t += from;
+                }
+            }
+        }
+        self.ops.splice(from..to, new);
+        Ok(())
+    }
+
+    /// Records `from..to` copied for [`Program::insert`] or [`Program::replace`]: a position inside the
+    /// range (or at its end) becomes relative to it, any other stays absolute and is listed in the second
+    /// value.
+    pub fn clone_range(&self, from: usize, to: usize) -> Result<(Vec<Op>, Vec<(usize, usize)>), String> {
+        let ops = self.ops.get(from..to).ok_or_else(|| format!("records {from}..{to} of a block of {}", self.ops.len()))?;
+        let mut outside = Vec::new();
+        let mut out = Vec::with_capacity(ops.len());
+        for (k, op) in ops.iter().enumerate() {
+            let mut op = op.clone();
+            for (j, t) in op.to.iter_mut().enumerate() {
+                if (from..=to).contains(t) {
+                    *t -= from;
+                } else {
+                    outside.push((k, j));
+                }
+            }
+            out.push(op);
+        }
+        Ok((out, outside))
+    }
+
+    /// The strings of the block's `ConstantPool`, which must be its first record when it has one.
+    pub fn pool(&self) -> Result<Vec<Vec<u8>>, String> {
+        let mut pools = self.ops.iter().enumerate().filter(|(_, o)| o.code == ACTION_CONSTANT_POOL);
+        match (pools.next(), pools.next()) {
+            (None, _) => Ok(Vec::new()),
+            (Some((0, op)), None) => pool(&op.payload),
+            (Some((i, _)), None) => Err(format!("the ConstantPool is record {i}, not the block's first")),
+            (Some(_), Some(_)) => Err("the block has more than one ConstantPool".into()),
+        }
+    }
+
+    /// Edits record `i`, a `Push`, through its values with pool strings resolved: `edit` sees each value
+    /// as [`Value`] and may change it. A value `edit` leaves equal is written as it was stored (a pool
+    /// reference stays one); a changed string is pushed inline.
+    pub fn edit_push(&mut self, i: usize, pool: &[Vec<u8>], edit: &mut dyn FnMut(&mut [Value])) -> Result<bool, String> {
+        let op = self.ops.get(i).ok_or_else(|| format!("no record {i}"))?;
+        if op.code != ACTION_PUSH {
+            return Err(format!("record {i} is {:#x}, not a Push", op.code));
+        }
+        let stored = push_values(&op.payload)?;
+        let before = stored.iter().map(|v| Value::of(v, pool)).collect::<Result<Vec<_>, _>>()?;
+        let mut after = before.clone();
+        edit(&mut after);
+        if after.len() != before.len() {
+            return Err(format!("record {i}: an edit that changes how many values the Push has"));
+        }
+        if after == before {
+            return Ok(false);
+        }
+        let written = stored
+            .iter()
+            .zip(before.iter().zip(&after))
+            .map(|(s, (b, a))| if a == b { Ok(s.clone()) } else { a.stored(s) })
+            .collect::<Result<Vec<_>, String>>()?;
+        self.ops[i].payload = push_payload(&written)?;
+        Ok(true)
+    }
+
+    /// The values of record `i`, a `Push`, with pool strings resolved.
+    pub fn push_at(&self, i: usize, pool: &[Vec<u8>]) -> Result<Vec<Value>, String> {
+        let op = self.ops.get(i).ok_or_else(|| format!("no record {i}"))?;
+        if op.code != ACTION_PUSH {
+            return Err(format!("record {i} is {:#x}, not a Push", op.code));
+        }
+        push_values(&op.payload)?.iter().map(|v| Value::of(v, pool)).collect()
+    }
+
+    /// Every `switch` on `var` the compiler wrote: `<load var>; StoreRegister rK; Push v1; StrictEquals;
+    /// If; (Push rK, v; StrictEquals; If)*; Jump default`.
+    pub fn switches(&self, var: &str, pool: &[Vec<u8>]) -> Result<Vec<Switch>, String> {
+        let mut out = Vec::new();
+        for i in 2..self.ops.len() {
+            if self.ops[i].code != ACTION_STORE_REGISTER || !matches!(self.ops[i - 1].code, ACTION_GET_MEMBER | ACTION_GET_VARIABLE) {
+                continue;
+            }
+            if self.ops[i - 2].code != ACTION_PUSH || self.push_at(i - 2, pool)?.last() != Some(&Value::Str(var.as_bytes().to_vec())) {
+                continue;
+            }
+            let reg = *self.ops[i].payload.first().ok_or_else(|| format!("record {i}: StoreRegister with no register"))?;
+            let mut cases = Vec::new();
+            let mut k = i + 1;
+            loop {
+                let (Some(push), Some(eq), Some(branch)) = (self.ops.get(k), self.ops.get(k + 1), self.ops.get(k + 2)) else { break };
+                if push.code != ACTION_PUSH || eq.code != ACTION_STRICT_EQUALS || branch.code != ACTION_IF {
+                    break;
+                }
+                let values = self.push_at(k, pool)?;
+                let value = match (cases.is_empty(), &values[..]) {
+                    (true, [v]) => v.number(),
+                    (_, [Value::Register(r), v]) if *r == reg => v.number(),
+                    _ => None,
+                };
+                let Some(value) = value else { break };
+                cases.push(Case { value, dispatch: k, body: branch.to[0] });
+                k += 3;
+            }
+            if cases.is_empty() || self.ops.get(k).map(|o| o.code) != Some(ACTION_JUMP) {
+                continue;
+            }
+            out.push(Switch { reg, cases, default: k, end: self.ops[k].to[0] });
+        }
+        Ok(out)
+    }
+
+    /// Adds case `value` to switch `s`, its body `body` (positions relative to it unless listed in
+    /// `outside`, which are positions of the program before this call) placed at the switch's default
+    /// target, so every case and the default still reach what they reached. Returns where the body starts.
+    pub fn add_case(&mut self, s: &Switch, value: &Value, body: Vec<Op>, outside: &[(usize, usize)]) -> Result<usize, String> {
+        let anchor = s.cases.last().ok_or("a switch with no case")?;
+        // The new value is stored as the last case's is.
+        let like = push_values(&self.ops[anchor.dispatch].payload)?.last().cloned().ok_or("an empty case Push")?;
+        let at = s.end;
+        self.insert(at, body, outside)?;
+        let dispatch = vec![
+            Op { code: ACTION_PUSH, payload: push_payload(&[PushValue::Register(s.reg), value.stored(&like)?])?, to: vec![] },
+            Op { code: ACTION_STRICT_EQUALS, payload: vec![], to: vec![] },
+            Op { code: ACTION_IF, payload: vec![0, 0], to: vec![at] },
+        ];
+        let n = dispatch.len();
+        self.insert(s.default, dispatch, &[(2, 0)])?;
+        Ok(at + n)
+    }
+}
+
+/// One `case` of a [`Switch`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Case {
+    pub value: f64,
+    /// The record of its `Push` in the dispatch.
+    pub dispatch: usize,
+    /// Where its body starts.
+    pub body: usize,
+}
+
+/// A compiled `switch`: its cases in dispatch order, the default `Jump` and where that lands.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Switch {
+    pub reg: u8,
+    pub cases: Vec<Case>,
+    pub default: usize,
+    pub end: usize,
+}
+
+impl Switch {
+    /// The case whose value is `value`.
+    pub fn case(&self, value: f64) -> Result<&Case, String> {
+        self.cases.iter().find(|c| c.value == value).ok_or_else(|| format!("the switch has no case {value}"))
+    }
+
+    /// Where case `value`'s body ends: the next body that starts after it, or the switch's end.
+    pub fn body_end(&self, value: f64) -> Result<usize, String> {
+        let start = self.case(value)?.body;
+        Ok(self.cases.iter().map(|c| c.body).filter(|&b| b > start).chain(std::iter::once(self.end)).min().unwrap_or(self.end))
+    }
+}
+
+/// A `Push` value with its pool reference resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Str(Vec<u8>),
+    Number(f64),
+    Null,
+    Undefined,
+    Register(u8),
+    Bool(bool),
+}
+
+/// How a number is stored, so an edited one is written the way the original was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberKind {
+    Int,
+    Double,
+    Float,
+}
+
+impl Value {
+    fn of(v: &PushValue, pool: &[Vec<u8>]) -> Result<Value, String> {
+        let constant = |i: usize| pool.get(i).cloned().map(Value::Str).ok_or_else(|| format!("a Push of constant {i}, past the pool's {}", pool.len()));
+        Ok(match v {
+            PushValue::Str(s) => Value::Str(s.clone()),
+            PushValue::Float(bits) => Value::Number(f64::from(f32::from_bits(*bits))),
+            PushValue::Null => Value::Null,
+            PushValue::Undefined => Value::Undefined,
+            PushValue::Register(r) => Value::Register(*r),
+            PushValue::Bool(b) => Value::Bool(*b != 0),
+            PushValue::Double(d) => Value::Number(f64::from_le_bytes([d[4], d[5], d[6], d[7], d[0], d[1], d[2], d[3]])),
+            PushValue::Int(i) => Value::Number(f64::from(*i as i32)),
+            PushValue::Constant8(i) => constant(usize::from(*i))?,
+            PushValue::Constant16(i) => constant(usize::from(*i))?,
+        })
+    }
+
+    /// The number, when this is one.
+    pub fn number(&self) -> Option<f64> {
+        match self {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// This value as stored in place of `like`: a number keeps `like`'s storage, a string is inline.
+    fn stored(&self, like: &impl StoredLike) -> Result<PushValue, String> {
+        Ok(match self {
+            Value::Str(s) => PushValue::Str(s.clone()),
+            Value::Number(n) => match like.kind() {
+                NumberKind::Int if n.fract() == 0.0 && *n >= f64::from(i32::MIN) && *n <= f64::from(i32::MAX) => PushValue::Int(*n as i32 as u32),
+                NumberKind::Float => PushValue::Float((*n as f32).to_bits()),
+                _ => {
+                    let b = n.to_le_bytes();
+                    PushValue::Double([b[4], b[5], b[6], b[7], b[0], b[1], b[2], b[3]])
+                }
+            },
+            Value::Null => PushValue::Null,
+            Value::Undefined => PushValue::Undefined,
+            Value::Register(r) => PushValue::Register(*r),
+            Value::Bool(b) => PushValue::Bool(u8::from(*b)),
+        })
+    }
+}
+
+/// What decides how an edited number is stored.
+trait StoredLike {
+    fn kind(&self) -> NumberKind;
+}
+
+impl StoredLike for PushValue {
+    fn kind(&self) -> NumberKind {
+        match self {
+            PushValue::Double(_) => NumberKind::Double,
+            PushValue::Float(_) => NumberKind::Float,
+            _ => NumberKind::Int,
+        }
+    }
 }
 
 /// `block` with `from` replaced by `to` in its leading `ConstantPool`, or `None` when the pool does not
@@ -183,7 +724,7 @@ fn push_strings(payload: &[u8]) -> Result<Vec<&[u8]>, String> {
 fn swap_in_block(block: &[u8], from: &str, to: &str) -> Result<Option<Vec<u8>>, String> {
     let acts = actions(block)?;
     for (code, start, payload) in &acts {
-        if *code == ACTION_PUSH && push_strings(payload)?.contains(&from.as_bytes()) {
+        if *code == ACTION_PUSH && push_values(payload)?.iter().any(|v| matches!(v, PushValue::Str(s) if s == from.as_bytes())) {
             return Err(format!("the block pushes {from:?} inline at {start:#x}; only a pool entry is swapped"));
         }
     }
@@ -216,6 +757,10 @@ fn swap_in_block(block: &[u8], from: &str, to: &str) -> Result<Option<Vec<u8>>, 
     Ok(Some(out))
 }
 
+const ACTION_GET_VARIABLE: u8 = 0x1c;
+const ACTION_GET_MEMBER: u8 = 0x4e;
+const ACTION_STRICT_EQUALS: u8 = 0x66;
+const ACTION_STORE_REGISTER: u8 = 0x87;
 const ACTION_JUMP: u8 = 0x99;
 const ACTION_IF: u8 = 0x9d;
 const ACTION_DEFINE_FUNCTION: u8 = 0x9b;
@@ -457,53 +1002,42 @@ pub fn parse_patches(text: &str) -> Result<Vec<ActionPatch>, String> {
 /// What [`rewrite_movie`] does to one `DoAction` body of a named block: `Some` replaces it, `None` keeps it.
 type BlockEdit<'f> = dyn FnMut(Target, &[u8]) -> Result<Option<Vec<u8>>, String> + 'f;
 
-/// Rewrites a tag list; `in_sprite` is the sprite id when the list is a sprite's.
+/// Applies `edit` to the named `DoAction`s of a tag list; `in_sprite` is the sprite id when the list is a
+/// sprite's.
 fn rewrite_tags(
-    tags: &[Tag<'_>],
+    tags: &mut [Tag],
     in_sprite: Option<u16>,
     targets: &[Target],
     edit: &mut BlockEdit<'_>,
     done: &mut Vec<(Target, usize)>,
-) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
+) -> Result<(), String> {
     let mut frame = 0u32;
     for tag in tags {
-        match tag.code {
-            TAG_DO_ACTION => {
+        match &mut tag.body {
+            TagBody::Raw(body) if tag.code == gfx_tags::DO_ACTION => {
                 let here = match in_sprite {
                     None => Target::Root(frame),
                     Some(id) => Target::Sprite(id, frame),
                 };
-                let swapped = if targets.contains(&here) { edit(here, tag.body)? } else { None };
-                match swapped {
-                    Some(body) => {
-                        write_tag(&mut out, tag.code, tag.long, &body)?;
-                        done.push((here, body.len()));
+                if targets.contains(&here) {
+                    if let Some(new) = edit(here, body)? {
+                        done.push((here, new.len()));
+                        *body = new;
                     }
-                    None => write_tag(&mut out, tag.code, tag.long, tag.body)?,
                 }
             }
-            TAG_DEFINE_SPRITE if in_sprite.is_none() => {
-                if tag.body.len() < 4 {
-                    return Err("DefineSprite shorter than its header".into());
-                }
-                let id = u16::from_le_bytes([tag.body[0], tag.body[1]]);
-                if targets.iter().any(|t| matches!(t, Target::Sprite(s, _) if *s == id)) {
-                    let inner = read_tags(&tag.body[4..])?;
-                    let mut body = tag.body[..4].to_vec();
-                    body.extend_from_slice(&rewrite_tags(&inner, Some(id), targets, edit, done)?);
-                    write_tag(&mut out, tag.code, tag.long, &body)?;
-                } else {
-                    write_tag(&mut out, tag.code, tag.long, tag.body)?;
+            TagBody::Sprite { id, tags, .. } if in_sprite.is_none() => {
+                if targets.iter().any(|t| matches!(t, Target::Sprite(s, _) if s == id)) {
+                    rewrite_tags(tags, Some(*id), targets, edit, done)?;
                 }
             }
-            _ => write_tag(&mut out, tag.code, tag.long, tag.body)?,
+            _ => {}
         }
-        if tag.code == TAG_SHOW_FRAME {
+        if tag.code == gfx_tags::SHOW_FRAME {
             frame += 1;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The movie `data` with `from` swapped for `to` in the pools of `targets`, and what was rewritten.
@@ -521,60 +1055,18 @@ pub fn swap_constant(data: &[u8], targets: &[Target], from: &str, to: &str) -> R
 }
 
 /// The movie `data` with `edit` applied to every `DoAction` of the named `targets`, every other byte kept,
-/// and the blocks `edit` replaced with their new lengths. Tag, sprite and file lengths follow; a tag keeps
-/// its long header form; bytes after `End` stay, uncounted.
+/// and the blocks `edit` replaced with their new lengths. Read and written by [`TagStream`]: tag, sprite and
+/// file lengths follow, a tag keeps its header form, and bytes after `End` stay, uncounted.
 fn rewrite_movie(data: &[u8], targets: &[Target], edit: &mut BlockEdit<'_>) -> Result<(Vec<u8>, Vec<(Target, usize)>), String> {
-    if data.len() < 8 {
-        return Err("too small for a GFx header".into());
-    }
-    let magic = &data[..3];
-    let compressed = match magic {
-        b"CFX" | b"CWS" => true,
-        b"GFX" | b"FWS" => false,
-        _ => return Err(format!("bad magic {:?}", String::from_utf8_lossy(magic))),
-    };
-    let body = if compressed {
-        let mut out = Vec::new();
-        flate2::read::ZlibDecoder::new(&data[8..]).read_to_end(&mut out).map_err(|e| format!("zlib inflate: {e}"))?;
-        out
-    } else {
-        data[8..].to_vec()
-    };
-    // The frame RECT: 5 bits of field width, then four fields of that width, padded to a byte.
-    let nbits = usize::from(body[0] >> 3);
-    let header_len = (5 + 4 * nbits).div_ceil(8) + 4;
-    let (tags, tags_len) = read_tags_to_end(&body[header_len..])?;
-    // The header counts the bytes through `End`; retail SHELL carries 1285 more after it, kept verbatim.
-    let declared = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-    if declared != 8 + header_len + tags_len {
-        return Err(format!(
-            "the header declares {declared} bytes; the stream through End is {} (and {} follow it)",
-            8 + header_len + tags_len,
-            body.len() - header_len - tags_len
-        ));
-    }
-    let trailer = &body[header_len + tags_len..];
+    let mut stream = TagStream::parse(data)?;
     let mut done = Vec::new();
-    let mut new_body = body[..header_len].to_vec();
-    new_body.extend_from_slice(&rewrite_tags(&tags, None, targets, edit, &mut done)?);
-    let total = u32::try_from(new_body.len() + 8).map_err(|_| "movie above 4 GiB".to_string())?;
-    new_body.extend_from_slice(trailer);
-    let mut out = data[..4].to_vec();
-    out.extend_from_slice(&total.to_le_bytes());
-    if compressed {
-        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-        z.write_all(&new_body).map_err(|e| format!("zlib deflate: {e}"))?;
-        out.extend_from_slice(&z.finish().map_err(|e| format!("zlib deflate: {e}"))?);
-    } else {
-        out.extend_from_slice(&new_body);
-    }
-    Ok((out, done))
+    rewrite_tags(&mut stream.tags, None, targets, edit, &mut done)?;
+    Ok((stream.file()?, done))
 }
 
 /// Whether the edited movie `out` still decodes, as every edit's result must.
 pub fn check_decodes(out: &[u8]) -> Result<(), String> {
-    crate::gfx::GfxMovie::parse(out)
-        .and_then(|m| crate::gfx_def::MovieDef::decode(&m))
+    crate::gfx_def::MovieDef::read(out)
         .map(|_| ())
         .map_err(|e| format!("the rewritten movie does not decode: {e}"))
 }
@@ -582,6 +1074,23 @@ pub fn check_decodes(out: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    const TAG_END: u16 = 0;
+    const TAG_SHOW_FRAME: u16 = 1;
+    const TAG_DO_ACTION: u16 = 12;
+    const TAG_DEFINE_SPRITE: u16 = 39;
+
+    fn write_tag(out: &mut Vec<u8>, code: u16, long: bool, body: &[u8]) -> Result<(), String> {
+        if long || body.len() >= 0x3f {
+            out.extend_from_slice(&((code << 6) | 0x3f).to_le_bytes());
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        } else {
+            out.extend_from_slice(&((code << 6) | body.len() as u16).to_le_bytes());
+        }
+        out.extend_from_slice(body);
+        Ok(())
+    }
 
     fn pool(strings: &[&str]) -> Vec<u8> {
         let mut p = (strings.len() as u16).to_le_bytes().to_vec();
@@ -624,6 +1133,27 @@ mod tests {
         out.extend_from_slice(&((body.len() + 8) as u32).to_le_bytes());
         out.extend_from_slice(&body);
         out
+    }
+
+    /// A block's records, every Push value type and a pool write back to their bytes.
+    #[test]
+    fn records_values_and_pools_write_back() {
+        let b = block(&["Platform", "PS3"]);
+        let (acts, after) = read_actions(&b).unwrap();
+        assert!(after.is_empty());
+        assert_eq!(write_actions(&acts, &after).unwrap(), b);
+        let mut tail = b.clone();
+        tail.extend([0xAA, 0xBB]);
+        let (acts, after) = read_actions(&tail).unwrap();
+        assert_eq!(after, [0xAA, 0xBB], "bytes after End are kept");
+        assert_eq!(write_actions(&acts, &after).unwrap(), tail);
+        let push = [0u8, b'a', 0, 1, 0, 0, 0x80, 0x3f, 2, 3, 4, 7, 5, 1, 6, 1, 2, 3, 4, 5, 6, 7, 8, 7, 9, 0, 0, 0, 8, 3, 9, 1, 2];
+        let values = push_values(&push).unwrap();
+        assert_eq!(values.len(), 10, "one of each type");
+        assert_eq!(push_payload(&values).unwrap(), push);
+        let strings = super::pool(&acts[0].payload).unwrap();
+        assert_eq!(strings, [b"Platform".to_vec(), b"PS3".to_vec()]);
+        assert_eq!(pool_payload(&strings).unwrap(), acts[0].payload);
     }
 
     #[test]
@@ -782,7 +1312,7 @@ mod tests {
         let mut wrong = input.clone();
         wrong[4..8].copy_from_slice(&(input.len() as u32).to_le_bytes());
         let e = swap_constant(&wrong, &[Target::Root(1)], "PS3", "PC").unwrap_err();
-        assert!(e.contains("through End") && e.contains("5 follow it"), "{e}");
+        assert!(e.contains("through End") && e.contains("5 bytes follow End"), "{e}");
     }
 
     #[test]
@@ -803,5 +1333,62 @@ mod tests {
         late.extend_from_slice(&block(&["Platform", "PS3"]));
         let e = swap_constant(&movie(&late, &shared), &[Target::Root(1)], "PS3", "PC").unwrap_err();
         assert!(e.contains("not the block's first"), "{e}");
+    }
+
+    /// A block with a forward `If`, a backward `Jump`, a `DefineFunction2` whose body holds a `Push`, and
+    /// bytes after `End`.
+    fn branchy() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend([ACTION_PUSH, 2, 0, 5, 1]); // 0: Push true
+        b.extend([ACTION_IF, 2, 0, 1, 0]); // 5: If over the Pop
+        b.push(0x17); // 10: Pop
+        // 11: DefineFunction2 "f", 0 params, 1 register, flags 0, size 5 (the Push below)
+        b.extend([ACTION_DEFINE_FUNCTION2, 9, 0, b'f', 0, 0, 0, 1, 0, 0, 5, 0]);
+        b.extend([ACTION_PUSH, 2, 0, 5, 0]); // 23: Push false
+        b.extend([ACTION_JUMP, 2, 0]); // 28: Jump back to the Pop at 10
+        b.extend((10i16 - 33).to_le_bytes());
+        b.push(0); // 33: End
+        b.extend([0xaa, 0xbb]);
+        b
+    }
+
+    #[test]
+    fn a_program_encodes_back_to_its_block() {
+        let block = branchy();
+        let p = Program::decode(&block).unwrap();
+        assert_eq!(p.ops.len(), 7);
+        assert_eq!(p.ops[1].to, vec![3], "the If lands on the DefineFunction2");
+        assert_eq!(p.ops[3].to, vec![5], "the function's body is the Push");
+        assert_eq!(p.ops[5].to, vec![2], "the Jump lands on the Pop");
+        assert_eq!(p.after, vec![0xaa, 0xbb]);
+        assert_eq!(p.encode().unwrap(), block);
+    }
+
+    #[test]
+    fn an_insert_moves_every_position_after_it() {
+        let mut p = Program::decode(&branchy()).unwrap();
+        // Two records inside the function body, before its Push: a Pop, and a Jump to the body's end.
+        let new = vec![
+            Op { code: 0x17, payload: vec![], to: vec![] },
+            Op { code: ACTION_JUMP, payload: vec![0, 0], to: vec![2] },
+        ];
+        p.insert(4, new, &[]).unwrap();
+        assert_eq!(p.ops[3].to, vec![7], "the function's body now ends after the moved Push");
+        assert_eq!(p.ops[5].to, vec![6], "the inserted Jump lands on the record after the insert");
+        assert_eq!(p.ops[7].to, vec![2], "the Jump before the insert still lands on the Pop");
+        let out = p.encode().unwrap();
+        let again = Program::decode(&out).unwrap();
+        assert_eq!(again, p, "the encoded block reads back as the edited program");
+        assert_eq!(&out[out.len() - 2..], &[0xaa, 0xbb]);
+        // The function's code size covers the Pop, the Jump and the Push: 1 + 5 + 5.
+        assert_eq!(&out[21..23], &11u16.to_le_bytes());
+    }
+
+    #[test]
+    fn a_position_off_a_record_is_refused() {
+        let mut block = branchy();
+        block[8] = 2; // the If now lands one byte into the DefineFunction2
+        let e = Program::decode(&block).unwrap_err();
+        assert!(e.contains("not on a record"), "{e}");
     }
 }

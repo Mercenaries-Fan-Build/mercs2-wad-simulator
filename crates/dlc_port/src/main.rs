@@ -29,7 +29,7 @@
 //!
 //! `--xbox-doh-oracle <path>` opts into the Xbox-DOH side-oracle resolution for
 //! PS3 blocks the UCFX descriptor walker refuses with the `PS3 compact decl
-//! detected` class (see `docs/_dlc_port_xbox_doh_side_oracle.md`). When the
+//! detected` class (see [`docs/_dlc_port_xbox_doh_side_oracle.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_dlc_port_xbox_doh_side_oracle.md)). When the
 //! oracle is supplied, the main input must be a PS3 BE SCFF (via `--x360-stfs`;
 //! the same loader accepts a raw BE SCFF). A rejected PS3 block's primary
 //! `name_hash` is resolved against the Xbox DOH's indexed primary name_hashes;
@@ -107,7 +107,7 @@ struct Cli {
     /// Xbox 360 DOH side oracle: when the main input is a PS3 SCFF, the
     /// descriptor walker refuses blocks that ship PS3's non-interleaved
     /// multi-stream vertex layout (`PS3 compact decl detected` class, see
-    /// `docs/_descriptor_walker_oracle.md`). With this flag set, each such
+    /// <https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md>). With this flag set, each such
     /// block is resolved against the Xbox DOH at matching primary
     /// `name_hash` and the Xbox-DOH LE body is used in its place. The output
     /// WAD then carries 100 % of the DLC01 content with no silent drops.

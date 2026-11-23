@@ -165,11 +165,10 @@ pub fn aset_names(csv: &std::path::Path) -> Result<std::collections::HashMap<u32
     Ok(out)
 }
 
-/// [`aset_names`] for a **dev tool**: the CSV under `data/` of the `notes_docs_dir` named by the
-/// nearest `.mercs2-local.toml` above `start`.
-pub fn dev_aset_names(start: &std::path::Path) -> Result<std::collections::HashMap<u32, String>, String> {
-    let docs = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?;
-    aset_names(&docs.join("data").join("aset_names.csv"))
+/// [`aset_names`] for a **dev tool**: this repository's `docs/data/aset_names.csv`
+/// ([`mercs2_formats::game_paths::repo_root`]).
+pub fn dev_aset_names() -> Result<std::collections::HashMap<u32, String>, String> {
+    aset_names(&mercs2_formats::game_paths::repo_root().join("docs").join("data").join("aset_names.csv"))
 }
 
 /// The PMC HQ compound, game coords (docs/coordinate_systems.md Example 1).
@@ -440,7 +439,7 @@ impl TemplateRecords {
 }
 
 /// What makes a placed entity's render node when its activation completes — the source of the sphere
-/// its grid entry is re-celled with (`docs/reverse_engineer/hibernation_grid.md` §2).
+/// its grid entry is re-celled with ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §2).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NodeSource {
     /// No node: the re-cell writes the bare position and base 0 (TerrainObject and every entity
@@ -493,7 +492,7 @@ pub struct RuntimeSpawn {
     pub faction: u32,
 }
 
-/// The one render-node source an entity has (`docs/reverse_engineer/hibernation_grid.md` §2): its
+/// The one render-node source an entity has ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §2): its
 /// model, its low-res tile or its light; a terrain tile has none here. More than one is an error.
 fn node_source(
     key: u32,
@@ -605,7 +604,7 @@ impl PlacedCatalog {
     /// Add every placed entity of one layer container (or a whole placement block) and return their
     /// keys in data order. A key already in the catalog is overwritten in place, as retail's container
     /// add is set-or-overwrite (`FUN_0064A600`; PROVEN for RuntimeLayerId, INFERRED for the rest —
-    /// `docs/reverse_engineer/layer_load_code_map.md` §2). An entity with two node sources, or a placed
+    /// [`docs/reverse_engineer/layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md) §2). An entity with two node sources, or a placed
     /// `LightAnimation` (only templates carry one), is an error.
     pub fn add_block(&mut self, block: &[u8], templates: &TemplateRecords) -> Result<Vec<u32>, String> {
         use mercs2_formats::placement::{component_keys, load_scrub_placements, load_terrain_tiles, placed_entities, placed_light_objects};
@@ -1393,7 +1392,7 @@ pub const MAX_PLACEMENT_BLOCK: u16 = 750;
 /// wardrobe, sickbay, lamps, generator, …) plus the room-shell (`pmcoutpost_bld_*`) meshes.
 pub const PMC_INTERIOR_STATE_BLOCK: u16 = 667;
 
-/// The KEYED PMC-interior entities from `docs/mercs2-luacd/src/vz/wifpmcinterior.lua` (`_tBuildings`
+/// The KEYED PMC-interior entities from `crates/mercs2_script/corpus/mercs2-luacd/src/vz/wifpmcinterior.lua` (`_tBuildings`
 /// + the recruit-interior variants): `(entity_key, canonical_name)`. Each entity's AUTHORED world
 /// Transform + its `ModelName` mesh live in one of the interior-candidate overlay blocks; the name is
 /// the `pandemic_hash_m2` fallback when a key has a Transform but no ModelName record.
@@ -1595,7 +1594,7 @@ pub(crate) mod schema_wire_tests {
         /// vendored Lua, which is what makes them assertable rather than merely observed:
         /// - 46 records = 23 zones × 2 co-op player slots.
         /// - The zone set `1..8, 12, 15..18, 20..25, 27..30` is exactly the set `vz/wifhqdata.lua`'s
-        ///   `nLandingZone`/`nAltLandingZone` fields reference (`docs/mercs2-luacd/04_tutorials_wifdata.md`
+        ///   `nLandingZone`/`nAltLandingZone` fields reference ([`docs/mercs2-luacd/04_tutorials_wifdata.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-luacd/04_tutorials_wifdata.md)
         ///   §2.5); the seven gaps appear nowhere in the corpus.
         /// - All 46 pads carry a `Name` of the form `<zone>_<faction>_<site>_lz_player{one,two}` — the
         ///   names the shipped Lua also resolves by hand (`resident/mrxsupport.lua:606-610`,

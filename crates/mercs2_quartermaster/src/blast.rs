@@ -108,6 +108,9 @@ pub enum Claim {
     /// The repaint of the `vfx` atlas: the base every Shipment's sprites are drawn on top of. A set
     /// has one; a second repaint's texels would be absent.
     AtlasRepaint,
+    /// An item of a menu page, keyed on the page and its label key's hash: a page's items are told
+    /// apart by their label, so two items of one label on one page cannot both be added.
+    MenuItem { menu: String, label: u32 },
 }
 
 impl Claim {
@@ -206,6 +209,10 @@ impl Claim {
                 None => format!("effect frame 0x{key:08X}"),
             },
             Claim::AtlasRepaint => "the repaint of the vfx atlas".into(),
+            Claim::MenuItem { menu, label } => match name {
+                Some(n) => format!("menu item {n} (0x{label:08X}) of {menu}"),
+                None => format!("menu item 0x{label:08X} of {menu}"),
+            },
         }
     }
 
@@ -306,6 +313,9 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         Claim::FxFrame { .. } => MergeClass::Exclusive,
         // The set's sprites are drawn on top of one repaint.
         Claim::AtlasRepaint => MergeClass::Exclusive,
+        // A page's items are a set keyed on their labels: items of distinct labels compose, one label
+        // added twice is a collision.
+        Claim::MenuItem { .. } => MergeClass::KeyedSet,
     }
 }
 
@@ -744,6 +754,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // one level collide, the same shape as a language.
             Contribution::AddLevel { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            // An item on a menu page, by its label: `qm link` composes every Shipment's items into one
+            // edit of the page, so items of distinct labels compose and one label twice collides.
+            Contribution::AddMenuItem { menu, label, .. } => {
+                let claim = Claim::MenuItem { menu: menu.clone(), label: crate::menu_items::key_hash(label) };
+                push(Access::Write, (claim, Some(label.clone())), Intent::Additive);
             }
             // Of the main campaign: an asset added to the overlay, or each template appended to the
             // worldentity, by name (its key is in the container, which a hermetic lint does not read;

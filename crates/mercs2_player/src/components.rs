@@ -22,7 +22,7 @@ use mercs2_core::Entity;
 /// `ControllerPlayer` — the input→control binding block.
 ///
 /// Registrar `FUN_00640410`, container `0x017BCEF8`, element `0x0C`. The 12-byte payload's exact layout
-/// is **unknown** (`docs/mercs2-ecs/03_controllers_physics.md:78` calls it "plausibly a vec3"), so this
+/// is **unknown** (`crates/mercs2_workshop/data/mercs2-ecs/03_controllers_physics.md:78` calls it "plausibly a vec3"), so this
 /// models the component's *presence and identity*, not a byte image — consistent with this workspace's
 /// rule that the exe is the oracle for behaviour, not for the byte layout of a runtime instance.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -40,7 +40,7 @@ pub const CONTROLLER_PLAYER_INITIAL_CAPACITY: usize = 0x100;
 /// `VehicleDisguiseScale` — disguise falloff tuning.
 ///
 /// Registrar `FUN_006413F0`, container `0x017BD5D8`, element `0x0C` = three floats
-/// (`docs/mercs2-ecs/04_player_vehicle_human.md:63`).
+/// (`crates/mercs2_workshop/data/mercs2-ecs/04_player_vehicle_human.md:63`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VehicleDisguiseScale {
     /// The three disguise scale factors. Their individual meanings are not recovered; the count and

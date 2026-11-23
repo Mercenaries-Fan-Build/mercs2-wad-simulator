@@ -55,7 +55,7 @@ provenance the source itself records:
   `docs/ucfx_tag_registry.md`, `docs/fxdict_format.md`, `docs/placement_data_format.md`,
   `docs/schm_type_codes.md`, `docs/type_hash_registry.md`, `docs/coordinate_systems.md`,
   `docs/modernization/world_streaming_spec.md`,
-  `docs/reverse_engineer/valid_model_structure_map.md`. Two format write-ups live in the crate:
+  [`docs/reverse_engineer/valid_model_structure_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/valid_model_structure_map.md). Two format write-ups live in the crate:
   [`SAVE_FORMAT.md`](SAVE_FORMAT.md) and the deferred-work list [`DEFERRED.md`](DEFERRED.md).
 * **Havok.** `havok` / `anim` read Havok **5.5.0-r1** little-endian packfiles as shipped in `PHY2`
   (collision) and the animation blocks.

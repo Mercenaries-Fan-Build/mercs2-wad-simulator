@@ -1,6 +1,6 @@
 //! `mercs2_decal` — Decals.
 //!
-//! **Code map:** `docs/reverse_engineer/decal_code_map.md` (the sky/decal/water PC code maps: the
+//! **Code map:** [`docs/reverse_engineer/decal_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/decal_code_map.md) (the sky/decal/water PC code maps: the
 //! `decaltable` loader + the decal pass driver).
 //! **Depends only on** `mercs2_core` + `mercs2_formats`.
 //!

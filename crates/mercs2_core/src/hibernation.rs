@@ -1,5 +1,5 @@
 //! The hibernation grid — retail's per-object wake/sleep decision (PC v1.0 `FUN_00735640` and its
-//! registration `FUN_00516280`; `docs/reverse_engineer/hibernation_grid.md`).
+//! registration `FUN_00516280`; [`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md)).
 //!
 //! Every registered entity sits in a 32×32 grid of 256 m cells with its position quantised to about a
 //! metre, a radius `r14` from its `HibernationControl.Distance`, three ring distances and a "base"

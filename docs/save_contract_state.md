@@ -3,7 +3,7 @@
 How a `.profile`'s Lua payload records each contract, and where every effect of the mission flow
 lands in it. The Workshop's Saves page edits contracts through this
 (`crates/mercs2_workshop/src/save_flow.rs`, rules from `game_rules.rs`). Citations are to the
-PC retail decompile in the notes repo, `docs/mercs2-luacd/src/`.
+PC retail decompile, [`crates/mercs2_script/corpus/mercs2-luacd/src/`](../crates/mercs2_script/corpus/mercs2-luacd/src/).
 
 ## Contract state
 
@@ -141,6 +141,6 @@ PmcCon031..034 completed ×3   → one more outfit each
 PmcCon004                     → destroys 11 open contracts, rolls the credits
 ```
 
-The notes repo's `docs/vanilla_mission_lifecycle_analysis.md` §3.4 draws this graph from demo
+The notes repo's [`docs/vanilla_mission_lifecycle_analysis.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/vanilla_mission_lifecycle_analysis.md) §3.4 draws this graph from demo
 bytecode and disagrees with it in eight places (PmcCon002's unlocker, PmcCon004's, where
 OilCon050 and the intros come from, and the missing PmcCon03x, outpost and job chains).

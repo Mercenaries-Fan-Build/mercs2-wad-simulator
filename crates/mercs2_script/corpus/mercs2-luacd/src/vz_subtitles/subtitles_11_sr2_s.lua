@@ -1,0 +1,39 @@
+Type = "Time"
+SubtitleData = {
+  {
+    0.5,
+    "[ReporterNeutral.Invasion02]",
+    6.48
+  },
+  {
+    7.03,
+    "[ReporterAntiSolano.Invasion02]"
+  },
+  {
+    10.19,
+    "[ReporterNeutral.Invasion05]",
+    4.4
+  },
+  {
+    14.69,
+    "[ReporterProSolano.Invasion03]"
+  },
+  {
+    18.13,
+    "[ReporterAntiSolano.Invasion03]",
+    3.6
+  },
+  {
+    21.72,
+    "[ReporterNeutral.Invasion07]"
+  },
+  {
+    24.55,
+    "[ReporterProSolano.Invasion05]"
+  },
+  {
+    26.92,
+    "[ReporterNeutral.Invasion08]",
+    8.55
+  }
+}

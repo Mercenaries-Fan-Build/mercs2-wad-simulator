@@ -2,7 +2,7 @@
 //!
 //! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
-//! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
+//! `corpus_calls` = call sites observed in `corpus/mercs2-luacd/src`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
 //! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
@@ -16,7 +16,7 @@ use crate::attribution::LuaFnExt;
 use crate::{Guid, SharedHost, SpawnArgs, SpawnTemplate};
 
 /// `lua_isnumber` + `lua_tonumber` (Lua 5.1: a numeric string converts).
-fn lua_number(v: Option<&Value>) -> Option<f32> {
+pub(super) fn lua_number(v: Option<&Value>) -> Option<f32> {
     match v? {
         Value::Number(n) => Some(*n),
         Value::String(s) => String::from_utf8(s.as_bytes()).ok()?.trim().parse().ok(),
@@ -362,7 +362,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // Layer/asset load, context actions, boundary + pursuit control, contract lifecycle, heli-wave/
     // skirmish spawners → recorded Pg commands the world/pursuit/streaming runtime drains.
     //
-    // Layer load/unload/reload (`docs/reverse_engineer/layer_load_code_map.md` §2–3): the host makes
+    // Layer load/unload/reload (`https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md` §2–3): the host makes
     // the request (a refused one returns nil and tracks nothing); an accepted one with a callback
     // enters the request tracker, which `__flush_layer_loads` polls each script update against the
     // layer record (`FUN_005A28F0`), firing `cb(sRequestType, sLayerName, "layer", bSuccess)` once the

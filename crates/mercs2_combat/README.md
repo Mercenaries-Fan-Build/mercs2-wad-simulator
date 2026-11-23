@@ -18,7 +18,7 @@ Hit tests go through `mercs2_core::PhysicsQuery`; events go on the `mercs2_core`
 
 ## Where it comes from
 
-Derived from `docs/reverse_engineer/weapons_combat_code_map.md` and the ecs-01 component schemas. Faithful ports, read first-hand in the code map:
+Derived from [`docs/reverse_engineer/weapons_combat_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/weapons_combat_code_map.md) and the ecs-01 component schemas. Faithful ports, read first-hand in the code map:
 
 | Reimpl | Exe |
 | --- | --- |

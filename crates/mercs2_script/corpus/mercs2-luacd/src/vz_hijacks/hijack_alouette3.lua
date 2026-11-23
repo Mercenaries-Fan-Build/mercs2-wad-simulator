@@ -1,0 +1,199 @@
+import("MrxActionHijack")
+local door_anim_A = "All_Alouette_driverdoor_actionhijack_section01_fb"
+local door_anim_B = "All_Alouette_driverdoor_actionhijack_section02_fb"
+local door_anim_C = "All_Alouette_driverdoor_actionhijack_section03_fb"
+local door_anim_AFail = "All_Alouette_driverdoor_actionhijack_getin_fail01_fb"
+local door_anim_BFail = "All_Alouette_driverdoor_actionhijack_getin_fail02_fb"
+local door_anim_DLoopA = "All_Alouette_driverdoor_actionhijack_getin_loopa_fb"
+local door_anim_DLoopB = "All_Alouette_driverdoor_actionhijack_getin_loopb_fb"
+local door_anim_DLoopC = "All_Alouette_driverdoor_actionhijack_getin_loopc_fb"
+local door_anim_DLoopD = "All_Alouette_driverdoor_actionhijack_getin_loopd_fb"
+local door_anim_DLoopE = "All_Alouette_driverdoor_actionhijack_getin_loope_fb"
+local door_anim_DLoopF = "All_Alouette_driverdoor_actionhijack_getin_loopf_fb"
+local door_anim_DLoopG = "All_Alouette_driverdoor_actionhijack_getin_loopg_fb"
+local door_anim_DLoopH = "All_Alouette_driverdoor_actionhijack_getin_looph_fb"
+
+function Init()
+  Debug.Printf("Hijack_Alouette3: Loading vehicle animation assets")
+  local assetType = "animation"
+  Pg.LoadAsset(door_anim_A, assetType)
+  Pg.LoadAsset(door_anim_B, assetType)
+  Pg.LoadAsset(door_anim_C, assetType)
+  Pg.LoadAsset(door_anim_AFail, assetType)
+  Pg.LoadAsset(door_anim_BFail, assetType)
+  Pg.LoadAsset(door_anim_DLoopA, assetType)
+  Pg.LoadAsset(door_anim_DLoopB, assetType)
+  Pg.LoadAsset(door_anim_DLoopC, assetType)
+  Pg.LoadAsset(door_anim_DLoopD, assetType)
+  Pg.LoadAsset(door_anim_DLoopE, assetType)
+  Pg.LoadAsset(door_anim_DLoopF, assetType)
+  Pg.LoadAsset(door_anim_DLoopG, assetType)
+  Pg.LoadAsset(door_anim_DLoopH, assetType)
+end
+
+function Deinit()
+  Debug.Printf("Hijack_Alouette3: Unloading vehicle animation assets")
+  local assetType = "animation"
+  Pg.UnloadAsset(door_anim_A, assetType)
+  Pg.UnloadAsset(door_anim_B, assetType)
+  Pg.UnloadAsset(door_anim_C, assetType)
+  Pg.UnloadAsset(door_anim_AFail, assetType)
+  Pg.UnloadAsset(door_anim_BFail, assetType)
+  Pg.UnloadAsset(door_anim_DLoopA, assetType)
+  Pg.UnloadAsset(door_anim_DLoopB, assetType)
+  Pg.UnloadAsset(door_anim_DLoopC, assetType)
+  Pg.UnloadAsset(door_anim_DLoopD, assetType)
+  Pg.UnloadAsset(door_anim_DLoopE, assetType)
+  Pg.UnloadAsset(door_anim_DLoopF, assetType)
+  Pg.UnloadAsset(door_anim_DLoopG, assetType)
+  Pg.UnloadAsset(door_anim_DLoopH, assetType)
+end
+
+function StartHijack(hijackerObject, hijackeeObject, seatObject, vehicleObject)
+  local bResult = MrxActionHijack.CheckGoodStart(vehicleObject, MrxActionHijack.RULESET_HELICOPTER)
+  Debug.Printf("StartHijack: CheckGoodStart: " .. tostring(bResult))
+  if bResult then
+    _THIS:Initialize(nil, hijackerObject, hijackeeObject, seatObject, vehicleObject)
+    return true
+  end
+  return false
+end
+
+function Initialize(mModule, self, hijackerObject, hijackeeObject, seatObject, vehicleObject)
+  self = self or {}
+  self._hijacker = hijackerObject
+  self._hijackee = hijackeeObject
+  self._seat = seatObject
+  self._vehicle = vehicleObject
+  setmetatable(self, {__index = mModule})
+  self._hijackerPlayer = Object.IsPlayerControlled(self._hijacker)
+  MrxActionHijack.InitializeActionHijack(self)
+  self[1] = {
+    hijackerAnimation = "ActionHijackHijackerA",
+    hijackeeAnimation = "ActionHijackHijackeeA",
+    hijackerAnimationFail = "ActionHijackHijackerFailA",
+    hijackeeAnimationFail = "ActionHijackHijackeeFailA",
+    vehicleAnimation = door_anim_A,
+    vehicleAnimationFail = door_anim_AFail,
+    miniGameStartDelay = 2.4,
+    miniGame = {
+      nTimeOut = 2,
+      sAction = "press",
+      bExtraHudParameters = true,
+      nTranslucency = 255,
+      nXPosition = 0.5,
+      nYPosition = 0.2,
+      bShowTimer = false,
+      nHudButtonMotionSpeed = 0.2,
+      button = Controller.RPad_Right
+    },
+    tMultiEvents = {
+      {
+        nTime = 0.1333,
+        tControllerRumble = {nlength = 0.2},
+        tCameraShake = {fSetCameraAmplitude = 2.5, fSetCameraShake = 0.1}
+      }
+    },
+    OnFailureAnimationBegin = OnFailureEvents,
+    tFailureMultiEvents = {
+      {
+        nTime = 0.16,
+        tControllerRumble = {nlength = 0.5},
+        tCameraShake = {fSetCameraAmplitude = 2.5, fSetCameraShake = 0.1}
+      }
+    }
+  }
+  self[2] = {
+    hijackerAnimation = "ActionHijackHijackerB",
+    hijackeeAnimation = "ActionHijackHijackeeB",
+    vehicleAnimation = door_anim_B
+  }
+  self[3] = {
+    hijackerAnimationFail = "ActionHijackHijackerFailB",
+    hijackeeAnimationFail = "ActionHijackHijackeeFailB",
+    vehicleAnimationFail = door_anim_BFail,
+    nReactiveLoop = 2,
+    tHijackerAnimations = {
+      "ActionHijackHijackerDLoopA",
+      "ActionHijackHijackerDLoopB",
+      "ActionHijackHijackerDLoopC",
+      "ActionHijackHijackerDLoopD",
+      "ActionHijackHijackerDLoopE",
+      "ActionHijackHijackerDLoopF",
+      "ActionHijackHijackerDLoopG",
+      "ActionHijackHijackerDLoopH"
+    },
+    tHijackeeAnimations = {
+      "ActionHijackHijackeeBLoopA",
+      "ActionHijackHijackeeBLoopB",
+      "ActionHijackHijackeeBLoopC",
+      "ActionHijackHijackeeBLoopD",
+      "ActionHijackHijackeeBLoopE",
+      "ActionHijackHijackeeBLoopF",
+      "ActionHijackHijackeeBLoopG",
+      "ActionHijackHijackeeBLoopH"
+    },
+    tVehicleAnimations = {
+      door_anim_DLoopA,
+      door_anim_DLoopB,
+      door_anim_DLoopC,
+      door_anim_DLoopD,
+      door_anim_DLoopE,
+      door_anim_DLoopF,
+      door_anim_DLoopG,
+      door_anim_DLoopH
+    },
+    miniGameStartDelay = 0.01,
+    miniGame = {
+      nTimeOut = 35,
+      sAction = "tap",
+      button = Controller.RPad_Left,
+      bExtraHudParameters = true,
+      nTranslucency = 255,
+      nXPosition = -0.5,
+      nYPosition = 0.2,
+      bShowTimer = false,
+      nDriverDifficulty = 1.4,
+      nSuccessThreshold = 1
+    },
+    OnFailureAnimationBegin = OnFailureEvents,
+    tFailureMultiEvents = {
+      {
+        nTime = 0.5,
+        tControllerRumble = {nlength = 0.5}
+      }
+    }
+  }
+  self[4] = {
+    hijackerAnimation = "ActionHijackHijackerC",
+    hijackeeAnimation = "ActionHijackHijackeeC",
+    vehicleAnimation = door_anim_C,
+    tMultiEvents = {
+      {
+        nTime = 0.2,
+        tControllerRumble = {nlength = 0.2},
+        tCameraShake = {fSetCameraAmplitude = 2, fSetCameraShake = 0.1}
+      },
+      {
+        nTime = 0.7,
+        tControllerRumble = {nlength = 0.2},
+        tCameraShake = {fSetCameraAmplitude = 2, fSetCameraShake = 0.1}
+      },
+      {
+        nTime = 1.3,
+        tControllerRumble = {nlength = 0.2},
+        tCameraShake = {fSetCameraAmplitude = 2.5, fSetCameraShake = 0.1}
+      }
+    },
+    bDriverDoneDead = true
+  }
+  MrxActionHijack.Begin(self, 1)
+  return self
+end
+
+function OnFailureEvents(self, nCurrent)
+  Debug.Printf("OnFailureAnimationBegin: nCurrent: " .. tostring(nCurrent))
+  local tFailEvents = self[self.nCurrent].tFailureMultiEvents
+  local oLocalPlayer = self._hijacker
+  MrxActionHijack._ProcessMultiEventTable(oLocalPlayer, tFailEvents)
+end

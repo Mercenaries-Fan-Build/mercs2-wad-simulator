@@ -1,8 +1,8 @@
 //! Extract vehicle names referenced by the decompiled Lua corpora and emit a
 //! CSV with their `pandemic_hash_m2` values.
 //!
-//! Scans `docs/mercs2-luacd/src` + `docs/mercs2-dlc-luacd/src` for string
-//! literals passed to the vehicle-carrying calls:
+//! Scans the script corpora vendored in `mercs2_script` (`corpus/mercs2-luacd/src` +
+//! `corpus/mercs2-dlc-luacd/src`) for string literals passed to the vehicle-carrying calls:
 //!   `Pg.Spawn("NAME", ...)`          -> spawn   (classified; spawns also cover
 //!                                                particles/characters/ordnance)
 //!   `:SetCargo("NAME")`              -> cargo   (support-store vehicle deliveries)
@@ -13,17 +13,19 @@
 //!                                                stripped before hashing)
 //!   `GetGuidByName("NAME")`          -> named   (only if it classifies as a vehicle)
 //!
-//! Usage (from the repo root):
-//!   cargo run --manifest-path tools/wad_simulator/Cargo.toml -p mercs2_probe \
-//!       -- lua-vehicle-hashes [<out.csv>]
+//! `<out.csv>` defaults to this repository's `docs/data/lua_vehicle_hashes.csv`; the example files
+//! are written relative to this repository's root.
+//!
+//! Usage:
+//!   cargo run -p mercs2_probe -- lua-vehicle-hashes [<out.csv>]
 
+use mercs2_engine::script::corpus;
 use mercs2_formats::hash::pandemic_hash_m2;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const CORPORA: [&str; 2] = ["docs/mercs2-luacd/src", "docs/mercs2-dlc-luacd/src"];
-const DEFAULT_OUT: &str = "docs/data/lua_vehicle_hashes.csv";
+const DEFAULT_OUT: [&str; 2] = ["docs", "data/lua_vehicle_hashes.csv"];
 
 const CALLS: [(&str, &str); 5] = [
     ("Pg.Spawn(", "spawn"),
@@ -189,18 +191,22 @@ fn quoted_arg(text: &str, after: usize) -> Option<&str> {
     Some(&body[..end])
 }
 
-fn walk_lua(dir: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+fn walk_lua(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
         if path.is_dir() {
-            walk_lua(&path, files);
+            walk_lua(&path, files)?;
         } else if path.extension().is_some_and(|e| e == "lua") {
             files.push(path);
         }
     }
+    Ok(())
+}
+
+fn fail(msg: String) -> ! {
+    eprintln!("lua-vehicle-hashes: {msg}");
+    std::process::exit(1);
 }
 
 fn csv_field(s: &str) -> String {
@@ -218,26 +224,39 @@ struct Entry {
 }
 
 pub fn run(args: &[String]) {
-    let out_path = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_OUT.to_string());
+    let root = mercs2_formats::game_paths::repo_root();
+    let root = root.canonicalize().unwrap_or_else(|e| fail(format!("{}: {e}", root.display())));
+    let out_path = match args.first() {
+        Some(p) => p.clone(),
+        None => root.join(DEFAULT_OUT[0]).join(DEFAULT_OUT[1]).to_string_lossy().into_owned(),
+    };
 
+    let corpora = [
+        corpus::root().unwrap_or_else(|| {
+            fail(format!(
+                "the script corpus mercs2_script/corpus/mercs2-luacd/src (or {}) is not a directory",
+                corpus::CORPUS_ENV
+            ))
+        }),
+        corpus::dlc_root()
+            .unwrap_or_else(|| fail("the DLC script corpus mercs2_script/corpus/mercs2-dlc-luacd/src is not a directory".into())),
+    ];
     let mut files = Vec::new();
-    for corpus in CORPORA {
-        walk_lua(Path::new(corpus), &mut files);
+    for c in &corpora {
+        walk_lua(c, &mut files).unwrap_or_else(|e| fail(e));
     }
     if files.is_empty() {
-        eprintln!("no .lua files found under {CORPORA:?} — run from the repo root");
-        std::process::exit(1);
+        fail(format!("no .lua files under {corpora:?}"));
     }
 
     let mut rows: BTreeMap<String, Entry> = BTreeMap::new();
     for path in &files {
-        let Ok(text) = fs::read_to_string(path) else {
-            continue;
-        };
-        let rel = path.to_string_lossy().replace('\\', "/");
+        let text = fs::read_to_string(path).unwrap_or_else(|e| fail(format!("{}: {e}", path.display())));
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or_else(|_| fail(format!("{} is outside this repository {}", path.display(), root.display())))
+            .to_string_lossy()
+            .replace('\\', "/");
         for (needle, kind) in CALLS {
             let mut from = 0;
             while let Some(hit) = text[from..].find(needle) {

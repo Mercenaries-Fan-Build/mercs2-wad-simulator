@@ -793,25 +793,32 @@ mod tests {
         assert!((blob.sub_objects[1].f32(0).unwrap() - 1.5).abs() < 1e-6);
     }
 
-    /// Live parse of a **real** `wpn_*` block (the big-endian sniper-rifle source dump). SKIPS (passes)
-    /// when the fixture is absent so CI stays green, matching the crate's other live tests.
-    /// Asserts the verified structure: 3 ASET entries, a weapon-def container, and 8 weapon
-    /// sub-objects (empirically confirmed for `wpn_sniperrifle`).
+}
+
+/// Game-gated: built by the `retail` feature, reads the `xbox_vz_wad` of the repo-root
+/// `.mercs2-local.toml`, and fails if it is absent.
+#[cfg(all(test, feature = "retail"))]
+mod retail {
+    use super::*;
+    use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
+
+    /// Parse of a **real** `wpn_*` block: the Xbox bake's big-endian `wpn_sniperrifle_P000`.
+    /// Asserts the verified structure: a weapon-def container and 8 weapon sub-objects (empirically
+    /// confirmed for `wpn_sniperrifle`).
     #[test]
     fn live_parse_real_wpn_block() {
-        // The dump is the raw BE Xbox/PS3 block. Env override for other environments; otherwise built
-        // from the crate dir so it doesn't depend on the test's cwd.
-        let path = std::env::var("WPN_BLOCK").unwrap_or_else(|_| {
-            format!(
-                "{}/../../../../notes-on-the-released-game/output/temp_blocks/\
-                 02986_blocks_vz_wpn_sniperrifle_P000_Q3.block.bin",
-                env!("CARGO_MANIFEST_DIR")
-            )
-        });
-        let Ok(block) = std::fs::read(&path) else {
-            eprintln!("skip: wpn block fixture not present at {path}");
-            return;
-        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let xbox = mercs2_formats::game_paths::local_config_xbox_vz_wad(root).unwrap_or_else(|e| panic!("{e}"));
+        let doh = std::fs::read(&xbox).unwrap_or_else(|e| panic!("{}: {e}", xbox.display()));
+        let (_, rows) = parse_be_ffcs(&doh).unwrap();
+        let indx = rows.iter().find(|r| r.tag == "INDX").expect("INDX");
+        let entries = parse_be_indx(&doh, indx.offset as usize, indx.meta as usize);
+        let pths = rows.iter().find(|r| r.tag == "PTHS").expect("PTHS");
+        let paths = parse_be_pths(&doh, pths.offset as usize, pths.meta as usize);
+        const PATH: &str = "blocks\\vz\\wpn_sniperrifle_P000_Q3.block";
+        let at: Vec<usize> = (0..paths.len()).filter(|&i| paths[i] == PATH).collect();
+        assert_eq!(at.len(), 1, "one {PATH} in {}: {at:?}", xbox.display());
+        let block = read_be_block(&doh, &entries[at[0]]).unwrap();
         // Real block is big-endian source.
         let blob = parse_weapon_block(&block, true).expect("parse real wpn block");
         assert!(

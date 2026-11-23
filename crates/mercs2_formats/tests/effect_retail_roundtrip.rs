@@ -154,7 +154,7 @@ fn the_retail_fxdict_container_reencodes_byte_identically() {
 /// (`global_particle_env_godray2` → `global_env_godray2`). The template's world-entity record says
 /// the same: in the worldentity container the `RedEffectComponent` record of entity `0x80008028`
 /// (the handle the retail template registry gives `global_particle_explosion_c4`, see
-/// `docs/data/spawnable_templates.csv`) carries `0x41B4326E` in its `name` (`0x1DE5C824`) field.
+/// `crates/mercs2_workshop/data/spawnable_templates.csv`) carries `0x41B4326E` in its `name` (`0x1DE5C824`) field.
 #[test]
 fn the_c4_explosion_effect_resolves_by_name_hash() {
     let (mut f, archive) = open();

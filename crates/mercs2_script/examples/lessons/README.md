@@ -58,7 +58,7 @@ registering to be called back, into a world that is not ready yet, about an obje
 might not be there — and there are several of it.** Every strange line in a real Mercenaries
 script is defending against one of those facts.
 
-Once that clicks, go read a real one: [`docs/mercs2-luacd/src/resident/soldier.lua`](../../../../../../docs/mercs2-luacd/src/resident/soldier.lua)
+Once that clicks, go read a real one: [`corpus/mercs2-luacd/src/resident/soldier.lua`](../../corpus/mercs2-luacd/src/resident/soldier.lua)
 — infantry that drop ammo when they die. It opens with `local tEvents = tEvents or {}` and an
 `OnDeath(uGuid)`, and by now you know exactly why both of those are there.
 
@@ -70,4 +70,4 @@ it. That's [`mission_lab`](../mission_lessons/README.md), next door.
 
 And when you move from scripting to **assets** — models, skins, textures, WADs — the failures get
 even stranger (a model that loads fine and crashes only when you *look* at it). Those are catalogued
-in [`docs/modding/field_guide.md`](../../../../../../docs/modding/field_guide.md).
+in [`docs/modding/field_guide.md`](../../../../docs/modding/field_guide.md).

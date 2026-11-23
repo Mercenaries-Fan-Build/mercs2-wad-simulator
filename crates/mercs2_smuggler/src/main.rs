@@ -39,7 +39,7 @@
 //! ASET-PRIMARY block. `--exact-block` honours `--block-index` verbatim instead, which
 //! is the only way to reach the finer rungs of a vehicle's LOD chain
 //! (`_P000_Q3` resident -> `_P001_` -> `_P002_`). See
-//! `docs/modernization/vehicle_model_spec.md` §1 and `docs/asset_injection_playbook.md`.
+//! `docs/modernization/vehicle_model_spec.md` §1 and [`docs/asset_injection_playbook.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/asset_injection_playbook.md).
 
 use std::fs::File;
 use std::path::PathBuf;

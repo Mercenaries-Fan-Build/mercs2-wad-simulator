@@ -881,7 +881,7 @@ pub fn template_states(we: &crate::worldentity::WorldEntity, keys: &[u32]) -> Re
 /// index by their signed `node` field (clause 3 of the draw gate; see `mercs2_engine::render_state`) —
 /// for a model whose switch nodes stand in the states `chosen[i]` (indices into `sm.nodes[i].states`).
 ///
-/// The machine runs as retail's (`docs/reverse_engineer/hibernation_grid.md` §2):
+/// The machine runs as retail's ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §2):
 /// - activation builds it (`FUN_004CFED0` / `FUN_004D3E10`): the `SWIT` participants are controlled
 ///   and not shown, and each switch node, last to first, enters `InitState`;
 /// - then each node enters its chosen state;

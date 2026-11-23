@@ -32,7 +32,7 @@
 //!
 //! The engine's Lua binding surface is **1092 cfuncs across 37 engine namespaces** (seeded from the live
 //! Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`; the human index is
-//! `docs/reverse_engineer/scripting_host_binding_code_map.md` §3). Program rule: **no stubbed Lua
+//! [`docs/reverse_engineer/scripting_host_binding_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/scripting_host_binding_code_map.md) §3). Program rule: **no stubbed Lua
 //! streams** — every one of those bindings the game's Lua calls eventually needs a real body. This
 //! module makes that surface *modular* (one file per namespace, so each later system fills exactly one)
 //! and *measurable* (a machine-readable coverage report so "N stubs remaining" is CI-checkable and

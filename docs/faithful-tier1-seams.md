@@ -17,8 +17,8 @@ objects. Fixing this once unblocks three gaps:
 ## Tier 1 — blocks a populated, interactive mission  [IN PROGRESS]
 1. **Spawn-list / `template=0`** — `SimpleSpawner::update` emits literal 0 (`population/spawner.rs:171`);
    no `SkirmishSpawnList` slot→template resolution. Corpus: runtime-seeded by `FUN_004d742c`
-   (`docs/reverse_engineer/render_distance_and_density_levers.md#14-15`), COMP `0xafba5846` reader
-   `FUN_0065bf00` (`docs/mercs2-ecs/02_ai_perception_population.md#27`).
+   ([`docs/reverse_engineer/render_distance_and_density_levers.md#14-15`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/render_distance_and_density_levers.md)), COMP `0xafba5846` reader
+   `FUN_0065bf00` ([`docs/mercs2-ecs/02_ai_perception_population.md#27`](../crates/mercs2_workshop/data/mercs2-ecs/02_ai_perception_population.md)).
 2. **Spawn→Character path** — `tick_population` calls hash-only `resolver.spawn` (`runtime.rs:183`),
    never `spawn_named`/`spawn_character` → bare Prop, no AI/Health/anim bundle.
 3. **`SpawnResolver.by_template` never populated** (`spawn.rs:123`, `runtime.rs:83`).

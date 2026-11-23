@@ -12,7 +12,7 @@ validates and hands to Modkit, and never installs. Novel content is additive thr
 
 Grades: PROVEN (measured this pass or cited to code), INFERRED, UNPROVEN. Numbers come from
 `mercs2_probe layer --catalog`, `layer <name>` over all 925 layers, `save-dump`, `overlays`,
-`dump-containers`, `dump-hibernation`, `dump-pool` and the decompiled Lua in `docs/mercs2-luacd/src`.
+`dump-containers`, `dump-hibernation`, `dump-pool` and the decompiled Lua in [`docs/mercs2-luacd/src`](../../../crates/mercs2_script/corpus/mercs2-luacd/src).
 Line numbers in Lua are decompiled lines.
 
 ## Facts the design stands on
@@ -30,7 +30,7 @@ Line numbers in Lua are decompiled lines.
 | A job's layers come from slots in its script: `sPristineLayer`, `sStagingLayer`, `sDefenseLayer`, `sDestroyedLayer`, `sCapturedLayer`, `sVerifiedLayer`. 378 layer names sit in those slots, over 124 subjects | 24 Lua files; `mrxtaskjob.lua:15-28`, `mrxtaskjobdestroyset.lua:49-59`, `mrxtaskcontractoutpost.lua:10-20,153-160` | PROVEN |
 | `_ruined` and `_destroyed` are one role: `oiljob008.lua:90-111` puts `_Ruined` layers in `sDestroyedLayer`, and 2 `_Captured` layers too (`:76`, `:83`). Ruins sit on the pristine positions: `oiljob008_d` 3 of 3 | Lua, `layer` | PROVEN |
 | Swap pairs: states replace entities in place. Over 42 pristine/destroyed pairs, 264 of 393 destroyed entities sit within 5 cm of a pristine entity; ChiJob006_C is 11 of 11. Over 19 staging/captured pairs, 403 of 1,010; AllJob001_03 is 51 of 76, e.g. 28 `_vzoutpost_walla` → `_vzoutpost_walla_AL`. Nothing in the data links them | position join over `layer` output | PROVEN (join), INFERRED (intent) |
-| Linked positions: a child named by a placed `PhysicalLink` sits at parent × hard point × offset; its Transform is not its position | `docs/placement_data_format.md` §2.5 | PROVEN |
+| Linked positions: a child named by a placed `PhysicalLink` sits at parent × hard point × offset; its Transform is not its position | [`docs/placement_data_format.md`](../../placement_data_format.md) §2.5 | PROVEN |
 | A cdbsizes pool is a presize. Capture mid-mission: `Name` 82,666 against 6,912, `Label` 7,498 against 6,400 | `dump-containers`; memory `ecs-container-descriptor-and-pool-sizing` | PROVEN |
 | The hibernation grid is the pool the veg work hit. Both use the 12-bit `+0x18` field, the `0x1F0` block, chain at `+0x1E8`, quantiser `FUN_005168B0`. Mid-mission capture: 78,163 rows in 2,919 blocks, none over 32 rows; 789 block ids below 1024 (the 32 × 32 cells), 2,130 at or above it, highest 3,161 | `hibernation_grid.md` §1–§2; memory `veg-density-pool-12bit-ceiling`; `dump-pool SceneObject --bytes 28`, `u16 @+0x18 & 0xFFF` | PROVEN |
 | Cell occupancy predicts chained blocks: the capture's own positions give Σ(⌈n / 32⌉ − 1) = 2,137 against 2,130 live | same dump | PROVEN for this capture |
@@ -162,7 +162,7 @@ key that collides is M0198.
 | Density lens | Entities per 256 m cell in this state. Amber over 32 (a chained block), red over 320 | cell = `(x + 4096) / 256`, `hibernation_grid.md` §2 | — | act1end: 791 cells used, 448 over 32, 51 over 320, fullest 732 at (4, 18) Cumana. These counts hold link children at their stored Transforms; the tool resolves them and leaves attached children out of the grid | test: Σ against a capture's 2,130 chained blocks |
 | Awake lens | Pick a viewer point; each entity shows awake, or asleep with its radius | `hibernation_grid.md` §2–§4, `mercs2_formats::hibernation_control` | — | offline compute of radius | test: on the capture's viewer, 2,214 awake of 78,163 rows |
 | Script markers lens | Marks entities Lua names, with the mission | literals; `mercs2_autoplay` NDJSON for names built at run time; waypoints come from Lua (`MrxTaskObjective` line 428), not layers | — | the join table | test: 492 of 567 literals place |
-| Grids | Toggles the 400 m terrain, 256 m hibernation and 200 m stand-in grids | `docs/terrain_cell_format.md`, manifest `add_tiny_geometry` | `settings.json` | — | capture |
+| Grids | Toggles the 400 m terrain, 256 m hibernation and 200 m stand-in grids | [`docs/terrain_cell_format.md`](../../terrain_cell_format.md), manifest `add_tiny_geometry` | `settings.json` | — | capture |
 | Place card | Layers, base and overlay counts, on in this state, every state, role chips. A chip filters the outliner. **Open layers** goes to Role grouping with the place filtered; **Show in 3D** switches mode | catalog, state set | — | — | test: Maracaibo 134, 58 on at act1end |
 | Fullest cells | Sorted list; click frames the cell | density | — | — | test |
 | Map · 3D · Plan | Same selection and state in three views | `layerview` | — | Plan is new: entities as marks in x, z | capture of each |
@@ -230,7 +230,7 @@ Staging and Defenses. The two arcs differ, so the arc is read from the script's 
 | Grid blocks | 3,081 of 4,000 at act1end: 1,024 cells + Σ(⌈n / 32⌉ − 1). The bar stays INFERRED, and the card shows the chain-only reading, 2,057 | grid | — | U5 | Σ against the capture, 2,137 and 2,130 |
 | Far stand-in slot lists | 1,208 of 1,400 | M0246 | — | — | M0246 fixtures |
 | Same-model draws | Two proven runs, no ceiling drawn past them | memory | — | — | — |
-| Pools | Bar is the capture's count; the tick is the presize, and a bar may pass it. Columns State, Capture, Presize. State shows own placed records; the pool also holds template and runtime rows | `docs/game_config/cdbsizes.ini`, `dump-containers` | — | captures bundled as numbers in the release: `index::data_home()` | test: `Name` passes its tick |
+| Pools | Bar is the capture's count; the tick is the presize, and a bar may pass it. Columns State, Capture, Presize. State shows own placed records; the pool also holds template and runtime rows | [`docs/game_config/cdbsizes.ini`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/game_config/cdbsizes.ini), `dump-containers` | — | captures bundled as numbers in the release: `index::data_home()` | test: `Name` passes its tick |
 | Add my draft | Adds the draft's entities to State and to cell density | draft | — | — | test |
 
 Cdbsizes rows are never drawn as limits. A modder who sees `Name` at 12 × presize learns it grows;

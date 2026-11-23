@@ -1,6 +1,6 @@
 //! `mercs2_ui` — GUI / HUD / Scaleform GFx + input extensions.
 //!
-//! **Code map:** `docs/reverse_engineer/hud_widget_code_map.md` — the widget tree, its memory
+//! **Code map:** [`docs/reverse_engineer/hud_widget_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hud_widget_code_map.md) — the widget tree, its memory
 //! layout and the `_GuiInternal` surface. Secondary: `scaleform_gfx_class_map.md` (the GFx/renderer
 //! side) and `input_code_map.md`.
 //! **Owned Lua namespace(s):** `Hud`, `Pda`, `Gui`, `Marker`, `_GuiInternal`.

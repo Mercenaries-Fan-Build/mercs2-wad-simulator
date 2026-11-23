@@ -26,7 +26,7 @@ shape as the AI crate's `AiWorld`.
 
 ## Where it comes from
 
-Derived from `docs/reverse_engineer/decal_code_map.md` (the sky/decal/water PC code maps), as the
+Derived from [`docs/reverse_engineer/decal_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/decal_code_map.md) (the sky/decal/water PC code maps), as the
 crate's own docs state:
 
 * The `decaltable` is an ASET resident singleton, type-class hash **`0x3B0AABF8`**. The big ASET

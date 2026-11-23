@@ -1,5 +1,5 @@
 //! `stockpile-restore` — does a WAD's `wifpmcinterior` script restore the HQ stockpile mark a save
-//! holds (BUG-015, `docs/fixpack/bug_register.md`)?
+//! holds (BUG-015, [`docs/fixpack/bug_register.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/bug_register.md))?
 //!
 //! ```text
 //! mercs2_probe stockpile-restore <profile> --expect restored|dropped [--wad <wad>]

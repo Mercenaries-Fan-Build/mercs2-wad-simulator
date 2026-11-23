@@ -1,5 +1,5 @@
 //! `splice-emulate`: run a SecuROM splice through a decrypted memory dump of the game and report what
-//! the code behind it did — the method `docs/reverse_engineer/audio_code_map.md` §10 uses.
+//! the code behind it did — the method [`docs/reverse_engineer/audio_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/audio_code_map.md) §10 uses.
 //!
 //! A splice replaces game code with a jump into SecuROM, whose VM runs the stolen instructions and
 //! comes back to game code. The dump (`output/_ghidra/securom_dump/image.bin`, a capture's

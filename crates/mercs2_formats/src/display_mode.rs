@@ -1,5 +1,5 @@
 //! The game's display-mode list and the BUG-016 choice of a mode when `Mercs2.ini`'s mode is not in it
-//! (`docs/fixpack/bug_register.md`). The list is built by the render state's constructor from
+//! ([`docs/fixpack/bug_register.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/bug_register.md)). The list is built by the render state's constructor from
 //! `IDirect3D9::EnumAdapterModes` (`D3DFMT_X8R8G8B8` only) and searched by exact equality on width, height,
 //! bits per pixel and refresh rate ([`crate::display_mode_sites`]). Retail falls back to 640×480 at 60 Hz
 //! when the ini mode is missing and returns an error the caller never checks when that is missing too.

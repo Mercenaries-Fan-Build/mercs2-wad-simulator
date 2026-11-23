@@ -3,7 +3,7 @@
 //! The decompressed save payload is a `return { … }` Lua chunk (plain source text,
 //! not bytecode — the engine `loadstring`s it; see
 //! [`crate::save::parse_save_state`] module docs and
-//! `docs/reverse_engineer/save_serialize_code_map.md` §2.1). To edit a save
+//! [`docs/reverse_engineer/save_serialize_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/save_serialize_code_map.md) §2.1). To edit a save
 //! safely you need a round-tripping parser: text-level splicing cannot preserve
 //! the subtle structural invariants (sibling comma, nested-brace balance, string
 //! escape fidelity) that the engine's own `loadstring` relies on — the first

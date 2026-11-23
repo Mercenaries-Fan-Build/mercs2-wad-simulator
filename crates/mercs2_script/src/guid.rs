@@ -4,10 +4,10 @@
 //!
 //! Retail does not hand GUIDs to Lua as numbers. Its universal argument reader `FUN_0059FF50`
 //! accepts **only Lua type tags 2 (lightuserdata) and 7 (full userdata)** and returns `0` for
-//! anything else without raising (`docs/reverse_engineer/inventory_equipment_code_map.md` §4.5), and
+//! anything else without raising ([`docs/reverse_engineer/inventory_equipment_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/inventory_equipment_code_map.md) §4.5), and
 //! the push side matches: `Player.GetAnyCharacter` builds its `0xF0000000` sentinel as
 //! `mov dword [eax], 0xf0000000` / `mov dword [eax+4], 2` — value plus **type tag 2**, i.e.
-//! lightuserdata (`docs/reverse_engineer/player_code_map.md` §10.7).
+//! lightuserdata ([`docs/reverse_engineer/player_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/player_code_map.md) §10.7).
 //!
 //! The shipped scripts are written against that and **type-check on it**. In the vendored corpus
 //! (`corpus/mercs2-luacd/src/`) there are 114 `"userdata"` comparisons — roughly 54 of the form

@@ -3,7 +3,7 @@
 //!
 //! # Provenance & honesty boundary
 //! WILDSTAR-sourced from `WSHumanRagdoll` + the explosion apply
-//! (`docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`): the recovered
+//! ([`docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md)): the recovered
 //! `WSHumanRagdoll::SetBodyToRagdoll` snaps each rigid body onto its current animated bone pose and then
 //! releases it to Havok, and `WSExplosion::Update` applies a **7-bone impulse spread** floored at
 //! `damage::wildstar::FORCE_FLOOR` (200).

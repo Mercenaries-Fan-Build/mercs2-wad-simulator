@@ -126,7 +126,7 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // The D3D pool's three trackers, one per resource kind. Each starts by dereferencing the object a
     // create wrapper hands it, and no wrapper tests the create's HRESULT, so a failed create faults here
     // with AV READ target=0 and, when it is the create's own failure, EAX=8007000E (E_OUTOFMEMORY).
-    // BUG-013 in docs/fixpack/bug_register.md; layouts in docs/reverse_engineer/d3d_resource_pool.md.
+    // BUG-013 in https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/bug_register.md; layouts in https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/d3d_resource_pool.md.
     // Both E_OUTOFMEMORY crashes on record came in mid-game, after 18 and 29 minutes. 0x0085C8D0 was also
     // seen earlier on the wardrobe preview (menu-open), reached via model-instantiation frames
     // 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. NOT teardown artifacts.

@@ -43,7 +43,7 @@ set, exactly as matched in `main()`:
 | `stockpile-restore <profile-path> --expect restored\|dropped` | runs `--wad`'s `wifpmcinterior` script in the exact Lua 5.1.5 VM: `LoadSingleton` with the save's `tPmcInteriorData.tStockpileQty`, then `_UpdateStockpile(false)` with the player holding nothing, and reports whether the HQ shows the saved mark (`restored`) or the live 0 (`dropped`). Exit 0 the outcome is `--expect`, 1 it is not, 2 could not run (also when every saved mark is 0, which cannot tell the two apart). BUG-015 of the fix-pack |
 | `anim-table <name\|0xH> [--handle 0xH] [--list <column>]` | an `animationtable` as the loader holds it: columns, defaults row, data rows, and each row's `ASTO` list |
 | `layer <name\|0xH> [--overlay <wad>]` / `layer --all` / `layer --frames <capture>` / `layer --catalog <out.tsv> [--also <archives>]` | every entity of a placement layer with its template, model and component classes, and the `lineregion` hash a `LineRegion` names; `--overlay` mounts a WAD over the stack, e.g. a level's patch over `vz.wad`; `--all` reads every layer of the stack, prints how many entities draw a model, how placed `PhysicalLink` records resolve and which classes the rest carry, and exits 1 if a layer does not read; `--frames` compares every placed entity a v1.0 capture holds with its live SceneObject position: a link child against its chain of links, the rest against their `Transform`; `--catalog` writes one TSV row per layer of the stack with its archive, block path, entity, model and link counts and class counts, plus a bare row per layer of each `--also` archive, of any platform |
-| `clip-names <review.tsv>` | names the AnimationLookup's clips from the rows that list them (`player_mattias_rifle_upright_run_forward_fb`): the row's character and equipment, then a stance and action from words the data supplies. Writes a review file, each name with its expected chance matches, whether its stance agrees with the stance tables, and how many clips share its stance and action; merges nothing. Reads `rainbow_table`, `jul08_strings` and `notes_docs_dir` from `.mercs2-local.toml` |
+| `clip-names <review.tsv>` | names the AnimationLookup's clips from the rows that list them (`player_mattias_rifle_upright_run_forward_fb`): the row's character and equipment, then a stance and action from words the data supplies. Writes a review file, each name with its expected chance matches, whether its stance agrees with the stance tables, and how many clips share its stance and action; merges nothing. Reads `rainbow_table` and `jul08_strings` from `.mercs2-local.toml`, the names home `crates/mercs2_workshop/data/aset_discovered_names.json` and the script corpus |
 | `we-template <name\|0xKEY>...` · `--class <Class>` · `--uses <0xU32>` · `--enums` | the retail `worldentity`: a template's component records, a class's schema (field names) and records, every record holding a value, or the enum tables |
 | `clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]` | a clip posed on a model as the engine poses it: the bones' model-space positions per frame and their positions in the reference bone's frame |
 | `dump-read <capture-dir> <0xVA> [len]` | retail memory from an x32dbg capture (`game-files/memory-dumps/<build>/<state>`); no WAD |
@@ -70,12 +70,12 @@ does not apply to them. Their full usage is in each module's header (`src/<name>
 | `place-forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z ...` / `place-forge --list <block.bin> [--near X,Z] [--radius R]` | appends new SceneObject placements to a placement block and reads them back; `--list` prints the block's model placements |
 | `place-lift <in.bin> <out.bin> --key 0xKEY ... --dy <f32>` / `place-lift <in.bin> --list --key 0xKEY ...` | moves the Y of the `Transform` records of the given entity keys in place |
 | `c3-veg-forge --base-wad <vz.wad> --out <overlay.wad> ...` | appends a cluster veg model to the c3 cells around a point and writes them as an overlay WAD |
-| `jc2-blockrt [vz.wad]` | the worldentity block's entry-table round trip; writes the block to `../../output/block3185_original.bin` |
+| `jc2-blockrt --dir <dir> [vz.wad]` | the worldentity block's entry-table round trip; writes the block to `<dir>/block3185_original.bin` |
 | `jc2-script-probe [vz.wad\|block.bin] [name ...\|--summary]` | resident-script `INFO`/`DEPS`/`BINN` structure |
-| `jc2-template-mint [vz.wad]` | mints the JC2 vehicle template into the worldentity block; reads `../../output/mrx*_edited.luaq` and writes `../../output/jc2_block3185_minted.bin` |
+| `jc2-template-mint --dir <dir> [vz.wad]` | mints the JC2 vehicle template into the worldentity block; reads `<dir>/mrx*_edited.luaq` and writes `<dir>/jc2_block3185_minted.bin` |
 | `worldentity-probe [vz.wad] [0xHANDLE ...]` | the worldentity container's COMP groups and the component recipe of each handle |
 | `ragdoll-probe [--hashes] [--extract-fixture]` | Havok physics/ragdoll classes across every block of `vz.wad` (`MERCS2_GAME_DIR` / `VZ_WAD`, else `./.mercs2-local.toml`) |
-| `lua-vehicle-hashes [out.csv]` | vehicle names in the decompiled Lua corpora with their `pandemic_hash_m2`; reads `docs/mercs2-luacd/src` and `docs/mercs2-dlc-luacd/src` from the current directory and writes `docs/data/lua_vehicle_hashes.csv` there by default |
+| `lua-vehicle-hashes [out.csv]` | vehicle names in the decompiled Lua corpora with their `pandemic_hash_m2`; reads the script corpora vendored in `mercs2_script` (`corpus/mercs2-luacd/src`, `corpus/mercs2-dlc-luacd/src`) and writes this repository's `docs/data/lua_vehicle_hashes.csv` by default; the example files are written relative to the repository root |
 | `shaderforge <list\|static-vs\|consts\|splice\|bundle\|disasm\|roles> <shader3.bin> ...` / `shaderforge asm <in.asm> <out.sho> [--target T]` / `shaderforge store-id <stem> [--low]` | `shader3.bin` inventory, CTAB constants, SM3 disassembly and assembly, the instancing splice, store record ids |
 
 `<capture>` is either a capture folder (`<build>/<state>/` with `process.dmp`, `SHA256SUMS.txt`,
@@ -112,8 +112,8 @@ zeros. Their tests are game-gated (`--features retail`) and read `memory_dumps_d
   `--unnamed-models` lists every model with no known name with the named textures its own `MTRL`
   cites, `--all` including named models), `tex_orphans` (every texture chunk no `MTRL` of any loader
   cites — model, terrainmesh, font, lowresterrain, scrub — grouped by block, with any other chunk
-  that holds the hash as a raw u32). Both read names from `docs/data/aset_names.csv` under the
-  `notes_docs_dir` key of `.mercs2-local.toml`. Subcommands `tex-rungs` (every texture chunk of a
+  that holds the hash as a raw u32). Both read names from this repository's
+  `docs/data/aset_names.csv`. Subcommands `tex-rungs` (every texture chunk of a
   big-endian archive and its PC twin, a row per block) and `tex-compare` (an Xbox archive's textures,
   converted and decoded mip by mip against PC, or a PS3 archive with `--ps3`).
 * **DLC**: subcommand `dlc-census` (every chunk of a big-endian DLC archive against the retail build of

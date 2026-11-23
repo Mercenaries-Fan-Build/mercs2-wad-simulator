@@ -3,7 +3,7 @@
 //!
 //! Ported from `tools/pws_extractor.py`. This module deliberately does NOT
 //! decode audio — the IMA-ADPCM decoder lives in
-//! [`mercs2_audio::wave`](../../../mercs2_audio/src/wave.rs) and the
+//! [`mercs2_audio::wave`](../../mercs2_audio/src/wave.rs) and the
 //! Xbox→PC transcoder in [`crate::be_to_le::audio`]. Here we only slice
 //! payloads out of the container.
 //!

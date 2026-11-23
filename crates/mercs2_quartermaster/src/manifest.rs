@@ -1298,8 +1298,7 @@ pub enum Contribution {
     /// Installed together, every Shipment's additions and edits to one table are merged by `qm link`
     /// into one table, by key hash in load order; the later Shipment's text wins. To OVERRIDE an
     /// existing key's text, use [`EditStringDb`]; a mixed intent must be split into two rows.
-    /// The same shell/vz duplication caveat applies as for [`EditStringDb`] (M0191 warns on
-    /// `edit_stringdb` only, not on this kind).
+    /// Like [`EditStringDb`], each copy of the table (vz.wad's, shell.wad's) is written.
     // `snake_case` would derive `add_string_db_keys`; the kind is `add_stringdb_keys` everywhere else
     // (`kind()`, `ALL_KINDS`, the docs), so the tag is pinned, as `edit_stringdb`'s is.
     #[serde(rename = "add_stringdb_keys")]
@@ -1343,10 +1342,11 @@ pub enum Contribution {
     /// (`mercs2_formats::stringdb`) is proven byte-identical against all six retail language tables,
     /// and arbitrary-length edits are supported — the heap is rebuilt and the descriptors repointed.
     ///
-    /// ⚠ A shared UI string (button prompts, options, PDA chrome) lives in BOTH `shell.wad` and
-    /// `vz.wad`'s english table, served at different times — front end from shell, gameplay from vz
-    /// (`docs/fixpack/wad_duplicate_inventory.md` §C). Editing one table is a half-fix; the linter
-    /// warns when the target is one of those shared tables.
+    /// A shared UI string (button prompts, options, PDA chrome) lives in BOTH `shell.wad`'s and
+    /// `vz.wad`'s copy of a table, served at different times — front end from shell, gameplay from vz
+    /// ([`docs/fixpack/wad_duplicate_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/wad_duplicate_inventory.md) §C) — so each copy present is edited: vz.wad's ships
+    /// in the overlay, shell.wad's in the shell patch. A table only shell.wad has (`french`, …) is
+    /// edited there alone.
     // `snake_case` on the enum would derive `edit_string_db`; the kind tag and every doc say
     // `edit_stringdb`, matching `stringdb` everywhere else, so the tag is pinned explicitly.
     #[serde(rename = "edit_stringdb")]
@@ -1372,7 +1372,7 @@ pub enum Contribution {
     /// Selection is a SEPARATE concern, and not this kind's: PC has no in-game language selector (the
     /// language is chosen at boot from OS-locale), and switching the game into an installed language
     /// is handled by Modkit. `add_language` ships the CONTENT only. The RE is in
-    /// `docs/reverse_engineer/language_asi_hook_contract.md`.
+    /// [`docs/reverse_engineer/language_asi_hook_contract.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/language_asi_hook_contract.md).
     AddLanguage {
         /// The language name → the mounted `.\Data\<name>.wad` filename AND `pandemic_hash_m2(name)`
         /// for the stringdb key. A lowercase `[a-z0-9_]` token (it becomes a filename), and never a
@@ -1420,6 +1420,27 @@ pub enum Contribution {
         /// page shows `//`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         date: Option<String>,
+    },
+    /// Script. An item on a page of a retail menu (`data/menus.toml`, [`crate::menu_items`]), composed by
+    /// `qm link` with every installed Shipment's items into one edit of the player's own menu movie: it
+    /// goes after the item `after` names and moves the items below it down one place; its label is set in
+    /// the menu's lettering from the text of `label` in each installed language's front-end string table;
+    /// the help bar shows `help`'s; choosing it runs `action` in the front end.
+    AddMenuItem {
+        /// The catalogue page, e.g. `shell.main` (the main menu).
+        menu: String,
+        /// The label's string key (`SHELL.MainMenu.Mods` or `[SHELL.MainMenu.Mods]`). Its text in every
+        /// installed language's front-end table is set as the label; one missing fails the link.
+        label: String,
+        /// The label key of the item it goes after: a retail item of the page (its key name, or its
+        /// `0x…` hash where no name is known) or another `add_menu_item`'s `label`.
+        after: String,
+        /// The string key of the line the help bar shows while it is selected. Omitted, the bar is empty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        help: Option<String>,
+        /// `Module.Function`, run with no arguments in the front end when the item is chosen: the module
+        /// is one the set loads in the front end.
+        action: String,
     },
     /// Data. One asset of an `add_level` of this Shipment, or of the main campaign (`level: vz`), in the
     /// PC container form of its type: every byte the asset has, so any type the engine loads can be
@@ -1643,6 +1664,7 @@ impl Contribution {
         "replace_stringdb_text",
         "add_language",
         "add_level",
+        "add_menu_item",
         "level_asset",
         "fetch_package",
         "native_hook",
@@ -1707,6 +1729,7 @@ impl Contribution {
             Contribution::ReplaceStringDbText { .. } => "replace_stringdb_text",
             Contribution::AddLanguage { .. } => "add_language",
             Contribution::AddLevel { .. } => "add_level",
+            Contribution::AddMenuItem { .. } => "add_menu_item",
             Contribution::LevelAsset { .. } => "level_asset",
             Contribution::FetchPackage { .. } => "fetch_package",
             Contribution::NativeHook { .. } => "native_hook",

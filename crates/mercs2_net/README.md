@@ -30,7 +30,7 @@ them; the online-restore mod stands in for that surface.
 
 ## Where it comes from
 
-Derived from `docs/reverse_engineer/networking_code_map.md`, with `event_bus_code_map.md` §4 (the
+Derived from [`docs/reverse_engineer/networking_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/networking_code_map.md), with `event_bus_code_map.md` §4 (the
 shared bus the wire branch rides) and `ai_code_map.md` §2.2 (the `DirectAction` replicate gate).
 
 What is recovered first-hand and modeled here:

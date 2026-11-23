@@ -1,0 +1,9 @@
+sParticipant1 = "Player1"
+sParticipant2 = "Starter"
+tSequence = {
+  {
+    sSpeaker = "Starter",
+    sCue = "Wu-Briefing-MinorContract-Chi05-01",
+    sAnim = ""
+  }
+}

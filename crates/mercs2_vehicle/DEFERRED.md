@@ -25,7 +25,7 @@ with whether it blocks a faithful reimplementation.
   deliberately out of scope here: the retail chain is per-node `RuntimeNodeHealth` → the destruction
   state machine → `node_enable` toggling model nodes → part detach + debris spawn + burning wreck.
   That lands as its own subsystem (a future `mercs2_destruction` crate), not inside the drive system.
-  References: `docs/reverse_engineer/state_machine_destruction_code_map.md` and
+  References: [`docs/reverse_engineer/state_machine_destruction_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/state_machine_destruction_code_map.md) and
   `docs/modernization/vehicle_model_spec.md` §5.
   `[faithful-blocker: yes — a vehicle at 0 HP currently just sits at 0]`
 

@@ -1,0 +1,3 @@
+node_modules/
+# Reference images cut from the player's own shell.wad (`mercs2_probe label-crops`): retail art, never committed.
+public/retail/

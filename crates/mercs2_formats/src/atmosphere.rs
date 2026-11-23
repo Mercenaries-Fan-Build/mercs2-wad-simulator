@@ -3,13 +3,13 @@
 //!
 //! In Mercenaries 2 the sky/atmosphere and the HDR tone-map + bloom post chain are NOT a WAD
 //! chunk: the world's Lua *assembles* the look by calling a named key/value engine API,
-//! bracketed by `Begin()` / `End()` (see `docs/mercs2-luacd/src/resident/mrxbootstrap.lua`
+//! bracketed by `Begin()` / `End()` (see `crates/mercs2_script/corpus/mercs2-luacd/src/resident/mrxbootstrap.lua`
 //! `SetDefaultAtmosphere`, and the `airstrike_atomsphere_*` FX overrides). The engine implements
 //! those setters. This module is the engine-side data model + a parser that ingests exactly that
 //! command stream, so `mercs2_engine` can drive its sky/HDR/bloom from the authentic parameters.
 //!
 //! The namespace (verified across the decompiled Lua corpus + the `.rdata` tunable-name strings in
-//! `docs/mercs2-pdb-analysis/rendering-shaders.md`):
+//! [`docs/mercs2-pdb-analysis/rendering-shaders.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/rendering-shaders.md)):
 //!   float setters   — `SetValue("f…", x)` : fBloom*, fAtmosphereForce/Limit, fLightIntensity, fTimeRestore
 //!   color setters   — `SetColorValue("ui…", r,g,b,a)` (0..255) : uiAmbientColor, uiAmbientCube0..5,
 //!                     uiGradient0_Color2, uiGradient1_Color1, uiRimColor
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn parses_mrxbootstrap_default_block() {
-        // Verbatim from docs/mercs2-luacd/src/resident/mrxbootstrap.lua SetDefaultAtmosphere.
+        // Verbatim from crates/mercs2_script/corpus/mercs2-luacd/src/resident/mrxbootstrap.lua SetDefaultAtmosphere.
         let src = r#"
   Graphics.Atmosphere.Begin()
   Graphics.Atmosphere.SetTime(0.3)
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn parses_verify_flash_bloom_preset() {
-        // Verbatim bloom block from docs/mercs2-luacd/src/resident/verify_flash.lua.
+        // Verbatim bloom block from crates/mercs2_script/corpus/mercs2-luacd/src/resident/verify_flash.lua.
         let src = r#"
   Graphics.Atmosphere.SetValue("fBloomAdaptiveLuminancePercent", 0.49)
   Graphics.Atmosphere.SetValue("fBloomAdaptiveLuminanceScale", 15)

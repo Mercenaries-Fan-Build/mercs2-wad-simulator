@@ -1,8 +1,8 @@
 //! `mercs2_jobs` — the **Pimp job system**, the engine's parallel-work spine.
 //!
-//! **Code map:** `docs/reverse_engineer/pimp_job_system_code_map.md` (companion to the Keystone PC
+//! **Code map:** [`docs/reverse_engineer/pimp_job_system_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/pimp_job_system_code_map.md) (companion to the Keystone PC
 //! code-map recovery — master tick order, event bus, Pimp jobs). Xbox oracle
-//! `docs/mercs2-pdb-analysis/jobs-threading.md`.
+//! [`docs/mercs2-pdb-analysis/jobs-threading.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/jobs-threading.md).
 //!
 //! Pandemic's in-house **"Pimp"** multi-CPU job library (Xbox source `d:\mainline\mercs2\pimp\`) was
 //! a *"true novel system"* — **100% string-only on Xbox** (0 decomp hits). The PC build

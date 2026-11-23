@@ -1,6 +1,6 @@
 //! `mercs2_ai` — AI: the hash-addressed action bus + per-entity perception + component families.
 //!
-//! **Code map:** `docs/reverse_engineer/ai_code_map.md` (the recovered runtime spine + component
+//! **Code map:** [`docs/reverse_engineer/ai_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/ai_code_map.md) (the recovered runtime spine + component
 //! census), with `road_graph_ai_driving_code_map.md` for vehicle-AI actuation.
 //! **Owned Lua namespace(s):** `Ai`.
 //!

@@ -1,6 +1,6 @@
 //! `mercs2_faction` — the faction / reputation / pursuit ("heat") mechanism.
 //!
-//! **Code map:** `docs/reverse_engineer/faction_reputation_code_map.md` (§10 = the reimpl target),
+//! **Code map:** [`docs/reverse_engineer/faction_reputation_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/faction_reputation_code_map.md) (§10 = the reimpl target),
 //! with `ai_code_map.md` for the `Suspect` per-faction wanted component.
 //! **Owned Lua surface:** `Ai.AddInfraction`, `Ai.Get/SetRelation`, `Ai.SetInfractionMultiplier`,
 //! `Pg.*Pursuit*`, `MrxFactionManager`.

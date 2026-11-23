@@ -5,7 +5,7 @@
 //! stitches them end to end into closed contours, and those are filled. Strokes run in record order.
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use lyon_tessellation::math::point;
 use lyon_tessellation::path::Path;
@@ -27,7 +27,7 @@ pub enum Paint {
     /// `to_pixels` maps twips to pixels of the image `id` names.
     Bitmap { id: u16, to_pixels: Matrix, clamp: bool, smooth: bool },
     /// Text: quads into a font texture, one coordinate per vertex.
-    Glyphs { atlas: Rc<str>, color: Rgba, uvs: Vec<[f32; 2]> },
+    Glyphs { atlas: Arc<str>, color: Rgba, uvs: Vec<[f32; 2]> },
 }
 
 /// One paint's triangles, in twips.

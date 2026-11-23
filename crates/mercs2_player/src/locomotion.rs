@@ -5,7 +5,7 @@
 //! **This is a modern stand-in, not a decompiled body.** Retail's on-foot controller is Havok:
 //! `HumanPhysics::Activate` (`FUN_004255C0`) builds 7 capsules + a phantom + an `hkpCharacterProxy`,
 //! driven by the 5-state `hkpCharacterContext` machine — all of it mapped in
-//! `docs/reverse_engineer/physics_code_map.md`, and **none of it implemented here**. Every constant
+//! [`docs/reverse_engineer/physics_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/physics_code_map.md), and **none of it implemented here**. Every constant
 //! below is gameplay-derived from human scale, not read from the exe.
 //!
 //! What this *is*: a testable controller with the right shape (eased ground speed, collide-and-slide,

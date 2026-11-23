@@ -426,7 +426,7 @@ impl PlacedEntity {
     pub const NON_STATIC_FLAG: u16 = 0x200;
 
     /// Whether retail registers the entity in the hibernation grid as static (`FUN_00516280`): not
-    /// terrain and SceneObject `+0x1A` bit 2 clear (`docs/reverse_engineer/hibernation_grid.md` §2).
+    /// terrain and SceneObject `+0x1A` bit 2 clear ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §2).
     pub fn is_static(&self) -> bool {
         !self.terrain && self.flags & Self::NON_STATIC_FLAG == 0
     }
@@ -507,7 +507,7 @@ fn parse_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)
 
 /// Every placed entity's `Name` string as stored — `"<name> 0x<KEY>"`, or a bare name for the
 /// suffix-less ones — by entity key, in data order. Retail's name index registers exactly this string
-/// (`Pg.GetGuidByName`, `docs/reverse_engineer/object_entity_core_code_map.md` §4.0).
+/// (`Pg.GetGuidByName`, [`docs/reverse_engineer/object_entity_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/object_entity_core_code_map.md) §4.0).
 pub fn placed_names(block: &[u8]) -> Vec<(u32, String)> {
     let ucfx_positions = find_all(block, b"UCFX");
     let mut out = Vec::new();
@@ -780,7 +780,7 @@ fn load_keyed_asset_placements(block: &[u8], comp: &str) -> KeyedPlacements {
 
 /// A parsed `LightObject` ECS component record (reflection class `0x97e8ee92`) — a placed dynamic
 /// light. The field order is taken verbatim from the reflection deserialize template
-/// `FUN_006622e0` (Ghidra decomp) and `docs/mercs2-ecs/05_presentation_audio_fx.md`:
+/// `FUN_006622e0` (Ghidra decomp) and `crates/mercs2_workshop/data/mercs2-ecs/05_presentation_audio_fx.md`:
 ///
 /// ```text
 /// FUN_00656210(0)          -> int   light_type / id     (reflected field 0)
@@ -794,7 +794,7 @@ fn load_keyed_asset_placements(block: &[u8], comp: &str) -> KeyedPlacements {
 ///
 /// The nine floats all default to `0.0` in the shipping `.rdata` (their live values arrive from the
 /// level stream); the semantic *names* below are INFERRED from the class purpose and corroborated by
-/// the UE port bindings (`docs/ue_game_bindings.md` → PointLight: color, `Intensity`,
+/// the UE port bindings ([`docs/ue_game_bindings.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/ue_game_bindings.md) → PointLight: color, `Intensity`,
 /// `AttenuationRadius`). We therefore keep all nine raw floats. The light's render node reads payload
 /// `+0x18` (`params[2]`) as its range and `+0x24` (`params[5]`) as its cone angle (`FUN_004A7120`,
 /// `FUN_004A7660`), and `+0x28`/`+0x2C`/`+0x30` (`params[6..9]`) are the runtime intensity / range /
@@ -838,7 +838,7 @@ impl LightObject {
     /// (e.g. `Light_spot_large_yellow`), and (b) only type 3 **varies** `params[4]`/`params[5]`, which
     /// type 2 freezes at the constants `0.524`/`0.785` rad (= 30°/45°) — i.e. the unused cone defaults.
     /// The parameter set matches WildStar's `WSLight` (`ConeLength`/`ConeFallOffMin`/`ConeFallOffMax`,
-    /// `docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`).
+    /// [`docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md)).
     pub fn is_spot(&self) -> bool {
         self.light_type == Self::TYPE_SPOT
     }
@@ -1162,11 +1162,11 @@ pub struct LandingZoneRecord {
 /// both type 5 / u32): field 0 hashes to `Player` (`0x600E3B1E`) at offset 0, field 1 to `Id`
 /// (`0xB7D01BFE`) at offset 4. The runtime container agrees on the width — the engine's container
 /// census lists `LandingZone` as type id 120, name-hash `0x2A20B640`, **stride 8**, pool cap 32
-/// (research repo `docs/reverse_engineer/object_entity_core_code_map.md:1506`, and the class
-/// deserializer `FUN_0065C610` in `docs/mercs2-ecs/07_gameplay_state_health_mission.md:194` —
+/// (research repo [`docs/reverse_engineer/object_entity_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/object_entity_core_code_map.md?plain=1#L1506), and the class
+/// deserializer `FUN_0065C610` in `crates/mercs2_workshop/data/mercs2-ecs/07_gameplay_state_health_mission.md:194` —
 /// whose field guesses "type/enabled" and "linked entity" the `schm` hashes above correct).
 ///
-/// NOTE the research repo's `docs/ecs_components.md:105,136` records this COMP as
+/// NOTE `docs/ecs_components.md:105,136` records this COMP as
 /// `272 (stride 276)` with "2 entities". That is a decoder artifact: the old Python extractor
 /// mis-derived the stride and swallowed each 276-byte `data` chunk as a single record. The real
 /// content is 23 records per chunk, 46 across the two. Three checks pin stride 12 independently of

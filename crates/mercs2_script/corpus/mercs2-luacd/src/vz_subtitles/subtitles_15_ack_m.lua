@@ -1,0 +1,31 @@
+Type = "Time"
+SubtitleData = {
+  {
+    1.12,
+    "[Ewan-Briefing-Cinematic-EndCinem-01]"
+  },
+  {
+    2.78,
+    "[Fiona-Briefing-Cinematic-EndCinem-02]"
+  },
+  {
+    3.78,
+    "[Fiona-Briefing-Cinematic-EndCinem-04]"
+  },
+  {
+    14.1,
+    "[Mattias-Briefing-Cinematic-EndCinem-07]"
+  },
+  {
+    16.57,
+    "[Ewan-Briefing-Cinematic-EndCinem-14]"
+  },
+  {
+    20.87,
+    "[Fiona-Briefing-Cinematic-EndCinem-16]"
+  },
+  {
+    25.52,
+    "[Mattias-Briefing-Cinematic-EndCinem-22]"
+  }
+}

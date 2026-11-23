@@ -45,7 +45,7 @@ The by-hash override strategy exists specifically to sidestep the unsolved ASET 
 
 The block-resolution rules encode hard-won facts about how the engine assembles a model, documented
 in `docs/modernization/vehicle_model_spec.md` §1 and used end-to-end in
-`docs/asset_injection_playbook.md`:
+[`docs/asset_injection_playbook.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/asset_injection_playbook.md):
 
 * By default the tool resolves a model's **ASET-primary block** rather than the block you named, so
   the HIER/structure the engine actually instantiates is the one you edit.
@@ -74,7 +74,7 @@ smuggler --source-wad vz.wad --block-index 3565 \
 ```
 
 A full vehicle swap — an exact LOD rung, a bytecode-redirect script block and a skin texture, in one
-patch WAD (from `docs/asset_injection_playbook.md` §5.1):
+patch WAD (from [`docs/asset_injection_playbook.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/asset_injection_playbook.md) §5.1):
 
 ```bash
 smuggler --source-wad vz.wad --exact-block --block-index 3565 \

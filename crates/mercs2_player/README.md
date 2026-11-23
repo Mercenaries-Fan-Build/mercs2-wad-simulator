@@ -8,7 +8,7 @@ on-foot locomotion.
 
 The engine behind the `Player` Lua namespace (107 cfuncs, `luaL_Reg` table `0x00B98FC0` — the
 second-highest-traffic namespace in the game). Reconstructed against
-`docs/reverse_engineer/player_code_map.md`, which has **all 107 cfunc bodies read** and whose §10 is a
+[`docs/reverse_engineer/player_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/player_code_map.md), which has **all 107 cfunc bodies read** and whose §10 is a
 requirements list written for this crate.
 
 The one thing to understand before reading anything else:

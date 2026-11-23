@@ -1,16 +1,20 @@
 //! The definitions of a Scaleform **GFx 2.0.48** movie: what a player needs from its tag stream.
 //!
-//! [`MovieDef::decode`] turns a [`GfxMovie`] into characters (shapes, morphs, sprites, edit text,
+//! [`MovieDef::decode`] turns a [`TagStream`] into characters (shapes, morphs, sprites, edit text,
 //! fonts, external images) and a root [`Timeline`]. The tag set is the one the 83 retail movies use
 //! (`docs/reverse_engineer/gfx_authoring_feature_spec.md` §1); any other tag is an error, so a movie
-//! is never played with a piece missing.
+//! is never played with a piece missing. The tags [`gfx_tags`] reads (placements, removals, frames,
+//! labels, edit text, exports, imports, and every `MATRIX`) are read through it, so what is played and
+//! what is written back come from one reading.
 //!
 //! The GFx extension tags are read as their loaders read them (`FUN_007d6120` for 1001): retail
 //! embeds no bitmaps, every image is a texture named by the tag.
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::gfx::{Cursor, GfxMovie};
+use crate::gfx::Cursor;
+use crate::gfx_stream::{Tag, TagBody, TagStream, END};
+use crate::gfx_tags::{self, CxformBits, EditTextTag, MatrixBits, PlaceTag, Typed, DO_ACTION};
 
 pub type Rgba = [u8; 4];
 
@@ -405,13 +409,9 @@ fn i16le(cur: &mut Cursor) -> Result<i16, String> {
     Ok(cur.u16()? as i16)
 }
 
-fn cstring(cur: &mut Cursor) -> Result<String, String> {
-    cur.align();
-    let rest = cur.data.get(cur.pos..).ok_or("eof:string")?;
-    let len = rest.iter().position(|b| *b == 0).ok_or("unterminated string")?;
-    let s = String::from_utf8_lossy(&rest[..len]).into_owned();
-    cur.pos += len + 1;
-    Ok(s)
+/// A string tag's bytes as text; bytes that are not UTF-8 are an error, not replaced.
+fn text(bytes: Vec<u8>) -> Result<String, String> {
+    String::from_utf8(bytes).map_err(|e| format!("a string that is not UTF-8: {:?}", String::from_utf8_lossy(e.as_bytes())))
 }
 
 /// A GFx string: `u8` length, then the bytes.
@@ -432,43 +432,33 @@ fn take_rest(cur: &mut Cursor) -> Vec<u8> {
 
 fn matrix(cur: &mut Cursor) -> Result<Matrix, String> {
     cur.align();
-    let mut m = Matrix::IDENTITY;
-    if cur.ubits(1)? == 1 {
-        let n = cur.ubits(5)?;
-        m.a = sbits(cur, n)? as f32 / 65536.0;
-        m.d = sbits(cur, n)? as f32 / 65536.0;
-    }
-    if cur.ubits(1)? == 1 {
-        let n = cur.ubits(5)?;
-        m.b = sbits(cur, n)? as f32 / 65536.0;
-        m.c = sbits(cur, n)? as f32 / 65536.0;
-    }
-    let n = cur.ubits(5)?;
-    m.tx = sbits(cur, n)? as f32;
-    m.ty = sbits(cur, n)? as f32;
-    cur.align();
-    Ok(m)
+    Ok(matrix_of(&gfx_tags::matrix(cur)?))
 }
 
-fn cxform(cur: &mut Cursor, alpha: bool) -> Result<Cxform, String> {
-    cur.align();
-    let has_add = cur.ubits(1)? == 1;
-    let has_mul = cur.ubits(1)? == 1;
-    let n = cur.ubits(4)?;
-    let channels = if alpha { 4 } else { 3 };
+/// A `MATRIX`'s stored values as a transform: 16.16 scale and skew, twips translation.
+pub fn matrix_of(m: &MatrixBits) -> Matrix {
+    let fixed = |v: i32| v as f32 / 65536.0;
+    let mut out = Matrix::IDENTITY;
+    if let Some(s) = m.scale {
+        (out.a, out.d) = (fixed(s.values[0]), fixed(s.values[1]));
+    }
+    if let Some(r) = m.rotate {
+        (out.b, out.c) = (fixed(r.values[0]), fixed(r.values[1]));
+    }
+    (out.tx, out.ty) = (m.translate.values[0] as f32, m.translate.values[1] as f32);
+    out
+}
+
+/// A `CXFORMWITHALPHA`'s stored values as a colour transform: 8.8 multiply, add in 1/255ths.
+pub fn cxform_of(c: &CxformBits) -> Cxform {
     let mut out = Cxform::IDENTITY;
-    if has_mul {
-        for k in 0..channels {
-            out.mul[k] = sbits(cur, n)? as f32 / 256.0;
-        }
+    if let Some(mul) = c.mul {
+        out.mul = mul.map(|v| v as f32 / 256.0);
     }
-    if has_add {
-        for k in 0..channels {
-            out.add[k] = sbits(cur, n)? as f32 / 255.0;
-        }
+    if let Some(add) = c.add {
+        out.add = add.map(|v| v as f32 / 255.0);
     }
-    cur.align();
-    Ok(out)
+    out
 }
 
 fn rgb(cur: &mut Cursor) -> Result<Rgba, String> {
@@ -762,190 +752,116 @@ fn morph(tag: &[u8], version: u8) -> Result<(u16, Morph), String> {
     Ok((id, Morph { fills, lines, start, end }))
 }
 
-fn edit_text(tag: &[u8]) -> Result<(u16, EditText), String> {
-    let mut cur = Cursor::new(tag, 0);
-    let id = cur.u16()?;
-    let bounds = cur.read_rect()?;
-    let a = cur.u8()?;
-    let b = cur.u8()?;
-    let mut out = EditText {
-        bounds,
-        word_wrap: a & 0x40 != 0,
-        multiline: a & 0x20 != 0,
-        password: a & 0x10 != 0,
-        read_only: a & 0x08 != 0,
-        no_select: b & 0x10 != 0,
-        border: b & 0x08 != 0,
-        html: b & 0x02 != 0,
-        outlines: b & 0x01 != 0,
-        auto_size: b & 0x40 != 0,
-        ..EditText::default()
+fn edit_text(t: EditTextTag) -> Result<(u16, EditText), String> {
+    let out = EditText {
+        bounds: t.bounds.values,
+        word_wrap: t.word_wrap,
+        multiline: t.multiline,
+        password: t.password,
+        read_only: t.read_only,
+        no_select: t.no_select,
+        border: t.border,
+        html: t.html,
+        outlines: t.use_outlines,
+        auto_size: t.auto_size,
+        font: t.font,
+        height: t.height.unwrap_or(0),
+        color: t.color,
+        max_length: t.max_length,
+        layout: t.layout.map(|l| (l.align, l.left, l.right, l.indent, l.leading)),
+        variable: text(t.variable)?,
+        text: t.text.map(text).transpose()?.unwrap_or_default(),
     };
-    if a & 0x01 != 0 {
-        out.font = Some(cur.u16()?);
-    }
-    if b & 0x80 != 0 {
-        cstring(&mut cur)?;
-    }
-    if a & 0x01 != 0 {
-        out.height = cur.u16()?;
-    }
-    if a & 0x04 != 0 {
-        out.color = Some(rgba(&mut cur)?);
-    }
-    if a & 0x02 != 0 {
-        out.max_length = Some(cur.u16()?);
-    }
-    if b & 0x20 != 0 {
-        let align = cur.u8()?;
-        let (left, right, indent) = (cur.u16()?, cur.u16()?, cur.u16()?);
-        out.layout = Some((align, left, right, indent, i16le(&mut cur)?));
-    }
-    out.variable = cstring(&mut cur)?;
-    if a & 0x80 != 0 {
-        out.text = cstring(&mut cur)?;
-    }
-    Ok((id, out))
+    Ok((t.id, out))
 }
 
-fn clip_actions(cur: &mut Cursor) -> Result<Vec<ClipAction>, String> {
-    cur.u16()?;
-    u32le(cur)?;
-    let mut out = Vec::new();
-    loop {
-        let events = u32le(cur)?;
-        if events == 0 {
-            return Ok(out);
-        }
-        let mut size = u32le(cur)? as usize;
-        let key = if events & 0x0002_0000 != 0 {
-            size = size.checked_sub(1).ok_or("empty key press clip action")?;
-            cur.u8()?
-        } else {
-            0
-        };
-        let code = cur.data.get(cur.pos..cur.pos + size).ok_or("eof:clip action")?.to_vec();
-        cur.pos += size;
-        out.push(ClipAction { events, key, code });
-    }
+fn place(p: PlaceTag) -> Result<Place, String> {
+    Ok(Place {
+        depth: p.depth,
+        is_move: p.is_move,
+        character: p.character,
+        matrix: p.matrix.as_ref().map(matrix_of),
+        cxform: p.cxform.as_ref().map(cxform_of),
+        ratio: p.ratio,
+        name: p.name.map(text).transpose()?,
+        clip_depth: p.clip_depth,
+        blend_mode: p.blend_mode,
+        filters: p.filters.unwrap_or_default(),
+        clip_actions: p.clip_actions.map_or_else(Vec::new, |a| {
+            a.records.into_iter().map(|r| ClipAction { events: r.events, key: r.key.unwrap_or(0), code: r.code }).collect()
+        }),
+    })
 }
 
-fn filter_list(cur: &mut Cursor) -> Result<Vec<u8>, String> {
-    let start = cur.pos;
-    for _ in 0..cur.u8()? {
-        let size = match cur.u8()? {
-            0 => 23,
-            1 => 9,
-            2 => 15,
-            3 => 27,
-            6 => 80,
-            other => return Err(format!("filter kind {other} in a PlaceObject3")),
-        };
-        cur.pos += size;
-    }
-    Ok(cur.data[start..cur.pos].to_vec())
+/// Tag `code` read through its codec.
+fn typed(code: u16, body: &[u8]) -> Result<Typed, String> {
+    gfx_tags::decode(code, body)?.ok_or_else(|| format!("tag {code} has no codec"))
 }
 
-fn place(tag: &[u8], three: bool) -> Result<Place, String> {
-    let mut cur = Cursor::new(tag, 0);
-    let flags = cur.u8()?;
-    let flags3 = if three { cur.u8()? } else { 0 };
-    let mut out = Place { depth: cur.u16()?, is_move: flags & 1 != 0, ..Place::default() };
-    if flags3 & 0x08 != 0 || (flags & 2 != 0 && flags3 & 0x10 != 0) {
-        cstring(&mut cur)?;
-    }
-    if flags & 2 != 0 {
-        out.character = Some(cur.u16()?);
-    }
-    if flags & 4 != 0 {
-        out.matrix = Some(matrix(&mut cur)?);
-    }
-    if flags & 8 != 0 {
-        out.cxform = Some(cxform(&mut cur, true)?);
-    }
-    if flags & 0x10 != 0 {
-        out.ratio = Some(cur.u16()?);
-    }
-    if flags & 0x20 != 0 {
-        out.name = Some(cstring(&mut cur)?);
-    }
-    if flags & 0x40 != 0 {
-        out.clip_depth = Some(cur.u16()?);
-    }
-    if flags3 & 0x01 != 0 {
-        out.filters = filter_list(&mut cur)?;
-    }
-    if flags3 & 0x02 != 0 {
-        out.blend_mode = Some(cur.u8()?);
-    }
-    if flags3 & 0x04 != 0 {
-        cur.u8()?;
-    }
-    if flags & 0x80 != 0 {
-        out.clip_actions = clip_actions(&mut cur)?;
-    }
-    Ok(out)
-}
-
-/// Add a control or structural tag to `line`, true when the tag was one.
+/// Add a frame's display or script tag to `line`, true when the tag was one.
 fn timeline_tag(code: u16, body: &[u8], line: &mut Timeline, frame: &mut Vec<Control>) -> Result<bool, String> {
+    use gfx_tags::{FRAME_LABEL, PLACE_OBJECT2, PLACE_OBJECT3, REMOVE_OBJECT2, SHOW_FRAME};
     match code {
-        1 => line.frames.push(std::mem::take(frame)),
-        12 => frame.push(Control::Action(body.to_vec())),
-        26 => frame.push(Control::Place(place(body, false)?)),
-        70 => frame.push(Control::Place(place(body, true)?)),
-        28 => frame.push(Control::Remove { depth: u16::from_le_bytes([body[0], body[1]]) }),
-        43 => {
-            let mut cur = Cursor::new(body, 0);
-            line.labels.insert(cstring(&mut cur)?, line.frames.len() as u16);
-        }
+        DO_ACTION => frame.push(Control::Action(body.to_vec())),
+        SHOW_FRAME | PLACE_OBJECT2 | PLACE_OBJECT3 | REMOVE_OBJECT2 | FRAME_LABEL => match typed(code, body)? {
+            Typed::ShowFrame => line.frames.push(std::mem::take(frame)),
+            Typed::Place(p) => frame.push(Control::Place(place(p)?)),
+            Typed::Remove { depth } => frame.push(Control::Remove { depth }),
+            Typed::Label(l) => {
+                line.labels.insert(text(l.name)?, line.frames.len() as u16);
+            }
+            other => return Err(format!("tag {code} read as {other:?}")),
+        },
         _ => return Ok(false),
     }
     Ok(true)
 }
 
-fn sprite(tag: &[u8]) -> Result<(u16, Timeline), String> {
-    let mut cur = Cursor::new(tag, 0);
-    let id = cur.u16()?;
-    let mut line = Timeline { declared_frames: cur.u16()?, ..Timeline::default() };
+fn sprite(id: u16, frame_count: u16, tags: &[Tag]) -> Result<Timeline, String> {
+    let mut line = Timeline { declared_frames: frame_count, ..Timeline::default() };
     let mut frame = Vec::new();
-    while cur.pos < tag.len() {
-        let head = cur.u16()?;
-        let (code, mut len) = (head >> 6, (head & 0x3F) as usize);
-        if len == 0x3F {
-            len = u32le(&mut cur)? as usize;
-        }
-        let body = tag.get(cur.pos..cur.pos + len).ok_or_else(|| format!("sprite {id}: tag {code} overruns"))?;
-        cur.pos += len;
-        if code == 0 {
+    for tag in tags {
+        if tag.code == END {
             break;
         }
-        if !timeline_tag(code, body, &mut line, &mut frame)? {
-            return Err(format!("sprite {id}: unhandled tag {code} ({})", crate::gfx::tag_name(code)));
+        let TagBody::Raw(body) = &tag.body else { return Err(format!("sprite {id}: a sprite defined inside it")) };
+        if !timeline_tag(tag.code, body, &mut line, &mut frame)? {
+            return Err(format!("sprite {id}: unhandled tag {} ({})", tag.code, crate::gfx::tag_name(tag.code)));
         }
     }
     if !frame.is_empty() {
         line.frames.push(frame);
     }
-    Ok((id, line))
+    Ok(line)
 }
 
 impl MovieDef {
-    pub fn decode(movie: &GfxMovie) -> Result<MovieDef, String> {
+    pub fn decode(stream: &TagStream) -> Result<MovieDef, String> {
         let mut out = MovieDef {
-            stage: movie.frame_size,
-            frame_rate: movie.frame_rate,
-            timeline: Timeline { declared_frames: movie.frame_count, ..Timeline::default() },
+            stage: stream.stage()?,
+            frame_rate: stream.frame_rate as f32 / 256.0,
+            timeline: Timeline { declared_frames: stream.frame_count, ..Timeline::default() },
             ..MovieDef::default()
         };
         let mut frame = Vec::new();
-        for (code, body) in movie.tag_bodies() {
-            out.tag(code, body, &mut frame).map_err(|e| format!("tag {code} ({}): {e}", crate::gfx::tag_name(code)))?;
+        for tag in &stream.tags {
+            let done = match &tag.body {
+                TagBody::Sprite { id, frame_count, tags, .. } => sprite(*id, *frame_count, tags).map(|line| {
+                    out.characters.insert(*id, Character::Sprite(line));
+                }),
+                TagBody::Raw(body) => out.tag(tag.code, body, &mut frame),
+            };
+            done.map_err(|e| format!("tag {} ({}): {e}", tag.code, crate::gfx::tag_name(tag.code)))?;
         }
         if !frame.is_empty() {
             out.timeline.frames.push(frame);
         }
         Ok(out)
+    }
+
+    /// A `.gfx` file's definitions.
+    pub fn read(file: &[u8]) -> Result<MovieDef, String> {
+        MovieDef::decode(&TagStream::parse(file)?)
     }
 
     fn tag(&mut self, code: u16, body: &[u8], frame: &mut Vec<Control>) -> Result<(), String> {
@@ -970,28 +886,24 @@ impl MovieDef {
                 self.characters.insert(id, Character::Morph(m));
             }
             9 => self.background = Some(rgb(&mut cur)?),
-            37 => {
-                let (id, t) = edit_text(body)?;
-                self.characters.insert(id, Character::EditText(t));
-            }
-            39 => {
-                let (id, t) = sprite(body)?;
-                self.characters.insert(id, Character::Sprite(t));
-            }
-            56 => {
-                for _ in 0..cur.u16()? {
-                    let id = cur.u16()?;
-                    self.exports.insert(cstring(&mut cur)?, id);
+            gfx_tags::DEFINE_EDIT_TEXT | gfx_tags::EXPORT_ASSETS | gfx_tags::IMPORT_ASSETS2 => match typed(code, body)? {
+                Typed::EditText(t) => {
+                    let (id, t) = edit_text(t)?;
+                    self.characters.insert(id, Character::EditText(t));
                 }
-            }
-            71 => {
-                let url = cstring(&mut cur)?;
-                cur.u16()?;
-                for _ in 0..cur.u16()? {
-                    let id = cur.u16()?;
-                    self.imports.push((url.clone(), id, cstring(&mut cur)?));
+                Typed::Export(list) => {
+                    for (id, name) in list {
+                        self.exports.insert(text(name)?, id);
+                    }
                 }
-            }
+                Typed::Import(import) => {
+                    let url = text(import.url)?;
+                    for (id, name) in import.assets {
+                        self.imports.push((url.clone(), id, text(name)?));
+                    }
+                }
+                other => return Err(format!("tag {code} read as {other:?}")),
+            },
             75 => {
                 let id = cur.u16()?;
                 cur.u16()?;

@@ -99,19 +99,11 @@ fn main() {
 }
 
 fn load_names() -> BTreeMap<u32, String> {
-    let mut out = BTreeMap::new();
-    let p = "../../docs/data/aset_names.csv";
-    if let Ok(s) = std::fs::read_to_string(p) {
-        for line in s.lines().skip(1) {
-            let mut f = line.split(',');
-            if let (Some(h), Some(n)) = (f.next(), f.next()) {
-                if let Ok(h) = u32::from_str_radix(h.trim_start_matches("0x"), 16) {
-                    if !n.is_empty() {
-                        out.insert(h, n.to_string());
-                    }
-                }
-            }
+    match mercs2_engine::worldutil::dev_aset_names() {
+        Ok(names) => names.into_iter().collect(),
+        Err(e) => {
+            eprintln!("govern_probe: {e}");
+            std::process::exit(2);
         }
     }
-    out
 }

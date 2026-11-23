@@ -16217,6 +16217,78 @@
     ],
     "0xEB3B3C14": [
       "vo_stream_dlctest.russian"
+    ],
+    "0x1084AE93": [
+      "vo_resident_dlctest.english"
+    ],
+    "0x45378FCD": [
+      "vo_resident_dlctest.french"
+    ],
+    "0xE207918B": [
+      "vo_resident_dlctest.german"
+    ],
+    "0x4FE8DC63": [
+      "vo_resident_dlctest.italian"
+    ],
+    "0xB325FFB4": [
+      "vo_resident_dlctest.russian"
+    ],
+    "0x5D32ED33": [
+      "vo_resident_dlctest.spanish"
+    ],
+    "0x03C70F0A": [
+      "pmc_hum_mattias_v5"
+    ],
+    "0x4A773F60": [
+      "pmc_hum_sarah"
+    ],
+    "0x786ADB07": [
+      "pmc_hum_obama"
+    ],
+    "0xB287020B": [
+      "Obama_Obama01"
+    ],
+    "0xFE96AC37": [
+      "Palin_Palin01"
+    ],
+    "0x19E05FEB": [
+      "vz_terrain"
+    ],
+    "0x500FC217": [
+      "vz_lowresterrain"
+    ],
+    "0x2A55C357": [
+      "dlc01_terrain"
+    ],
+    "0xC34FBA13": [
+      "dlc01_lowresterrain"
+    ],
+    "0x1324DF48": [
+      "SHELL.MainMenu.Continue"
+    ],
+    "0x32E96B39": [
+      "SHELL.MainMenu.NewGame"
+    ],
+    "0xB82C6789": [
+      "SHELL.MainMenu.JoinGame"
+    ],
+    "0x385F518F": [
+      "SHELL.MainMenu.Options"
+    ],
+    "0x57894ECD": [
+      "SHELL.MainMenu.Profiles"
+    ],
+    "0xDAC7F678": [
+      "PauseMenu.Base.Resume"
+    ],
+    "0xC46B6E50": [
+      "PauseMenu.Base.MedEvac"
+    ],
+    "0xD0AB9E75": [
+      "PauseMenu.Base.Options"
+    ],
+    "0xEB3AA5CC": [
+      "PauseMenu.Base.Quit"
     ]
   }
 }

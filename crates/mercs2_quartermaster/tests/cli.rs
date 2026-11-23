@@ -762,7 +762,6 @@ fn qm_kinds(tag: &str, args: &[&str]) -> Output {
         .current_dir(&cwd)
         .env_remove("MERCS2_GAME_DIR")
         .env_remove("VZ_WAD")
-        .env_remove("MERCS2_NOTES")
         .env_remove("MERCS2_WORKSHOP_DATA")
         .output()
         .expect("qm must run")

@@ -3,7 +3,7 @@
 //! # What the binary holds
 //!
 //! The runtime enemy-wave selector `FUN_004d9840` (VERIFIED,
-//! `docs/reverse_engineer/render_distance_and_density_levers.md §2`) indexes a per-`(mode, faction,
+//! [`docs/reverse_engineer/render_distance_and_density_levers.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/render_distance_and_density_levers.md) §2) indexes a per-`(mode, faction,
 //! level)` **list header** at
 //! ```text
 //! psVar3 = &DAT_016d1718 + (level + (mode + faction*6) * 0x14) * 8;   // short[4] header

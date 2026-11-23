@@ -119,7 +119,7 @@ impl Kind {
             Kind::Animation => Preview::View("plays on the hero, the model you choose for clips"),
             Kind::Effect => Preview::View("plays on the pedestal, in the game's own particle sim"),
             Kind::Audio => Preview::None("playback is not wired into the Library yet"),
-            Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
+            Kind::UiGfx => Preview::View("plays in the viewport"),
             Kind::FaceFx => Preview::View("an actor shows its face poses; a set plays on the character it belongs to"),
             Kind::Text => Preview::View("a string table opens every table side by side; a font, its pages and glyphs"),
             Kind::Layer => Preview::View("every entity of the layer, where the layer places it"),
@@ -188,7 +188,7 @@ impl AssetRow {
     /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
     /// off the `<faction>_veh_<class>_<name>` naming convention (plus a few irregular names like
     /// `uh1huey`). The class token after `_veh_` is normalised into the 12-type taxonomy from
-    /// `docs/reverse_engineer/valid_model_structure_map.md` §6.
+    /// [`docs/reverse_engineer/valid_model_structure_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/valid_model_structure_map.md) §6.
     pub fn vehicle_class(&self) -> Option<&'static str> {
         let n = self.name.as_ref()?.to_ascii_lowercase();
         let cls = n.split("_veh_").nth(1)?.split('_').next().unwrap_or("");
@@ -291,12 +291,84 @@ pub fn name_group(name: Option<&str>) -> NameGroup {
     NameGroup { header: GROUP_OTHER.into(), sub: None, short: name.to_string() }
 }
 
+/// What opens each Scaleform movie, from `data/ui_movies.tsv`: lower-cased name → (group, parent).
+fn ui_movies() -> &'static HashMap<String, (String, Option<String>)> {
+    static TABLE: std::sync::OnceLock<HashMap<String, (String, Option<String>)>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        include_str!("../data/ui_movies.tsv")
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .skip(1)
+            .map(|l| {
+                let c: Vec<&str> = l.split('\t').collect();
+                let parent = c.get(2).filter(|p| !p.is_empty()).map(|p| p.to_string());
+                (c[0].to_ascii_lowercase(), (c[1].to_string(), parent))
+            })
+            .collect()
+    })
+}
+
+/// The group of a UI movie: what opens it in the game (`data/ui_movies.tsv`), a movie another one
+/// loads into itself in its parent's sub-group, so the PDA's tabs sit under `topbar`. A named movie the
+/// table does not hold is under [`GROUP_OTHER`]; no name, [`GROUP_UNNAMED`].
+pub fn ui_group(name: Option<&str>) -> NameGroup {
+    let Some(name) = name else {
+        return NameGroup { header: GROUP_UNNAMED.into(), sub: None, short: String::new() };
+    };
+    match ui_movies().get(&name.to_ascii_lowercase()) {
+        Some((group, parent)) => NameGroup { header: group.clone(), sub: parent.clone(), short: name.to_string() },
+        None => NameGroup { header: GROUP_OTHER.into(), sub: None, short: name.to_string() },
+    }
+}
+
+/// The group a row of `kind` lists under, for the tabs whose lists group by name
+/// ([`name_group`] for Anims and FaceFX, [`ui_group`] for UI).
+pub fn row_group(kind: Kind, name: Option<&str>) -> NameGroup {
+    match kind {
+        Kind::UiGfx => ui_group(name),
+        _ => name_group(name),
+    }
+}
+
 /// The order [`name_group`] headers list in: by name, then [`GROUP_OTHER`], then [`GROUP_UNNAMED`].
 pub fn name_group_rank(header: &str) -> (u8, &str) {
     match header {
         GROUP_OTHER => (1, header),
         GROUP_UNNAMED => (2, header),
         _ => (0, header),
+    }
+}
+
+#[cfg(test)]
+mod ui_group_tests {
+    use super::{ui_group, ui_movies, GROUP_OTHER, GROUP_UNNAMED};
+
+    /// A PDA tab sits under `topbar`, which loads it; `topbar` heads its own group; a movie nothing is
+    /// known to open is OTHER, a hash-only row UNNAMED; names match ignoring case.
+    #[test]
+    fn a_movie_lists_under_what_opens_it() {
+        let g = ui_group(Some("Database"));
+        assert_eq!((g.header.as_str(), g.sub.as_deref(), g.short.as_str()), ("PDA", Some("topbar"), "Database"));
+        let g = ui_group(Some("TOPBAR"));
+        assert_eq!((g.header.as_str(), g.sub.as_deref()), ("PDA", None));
+        assert_eq!(ui_group(Some("snatch_moment")).header, GROUP_OTHER);
+        assert_eq!(ui_group(None).header, GROUP_UNNAMED);
+    }
+
+    /// Every row of `data/ui_movies.tsv` names a group and its evidence, and a parent is a movie the
+    /// table lists in the same group.
+    #[test]
+    fn the_table_is_whole() {
+        let body = include_str!("../data/ui_movies.tsv");
+        for line in body.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).skip(1) {
+            let c: Vec<&str> = line.split('\t').collect();
+            assert_eq!(c.len(), 4, "{line}");
+            assert!(!c[1].is_empty() && !c[3].is_empty(), "{line}");
+            if !c[2].is_empty() {
+                let parent = ui_movies().get(&c[2].to_ascii_lowercase()).unwrap_or_else(|| panic!("{line}: parent not listed"));
+                assert_eq!(parent.0, c[1], "{line}: parent in another group");
+            }
+        }
     }
 }
 
@@ -736,17 +808,17 @@ pub fn embedded_aset_names() -> HashMap<u32, String> {
 /// The RAW corpora merge behind `--pack-data` when this crate's `data/production_names.json` is
 /// absent, merged lowest→highest priority: the Jul-08 devkit strings, the bone-name candidates,
 /// the rainbow table, the ASET-derived name fragments, then the live registry dump. The fragments
-/// are committed in this crate's `data/` ([`crate_data_file`]); every other source is a
-/// dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
-/// `jul08_strings` and `rainbow_table` keys, and the `data/` folder under `notes_docs_dir`. A
-/// missing key or file is an error naming it.
+/// and the live registry dump are committed in this crate's `data/` ([`crate_data_file`]), the
+/// block-string harvest in this repository's `docs/data/` ([`repo_data_file`]); every other source
+/// is a dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
+/// `jul08_strings`, `bone_name_candidates` and `rainbow_table` keys. A missing key or file is an
+/// error naming it.
 pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> {
     use mercs2_formats::game_paths;
     // 57k authored strings from the devkit Xbox build — resolves engine command/message names
     // (SetStateOnMsg, KillObjectsLinkedToHP, …) that the retail exe strips.
     let mut names = load_name_lines(&game_paths::local_config_jul08_strings(start)?)?;
-    let notes_docs = game_paths::local_config_notes_docs_dir(start)?;
-    names.extend(load_name_lines(&notes_data_file(&notes_docs, "bone_name_candidates.txt")?)?);
+    names.extend(load_name_lines(&game_paths::local_config_bone_name_candidates(start)?)?);
     names.extend(load_rainbow_json(&game_paths::local_config_rainbow_table(start)?)?);
     // Names cracked from the WAD's own naming convention rather than a wordlist: a texture
     // `X_dm`/`X_nm`/`X_sm` names its own model `X`, so a named texture yields its model's exact
@@ -755,11 +827,11 @@ pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> 
     // aircraft roster: A-10, AC-130, C-130, Predator, Pave Low, AH-1Z, MiG-27, …) browsable.
     // Produced by `wad_simulator --bin asset_gap_probe --emit`; every entry is a verified preimage.
     // The block-string harvest goes under the fragments: a fragment's name wins over a harvested one.
-    names.extend(load_harvested_names(&notes_data_file(&notes_docs, "aset_block_strings.json")?)?);
+    names.extend(load_harvested_names(&repo_data_file("aset_block_strings.json")?)?);
     for f in ASET_NAME_FRAGMENTS {
         names.extend(load_rainbow_json(&crate_data_file(f)?)?);
     }
-    names.extend(load_names_csv(&notes_data_file(&notes_docs, "live_registry_hashes.csv")?)?);
+    names.extend(load_names_csv(&crate_data_file("live_registry_hashes.csv")?)?);
     Ok(names)
 }
 
@@ -779,17 +851,18 @@ pub fn crate_data_file(name: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// `<notes_docs_dir>/data/<name>`, or an error naming the `notes_docs_dir` key and the missing file.
-pub fn notes_data_file(notes_docs: &Path, name: &str) -> Result<PathBuf, String> {
-    let p = notes_docs.join("data").join(name);
+/// `docs/data/<name>` of the checkout this binary was built from
+/// ([`mercs2_formats::game_paths::repo_root`]) — the tooling tables the dev tools read and write —
+/// or an error naming the missing file. Read only from a checkout, like [`crate_data_file`].
+pub fn repo_data_file(name: &str) -> Result<PathBuf, String> {
+    let p = mercs2_formats::game_paths::repo_root().join("docs").join("data").join(name);
     if p.is_file() {
         Ok(p)
     } else {
         Err(format!(
-            "{} is not a file (`notes_docs_dir` in {} names {})",
+            "{} is not a file (committed in the checkout {} was built from)",
             p.display(),
-            mercs2_formats::game_paths::LOCAL_CONFIG,
-            notes_docs.display()
+            env!("CARGO_PKG_NAME")
         ))
     }
 }

@@ -155,7 +155,7 @@ pub struct SkinPalette {
 ///
 /// Retail drives destruction as **health → damage *messages* → a per-node state machine →
 /// `SHOW`/`HIDE` over HIER subtrees → the node-enable table the draw gate's clause 3 reads**
-/// (`docs/reverse_engineer/state_machine_destruction_code_map.md`; `docs/modernization/vehicle_model_spec.md` §5).
+/// ([`docs/reverse_engineer/state_machine_destruction_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/state_machine_destruction_code_map.md);`docs/modernization/vehicle_model_spec.md` §5).
 /// This component is the state that survives between ticks; `mercs2_destruction` owns the system
 /// that advances it, and the render layer consumes [`node_enable`](Destructible::node_enable).
 ///
@@ -209,7 +209,7 @@ impl Destructible {
 // the annotation — mirroring the engine, and keeping `mercs2_ai` / `mercs2_anim` / `mercs2_combat`
 // free of an edge to the player crate (the carve rule: leaf crates depend on core + formats only).
 //
-// Code map: `docs/reverse_engineer/player_code_map.md` §5; the `Human` Lua surface is the 21-cfunc
+// Code map: `https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/player_code_map.md` §5; the `Human` Lua surface is the 21-cfunc
 // table at VA `0x00B99EF0` (`mercs2_script::bindings::human`).
 
 /// Wildcard for a [`HumanState`] key column — "matches any row value".

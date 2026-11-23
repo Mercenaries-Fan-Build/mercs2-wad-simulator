@@ -53,7 +53,7 @@ struct Cli {
     merge: Vec<PathBuf>,
 
     /// Game-roster CSV(s) whose first column is a vehicle/weapon/prop NAME (e.g.
-    /// docs/data/lua_vehicle_hashes.csv, docs/data/spawnable_templates.csv). The name token is
+    /// docs/data/lua_vehicle_hashes.csv, crates/mercs2_workshop/data/spawnable_templates.csv). The name token is
     /// crossed with the authored `<faction>_veh_<class>_<name>` / `global_*_<name>` grammar and
     /// matched against unresolved model hashes — a structured, low-collision channel (own error bar).
     #[arg(long)]

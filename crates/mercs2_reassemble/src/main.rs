@@ -53,10 +53,11 @@ use walkdir::WalkDir;
 #[derive(Parser)]
 #[command(about = "Reassemble the decompiled Mercs2 engine and flag the unmapped residue.")]
 struct Args {
-    /// Repo root. Defaults to auto-detect by walking up for output/_ghidra/all_functions_decomp.txt
+    /// The research corpus root: the checkout holding `output/_ghidra/all_functions_decomp.txt` and
+    /// the `docs/`, `scripts/` and `mods/` sources listed above.
     #[arg(long)]
-    repo_root: Option<PathBuf>,
-    /// Output directory (default: <repo>/output/engine_reassembled)
+    corpus: PathBuf,
+    /// Output directory (default: <corpus>/output/engine_reassembled)
     #[arg(long)]
     out: Option<PathBuf>,
     /// Also scrape this extra directory (e.g. the .claude memory dir) for T2 references.
@@ -233,7 +234,7 @@ fn sanitize(s: &str) -> String {
 // ----------------------------------------------------------------------------
 
 fn parse_master(path: &Path) -> Vec<Func> {
-    let text = fs::read_to_string(path).expect("read master decomp");
+    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read the master decomp {}: {e}", path.display()));
     let mut funcs = Vec::new();
     let mut cur: Option<Func> = None;
     let mut body = String::new();
@@ -371,21 +372,6 @@ fn walk_json(v: &Value, file_default: &str, source: &str, out: &mut Vec<(u32, Hi
 // ----------------------------------------------------------------------------
 // helpers
 // ----------------------------------------------------------------------------
-
-fn find_repo_root(explicit: Option<PathBuf>) -> PathBuf {
-    if let Some(p) = explicit {
-        return p;
-    }
-    let mut dir = std::env::current_dir().expect("cwd");
-    loop {
-        if dir.join("output/_ghidra/all_functions_decomp.txt").exists() {
-            return dir;
-        }
-        if !dir.pop() {
-            panic!("could not locate repo root — pass --repo-root");
-        }
-    }
-}
 
 /// Fold synonym subsystem names (same subsystem, different source spelling) onto one
 /// canonical module name. Genuinely distinct-but-adjacent systems (shadow vs render_core,
@@ -649,9 +635,9 @@ fn json_file_default(stem: &str) -> String {
 
 fn main() {
     let args = Args::parse();
-    let root = find_repo_root(args.repo_root.clone());
+    let root = args.corpus.clone();
     let out_dir = args.out.clone().unwrap_or_else(|| root.join("output/engine_reassembled"));
-    eprintln!("repo root : {}", root.display());
+    eprintln!("corpus    : {}", root.display());
     eprintln!("out dir   : {}", out_dir.display());
 
     // 1. master list ---------------------------------------------------------

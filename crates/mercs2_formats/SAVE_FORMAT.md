@@ -9,7 +9,7 @@ A `.profile` is a **fixed 13,404-byte** file: a packed binary header, then a
 
 - **Diff** of the six retail saves in `My Games/Mercenaries 2/SaveGames/*.profile`.
   Classifies every byte as CONSTANT (structure) vs VARYING (mutable state).
-- **Corpus / symbols**: `docs/mercs2-pdb-analysis/game-systems.md` (`ProfileHash`,
+- **Corpus / symbols**: [`docs/mercs2-pdb-analysis/game-systems.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/game-systems.md) (`ProfileHash`,
   `SetLuaSaveVersion`, `SetProfileCostume/Upgrade/Character`, `saveProfile`),
   `docs/format_reference.md`, and the legacy `tools/savefile_parser.py`.
 

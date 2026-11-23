@@ -7,7 +7,7 @@
 //! **fully-decompiled sibling engine** — The Saboteur / Pandemic "WildStar" 2008 Xbox-360 devkit, whose
 //! `WSDamageable::ApplyDamage` / `WSExplosion::CreateExplosion` / `Update` / `AddVictim` /
 //! `WSPhysicsObject::ApplyHitForce` decompile with **zero bad instructions** (24 fns;
-//! `docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`).
+//! [`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/saboteur_damage_solver_symbol_map.md)).
 //!
 //! The Mercs2 **Jul-08 Xenon prototype** (`Mercs2_Xenon_P`, un-DRM'd) **confirms this exact pipeline by
 //! name** — its profiler-scope registration `@0x8237f400` enumerates

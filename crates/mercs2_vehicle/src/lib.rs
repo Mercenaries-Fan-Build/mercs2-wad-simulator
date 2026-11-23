@@ -1,8 +1,8 @@
 //! `mercs2_vehicle` — the Vehicle actor family + custom **raycast** drive model, command-ring
 //! control transport, and vehicle/on-foot camera modes.
 //!
-//! The exe is the oracle: `docs/reverse_engineer/vehicle_code_map.md`
-//! (+ `docs/data/vehicle_code_map.json`, `camera_code_map.md`). The drive model is DECODED as a
+//! The exe is the oracle: [`docs/reverse_engineer/vehicle_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/vehicle_code_map.md)
+//! (+ [`docs/data/vehicle_code_map.json`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/data/vehicle_code_map.json),`camera_code_map.md`). The drive model is DECODED as a
 //! **custom raycast car / tank / boat / heli sim** — nine `hkpUnaryAction`-derived actor classes —
 //! **NOT** the Havok Vehicle Kit (there are zero `hkpVehicle*` classes on PC). A prior Ghidra
 //! noreturn-on-sqrt defect had truncated every physics fn at its first `sqrt`; the decoded math

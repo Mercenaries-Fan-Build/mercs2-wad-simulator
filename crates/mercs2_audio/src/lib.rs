@@ -1,6 +1,6 @@
 //! `mercs2_audio` — Audio backend, software mixer, dual-deck music FSM, banks, VO, 3D positional.
 //!
-//! **Code map:** `docs/reverse_engineer/audio_code_map.md` (+ `docs/data/audio_code_map.json`).
+//! **Code map:** [`docs/reverse_engineer/audio_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/audio_code_map.md) (+ [`docs/data/audio_code_map.json`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/data/audio_code_map.json)).
 //! **Owned Lua namespaces:** `Sound` (88 cfuncs @0xB98C98), `VO` (11 cfuncs @0xB988B0).
 //!
 //! The Mercenaries 2 audio stack is two cooperating layers: **Pal** (Pandemic Audio Library — the

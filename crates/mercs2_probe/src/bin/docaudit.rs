@@ -1,5 +1,5 @@
 //! THROWAWAY doc-audit probe (2026-07-21): measures the concrete numeric claims in
-//! `docs/placement_data_format.md` and `docs/comprehensive_engine_understanding.md`
+//! `docs/placement_data_format.md` and [`docs/comprehensive_engine_understanding.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/comprehensive_engine_understanding.md)
 //! against retail `vz.wad`. Nothing here is engine code — it only counts and dumps.
 //!
 //! Usage: docaudit <ffcs|layers|census|vzstate|hash> [wadpath]

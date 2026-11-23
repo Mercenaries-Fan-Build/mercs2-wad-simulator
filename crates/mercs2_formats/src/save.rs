@@ -8,7 +8,7 @@
 //! byte-for-byte diff of the **eight retail saves vendored at `fixtures/saves`**
 //! (see that directory's README; reached via
 //! [`crate::game_paths::save_fixtures`], never a hardcoded path) or in the engine save symbols
-//! (`docs/mercs2-pdb-analysis/game-systems.md`: `ProfileHash`, `SetLuaSaveVersion`,
+//! ([`docs/mercs2-pdb-analysis/game-systems.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/game-systems.md): `ProfileHash`, `SetLuaSaveVersion`,
 //! `SetProfileCostume`, `saveProfile`, ...). Fields whose *meaning* is not
 //! grounded are named `unknown_<offset>` or flagged `INFERRED`.
 //!

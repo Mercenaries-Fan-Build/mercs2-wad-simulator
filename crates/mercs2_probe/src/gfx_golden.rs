@@ -21,7 +21,8 @@
 //! Usage:
 //!   mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>
 
-use mercs2_formats::gfx::{tag_name, Features, GfxMovie};
+use mercs2_formats::gfx::{features, tag_name, Features};
+use mercs2_formats::gfx_stream::TagStream;
 use mercs2_formats::gfx_def::{Character, MovieDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -51,7 +52,7 @@ pub fn gfx_decode(dir: &Path) -> Result<(), String> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for path in &files {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        match GfxMovie::parse(&bytes).and_then(|movie| MovieDef::decode(&movie)) {
+        match MovieDef::read(&bytes) {
             Ok(def) => {
                 for c in def.characters.values() {
                     let kind = match c {
@@ -90,25 +91,29 @@ pub fn gfx_run(dir: &Path, frames: u32) -> Result<(), String> {
     let mut failed = 0;
     let mut commands: BTreeMap<String, usize> = BTreeMap::new();
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+    let mut on_undefined: BTreeMap<String, usize> = BTreeMap::new();
     for path in &files {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        let def = std::rc::Rc::new(GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?);
+        let def = std::rc::Rc::new(MovieDef::read(&bytes)?);
         let frame_ms = 1000.0 / def.frame_rate.max(1.0) as f64;
-        let run = (|| -> Result<(Vec<(String, String)>, Vec<String>), String> {
+        let run = (|| -> Result<(Vec<(String, String)>, Vec<String>, Vec<String>), String> {
             let mut player = Player::new(Movie::new(def.clone())?)?;
             for _ in 1..frames {
                 player.advance(frame_ms)?;
             }
             player.movie.draw()?;
-            Ok((player.fscommands.clone(), player.missing.iter().cloned().collect()))
+            Ok((player.fscommands.clone(), player.missing.iter().cloned().collect(), player.on_undefined.iter().cloned().collect()))
         })();
         match run {
-            Ok((fs, gaps)) => {
+            Ok((fs, gaps, unresolved)) => {
                 for (c, _) in fs {
                     *commands.entry(c).or_default() += 1;
                 }
                 for g in gaps {
                     *missing.entry(g).or_default() += 1;
+                }
+                for u in unresolved {
+                    *on_undefined.entry(u).or_default() += 1;
                 }
             }
             Err(e) => {
@@ -121,6 +126,9 @@ pub fn gfx_run(dir: &Path, frames: u32) -> Result<(), String> {
     println!("fscommands {commands:?}");
     for (name, count) in &missing {
         println!("missing in {count:>3}: {name}");
+    }
+    for (name, count) in &on_undefined {
+        println!("called on undefined in {count:>3}: {name}");
     }
     if failed != 0 {
         return Err(format!("{failed} movies failed"));
@@ -137,7 +145,7 @@ pub fn gfx_render(movie: &Path, frames: u32, png_path: &Path, wads: &[String], f
 
     let load = |path: &Path| -> Result<MovieDef, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))
+        MovieDef::read(&bytes)
     };
     let def = std::rc::Rc::new(load(movie)?);
     let mut images = WadImages::open(wads)?;
@@ -157,6 +165,7 @@ pub fn gfx_render(movie: &Path, frames: u32, png_path: &Path, wads: &[String], f
     println!("traces {:?}", player.traces);
     println!("fscommands {:?}", player.fscommands);
     println!("missing {:?}", player.missing);
+    println!("on undefined {:?}", player.on_undefined);
     let items = player.movie.draw()?;
     for item in &items {
         if let mercs2_engine::gfx::stage::Item::Draw(d) = item {
@@ -219,12 +228,27 @@ fn print_actions(code: &[u8], out: &mut String) {
         _ => "?",
     };
     let mut pool: Vec<String> = Vec::new();
+    // Each record's number and where its branch or body ends, as record numbers.
+    let positions: Vec<Vec<usize>> = match mercs2_formats::gfx_actions::Program::decode(code) {
+        Ok(p) => p.ops.into_iter().map(|o| o.to).collect(),
+        Err(e) => {
+            out.push_str(&format!("  (no record numbers: {e})\n"));
+            Vec::new()
+        }
+    };
+    let mut record = 0usize;
     let mut at = 0;
     while at < code.len() {
         let op = code[at];
         at += 1;
+        let number = if positions.is_empty() { String::new() } else { format!("#{record} ") };
+        let to = match positions.get(record) {
+            Some(to) if !to.is_empty() => format!(" -> {}", to.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(", ")),
+            _ => String::new(),
+        };
+        record += 1;
         if op == 0 {
-            out.push_str("  End\n");
+            out.push_str(&format!("  {number}End\n"));
             continue;
         }
         let mut body: &[u8] = &[];
@@ -307,14 +331,14 @@ fn print_actions(code: &[u8], out: &mut String) {
             0x87 => format!("r{}", body[0]),
             _ => String::new(),
         };
-        out.push_str(&format!("  {} {arg}\n", op_name(op)));
+        out.push_str(&format!("  {number}{} {arg}{to}\n", op_name(op)));
     }
 }
 
 /// Write every action block of a movie as text, each headed by where it lives.
 pub fn gfx_actions(movie: &Path, out_path: &Path) -> Result<(), String> {
     let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
-    let def = GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?;
+    let def = MovieDef::read(&bytes)?;
     let mut out = String::new();
     let mut timeline = |name: String, t: &mercs2_formats::gfx_def::Timeline| {
         for (index, frame) in t.frames.iter().enumerate() {
@@ -351,7 +375,7 @@ pub fn gfx_actions(movie: &Path, out_path: &Path) -> Result<(), String> {
 pub fn gfx_tags(movie: &Path, out_path: &Path) -> Result<(), String> {
     use mercs2_formats::gfx_def::{Control, Timeline};
     let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
-    let def = GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?;
+    let def = MovieDef::read(&bytes)?;
     let mut out = String::new();
     let mut timeline = |name: String, t: &Timeline| {
         out.push_str(&format!("== {name}: {} frames (declares {})\n", t.frames.len(), t.declared_frames));
@@ -362,14 +386,18 @@ pub fn gfx_tags(movie: &Path, out_path: &Path) -> Result<(), String> {
             for control in frame {
                 match control {
                     Control::Place(p) => out.push_str(&format!(
-                        "  frame {index}: {} depth {} character {:?} name {:?} ratio {:?} clip_depth {:?} events {}\n",
+                        "  frame {index}: {} depth {} character {:?} name {:?} ratio {:?} clip_depth {:?} events {}{}\n",
                         if p.is_move { "move" } else { "place" },
                         p.depth,
                         p.character,
                         p.name,
                         p.ratio,
                         p.clip_depth,
-                        p.clip_actions.len()
+                        p.clip_actions.len(),
+                        p.matrix.as_ref().map_or(String::new(), |m| format!(
+                            " matrix [{} {} {} {} {} {}]",
+                            m.a, m.b, m.c, m.d, m.tx, m.ty
+                        ))
                     )),
                     Control::Remove { depth } => out.push_str(&format!("  frame {index}: remove depth {depth}\n")),
                     Control::Action(code) => out.push_str(&format!("  frame {index}: script ({} bytes)\n", code.len())),
@@ -380,10 +408,46 @@ pub fn gfx_tags(movie: &Path, out_path: &Path) -> Result<(), String> {
     timeline("root".into(), &def.timeline);
     let mut ids: Vec<u16> = def.characters.keys().copied().collect();
     ids.sort();
-    for id in ids {
+    for &id in &ids {
         if let Some(Character::Sprite(sprite)) = def.characters.get(&id) {
             timeline(format!("sprite {id}"), sprite);
         }
+    }
+    out.push_str("== imports\n");
+    for (url, id, name) in &def.imports {
+        out.push_str(&format!("  {id}: {name:?} from {url:?}\n"));
+    }
+    // Every other character: its kind, and an edit text's fields.
+    out.push_str("== characters\n");
+    for id in ids {
+        let line = match def.characters.get(&id) {
+            Some(Character::Sprite(_)) | None => continue,
+            Some(Character::Shape(s)) => format!(
+                "shape bounds {:?} fills [{}] {} records",
+                s.bounds,
+                s.fills
+                    .iter()
+                    .map(|f| match f {
+                        mercs2_formats::gfx_def::Fill::Solid(c) => format!("solid {c:?}"),
+                        mercs2_formats::gfx_def::Fill::Gradient(_) => "gradient".to_string(),
+                        mercs2_formats::gfx_def::Fill::Bitmap { id, .. } => match def.characters.get(id) {
+                            Some(Character::Image(i)) => format!("bitmap {id} {:?}", i.export_name),
+                            _ => format!("bitmap {id}"),
+                        },
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                s.records.len()
+            ),
+            Some(Character::Morph(_)) => "morph".to_string(),
+            Some(Character::Font(f)) => format!("font {:?}", f.name),
+            Some(Character::Image(i)) => format!("image {:?} file {:?} format {} {}x{}", i.export_name, i.file_name, i.format, i.width, i.height),
+            Some(Character::EditText(t)) => format!(
+                "edit text font {:?} height {} color {:?} bounds {:?} layout {:?} variable {:?} text {:?} read_only {} no_select {} html {} outlines {} auto_size {} multiline {} word_wrap {}",
+                t.font, t.height, t.color, t.bounds, t.layout, t.variable, t.text, t.read_only, t.no_select, t.html, t.outlines, t.auto_size, t.multiline, t.word_wrap
+            ),
+        };
+        out.push_str(&format!("  {id}: {line}\n"));
     }
     std::fs::write(out_path, out).map_err(|e| format!("write {}: {e}", out_path.display()))
 }
@@ -511,7 +575,7 @@ pub fn bink_frame(movie: &Path, index: u32, out: &Path) -> Result<(), String> {
     write_png(out, [m.width, m.height], &rgba)
 }
 
-fn write_png(path: &Path, size: [u32; 2], rgba: &[u8]) -> Result<(), String> {
+pub(crate) fn write_png(path: &Path, size: [u32; 2], rgba: &[u8]) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), size[0], size[1]);
     enc.set_color(png::ColorType::Rgba);
@@ -653,15 +717,15 @@ pub fn gfx_golden(dir: &Path, md_out: &Path, json_out: &Path) -> Result<(), Stri
             .map(|s| s.to_string_lossy().into_owned())
             .ok_or_else(|| format!("{} has no file name", path.display()))?;
         let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        match GfxMovie::parse(&data) {
-            Ok(m) => {
-                let feat = m.features();
+        match TagStream::parse(&data).and_then(|m| Ok((m.stage_px()?, m))) {
+            Ok((stage, m)) => {
+                let feat = features(&m);
                 rows.push(MovieRow {
                     name,
                     rel,
                     bytes: data.len(),
                     magic: String::from_utf8_lossy(&m.magic).into_owned(),
-                    stage: m.stage_px(),
+                    stage,
                     frames: m.frame_count,
                     tag_total: m.tags.len(),
                     feat,

@@ -216,7 +216,7 @@ impl WadStack {
 
     /// An ECS container in the named form its readers take. A compact one, as the DLC stores it,
     /// inflates through the layouts of the game's `vz.wad` beside the base, whichever level is open,
-    /// with the names boot resolves: the bundle's, then the checkout's name homes where there is one.
+    /// with the names boot resolves: the bundle's, then the checkout's name home where there is one.
     fn named_ecs(&mut self, container: Vec<u8>) -> Result<Vec<u8>, String> {
         use mercs2_formats::be_to_le::ecs::{is_compact, ComponentSchemas};
         if !is_compact(&container) {
@@ -227,7 +227,7 @@ impl WadStack {
             let vz = mercs2_quartermaster::sound::sibling_wad(std::path::Path::new(base), "vz.wad")?;
             let mut schemas = ComponentSchemas::from_vz_wad(&vz)?;
             schemas.add_names(crate::index::load_all_names()?.into_values());
-            if let Ok((_, held)) = crate::statenamer::StateNamer::open() {
+            if let Some((_, held)) = crate::statenamer::StateNamer::open()? {
                 schemas.add_names(held.into_values());
             }
             self.schemas = Some(schemas);
@@ -889,7 +889,7 @@ enum Act {
     TierNext,
     ClipSel(usize),
     ClipNav(i32),
-    /// Write `.1` — a name that hashes to the table value `.0` — into both name homes
+    /// Write `.1` — a name that hashes to the table value `.0` — into the name home
     /// (`crate::statenamer`), then relabel the preview's clips.
     NameValue(u32, String),
     /// Play this clip (hash, label) on the loaded model, adding it to the model's clip list.
@@ -1575,11 +1575,11 @@ fn filter_rows(
             }),
         }
     }
-    // ANIMS and FACEFX list by their naming conventions (`index::name_group`): header, then the
-    // rows with no sub-group, then each sub-group, then name.
+    // ANIMS and FACEFX list by their naming conventions, UI by what opens each movie
+    // (`index::row_group`): header, then the rows with no sub-group, then each sub-group, then name.
     if name_grouped(kind) {
         let key = |i: usize| {
-            let g = crate::index::name_group(rows[i].name.as_deref());
+            let g = crate::index::row_group(kind, rows[i].name.as_deref());
             let rank = crate::index::name_group_rank(&g.header).0;
             (rank, g.header, g.sub.map(|s| s.to_ascii_lowercase()), rows[i].label().to_ascii_lowercase())
         };
@@ -1591,9 +1591,9 @@ fn filter_rows(
 /// How far a sub-group's header and rows sit in from its group's.
 const SUB_INDENT: f32 = 12.0;
 
-/// Whether `kind`'s browser list groups by `index::name_group`.
+/// Whether `kind`'s browser list groups by `index::row_group`.
 fn name_grouped(kind: Kind) -> bool {
-    matches!(kind, Kind::Animation | Kind::FaceFx)
+    matches!(kind, Kind::Animation | Kind::FaceFx | Kind::UiGfx)
 }
 
 /// The overlay WADs opened ON TOP of `base`, in load order — the game's own patch mechanism: the
@@ -1731,7 +1731,7 @@ struct BootData {
     /// The bundle's Japanese face (`theme::read_cjk_font`).
     cjk_font: Vec<u8>,
     /// What the clip panel names unnamed table values with, or why it cannot (a released binary has
-    /// no checkout to write into). Its homes' names are already in `names`.
+    /// no checkout to write into). Its home's names are already in `names`.
     namer: Result<crate::statenamer::StateNamer, String>,
     secs: f32,
 }
@@ -1777,13 +1777,14 @@ fn spawn_boot(archive: Option<(String, Vec<String>)>, level: Option<String>, dat
             let mut names = crate::index::load_all_names_staged(|f, stage| {
                 let _ = tx.send(Boot::Prog(f, stage));
             })?;
-            // Names cracked since the bundle was packed live in the checkout's name homes; a hash
+            // Names cracked since the bundle was packed live in the checkout's name home; a hash
             // the bundle already names keeps its name.
-            let namer = crate::statenamer::StateNamer::open().map(|(n, held)| {
+            let namer = crate::statenamer::StateNamer::open().and_then(|opened| {
+                let (n, held) = opened.ok_or_else(crate::statenamer::StateNamer::no_checkout)?;
                 for (h, s) in held {
                     names.entry(h).or_insert(s);
                 }
-                n
+                Ok(n)
             });
             let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
             let lua = crate::index::load_lua_corpus()?;
@@ -2140,6 +2141,11 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
     // The Text tab's string tables: read on a worker the first time a table is opened.
     let mut text_page = crate::textpage::Panel::default();
     let mut text_acts: Vec<crate::textpage::Act> = Vec::new();
+    // The UI tab's open movie, the font library and string table every movie reads (read at the
+    // first one opened), and its transport's acts.
+    let mut movie_view: Option<crate::movieview::MovieView> = None;
+    let mut movie_shared: Option<crate::movieview::Shared> = None;
+    let mut movie_acts: Vec<crate::movieview::Act> = Vec::new();
     // The Layers tab's inspector acts, and the window's size in points the viewport is projected to.
     let mut layer_acts: Vec<crate::layerview::LayerAct> = Vec::new();
     let mut layer_screen = egui::vec2(1.0, 1.0);
@@ -2507,6 +2513,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             vfx_atlas = None;
                             vfx_atlas_tex = None;
                             vfx_rects.clear();
+                            if let Some(v) = movie_view.take() {
+                                v.close(&mut gui);
+                            }
+                            movie_shared = None;
                             w = WadStack::empty();
                             index = AssetIndex::build(&[], &[], HashMap::new());
                             anim_sel = None;
@@ -3181,6 +3191,13 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             }
                             if let Some(n) = &st.entity {
                                 actions.push(Act::LayerEntity(n.clone()));
+                            }
+                            // Applied once the movie is open: the movie's acts wait for it.
+                            if let Some(n) = &st.export {
+                                movie_acts.push(crate::movieview::Act::Isolate(n.clone()));
+                            }
+                            if let Some(p) = &st.stage_clip {
+                                movie_acts.push(crate::movieview::Act::Focus(Some(p.clone())));
                             }
                             if let Some(dir) = &st.shipment {
                                 qm.open_shipment(dir, qm_names.as_ref());
@@ -3929,7 +3946,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 let keys: Vec<(String, Option<(String, String)>, crate::index::NameGroup)> = filtered
                                     .iter()
                                     .map(|&ri| {
-                                        let g = crate::index::name_group(rows[ri].name.as_deref());
+                                        let g = crate::index::row_group(kind, rows[ri].name.as_deref());
                                         let head = format!("{}:{}", kind.label(), g.header);
                                         let sub = g.sub.as_ref().map(|s| (format!("{head} › {s}"), s.clone()));
                                         (head, sub, g)
@@ -4555,7 +4572,14 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                       vfx_acts.extend(crate::vfxview::inspector(ui, v, &vfx_rects, vfx_atlas_tex.as_ref()));
                                   }
                               }
-                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab && !layer_tab && !vfx_tab {
+                              // The UI tab with a movie open.
+                              let movie_tab = eff == Workbench::Inspect && kind == Kind::UiGfx && movie_view.is_some();
+                              if movie_tab {
+                                  if let Some(v) = &mut movie_view {
+                                      movie_acts.extend(crate::movieview::inspector(ui, v, &index.names));
+                                  }
+                              }
+                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab && !layer_tab && !vfx_tab && !movie_tab {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -6686,16 +6710,23 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         // rather than over a scene. Asked as a question about the workbench rather
                         // than as `!= Quartermaster`, which silently stopped being the whole answer
                         // the moment Settings also took the centre.
+                        // The UI tab with a movie open: it plays in the centre.
+                        let movie_tab = eff == Workbench::Inspect && kind == Kind::UiGfx && movie_view.is_some();
+                        if movie_tab {
+                            if let Some(v) = &mut movie_view {
+                                movie_acts.extend(crate::movieview::center(root, v));
+                            }
+                        }
                         let vp = root.available_rect_before_wrap();
                         layer_screen = ctx.content_rect().size();
                         if let (Some(v), None) = (&layer_view, &tex_view) {
-                            if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
+                            if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab && !movie_tab {
                                 let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
                                 let aspect = layer_screen.x / layer_screen.y.max(1.0);
                                 crate::layerview::overlay(ctx, v, crate::layerview::view_proj(eye, cam_target, aspect), vp);
                             }
                         }
-                        if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
+                        if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab && !movie_tab {
                         egui::Area::new(egui::Id::unique("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
@@ -7117,6 +7148,15 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         }
                     }
                     text_page.poll();
+                    // The open movie runs while the UI tab shows it.
+                    if let Some(v) = &mut movie_view {
+                        for act in movie_acts.drain(..) {
+                            v.apply(act);
+                        }
+                        if wb == Workbench::Inspect && kind == Kind::UiGfx {
+                            v.tick(dt);
+                        }
+                    }
                     // Every model's skeleton, for ranking hero candidates.
                     let mut skel_done = false;
                     if let Some(rx) = &skel_rx {
@@ -7947,6 +7987,29 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     }
                                     // The other row of the tab: the `fxdict`, which nothing plays.
                                     Kind::Effect => status = format!("{}: the sprite rectangles of the vfx atlas", row.label()),
+                                    // A movie: it plays in the viewport on the engine's player, read from
+                                    // the WAD the row previews from.
+                                    Kind::UiGfx => {
+                                        let (hash, label, src) = (row.hash, row.label(), row.src);
+                                        let opened = (|| -> Result<crate::movieview::MovieView, String> {
+                                            if movie_shared.as_ref().is_none_or(|s| s.scripts != lua_corpus.len()) {
+                                                let lua: Vec<String> = lua_corpus.iter().map(|(_, c, _)| c.clone()).collect();
+                                                movie_shared = Some(crate::movieview::Shared::read(&mut w, &lua)?);
+                                            }
+                                            let shared = movie_shared.as_ref().expect("read above");
+                                            crate::movieview::MovieView::open(&mut w, shared, hash, label.clone(), src)
+                                        })();
+                                        match opened {
+                                            Ok(v) => {
+                                                if let Some(old) = movie_view.replace(v) {
+                                                    old.close(&mut gui);
+                                                }
+                                                tex_view = None;
+                                                status = format!("movie {label}");
+                                            }
+                                            Err(e) => status = format!("MOVIE FAILED: {label}: {e}"),
+                                        }
+                                    }
                                     // A category with no faithful preview SAYS so rather than silently doing
                                     // nothing. It is browsable, and that is the honest state of it — the
                                     // standing rule against affordances that look like they work.
@@ -8142,7 +8205,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     (Ok(_), false) => {
                                         format!("0x{value:08X} not named: {name:?} hashes to 0x{hashed:08X}")
                                     }
-                                    (Ok(n), true) => match n.homes.append(&name) {
+                                    (Ok(n), true) => match n.home.append(&name) {
                                         Err(e) => format!("0x{value:08X} not named: {e}"),
                                         Ok(_) => {
                                             let mut names = std::mem::take(&mut index.names);
@@ -8167,9 +8230,8 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                                 }
                                             }
                                             format!(
-                                                "0x{value:08X} = {name} — written to {} and {}",
-                                                n.homes.docs.display(),
-                                                n.homes.krate.display()
+                                                "0x{value:08X} = {name} — written to {}",
+                                                n.home.path.display()
                                             )
                                         }
                                     },
@@ -9018,6 +9080,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         last_status.push_str(&status);
                     }
 
+                    // The open movie's frame, drawn ahead of the window's frame into the texture the GUI shows.
+                    if let Some(v) = movie_view.as_mut().filter(|_| wb == Workbench::Inspect && kind == Kind::UiGfx) {
+                        v.render(scene.device(), scene.queue(), &mut gui, &mut w);
+                    }
                     // ── Render: plate view + empty viewport go through the menu path (shell
                     // plate backdrop); anything loaded renders the world. The GUI paints through
                     // the engine's overlay hook either way. ──
@@ -11256,7 +11322,7 @@ mod side_wad_retail_tests {
     }
 
     /// A texture vz.wad and shell.wad both ship (`_shell_font_glyphs_f0`, IDENTICAL in
-    /// `docs/fixpack/wad_duplicate_inventory.md`) lists both copies, previews vz.wad's, reads the
+    /// [`docs/fixpack/wad_duplicate_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/wad_duplicate_inventory.md)) lists both copies, previews vz.wad's, reads the
     /// same from either, and is not marked as differing.
     #[test]
     fn a_texture_in_two_wads_offers_both_copies() {

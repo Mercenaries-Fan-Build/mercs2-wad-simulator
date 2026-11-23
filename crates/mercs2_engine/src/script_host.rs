@@ -43,7 +43,7 @@ use crate::script::{EngineHost, ScriptHost};
 ///
 /// Retail's `Pg.LoadGame` (`FUN_005D7D30` → `FUN_005A4510`) hands `LoadSingleton` the table its save
 /// loader makes of the payload, a `return { … }` Lua chunk
-/// (`docs/reverse_engineer/save_serialize_code_map.md` §1, §2.1); the boot does the same with
+/// ([`docs/reverse_engineer/save_serialize_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/save_serialize_code_map.md) §1, §2.1); the boot does the same with
 /// [`payload`](Self::payload), so every manager's `LoadSingleton` reads exactly what its
 /// `SaveSingleton` wrote.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,7 +93,7 @@ pub struct GameScriptHost {
     /// constructed standalone (tests) — those keep the shadow-table fallbacks below. When attached,
     /// position/state reads resolve against live entities through [`guids`](Self::guids).
     world: Option<Rc<RefCell<World>>>,
-    /// The world's entity-key registry (`docs/reverse_engineer/object_entity_core_code_map.md` §4.0):
+    /// The world's entity-key registry ([`docs/reverse_engineer/object_entity_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/object_entity_core_code_map.md) §4.0):
     /// the name index, SceneObject rows, layer records, LandingZone rows, key ↔ entity links and the
     /// runtime key counter. Shared with the streaming executor and the frame loop ([`guids`](Self::guids)).
     guids: Rc<RefCell<GuidMap>>,
@@ -287,7 +287,7 @@ pub struct NetState {
     pub multiplayer: bool,
     pub host_name: String,
     /// `Net.IsEnabled` (`[0xDFBD74]`), set in single player too
-    /// (`docs/reverse_engineer/hibernation_grid.md` §6 "Runtime spawns").
+    /// ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §6 "Runtime spawns").
     pub enabled: bool,
 }
 
@@ -1832,9 +1832,6 @@ impl EngineHost for GameScriptHost {
 /// event/timer system + audible `Sound.*` cues plug into.
 pub fn resident_script_host(host: Rc<RefCell<GameScriptHost>>) -> Option<ScriptHost> {
     use std::collections::BTreeSet;
-    // The corpus first, then the stand-in root for the handful of shipped modules the 370/382 decompile
-    // does not include (`corpus/stubs/`). Earlier roots win a name collision, so a module becoming
-    // available in the corpus automatically shadows its stand-in.
     let roots = mercs2_script::corpus::roots();
     let sh = if roots.is_empty() { ScriptHost::bare() } else { ScriptHost::new(roots) };
     let sh = match sh {
@@ -2630,6 +2627,27 @@ mod tests {
         assert_eq!(marker.location, [300.0, 5.0, 400.0]);
         assert_eq!(marker.follow_guid, 0x1234);
         assert!(marker.pulsing);
+    }
+
+    /// `SetWidgetLocation` as `FUN_005B4FA0` sets it: a coordinate that is not a number keeps its value,
+    /// and `x1, y1` alone moves the widget whole, keeping its size.
+    #[test]
+    fn set_widget_location_keeps_what_it_is_not_given() {
+        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(host.clone()).unwrap();
+        let at = |lua: &str| -> (f32, f32, f32, f32) {
+            sh.exec(lua, "@loc").unwrap();
+            sh.eval("return _GuiInternal.GetWidgetLocation(w)").unwrap()
+        };
+        assert_eq!(at("w = _GuiInternal.CreateImageWidget() _GuiInternal.SetWidgetLocation(w, 10, 20, 110, 70)"), (10.0, 20.0, 110.0, 70.0));
+        // `MrxGuiHudFactionGauge`'s `SetLocation(nX2, nil, nX2, nil)`: the y edges stay.
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, 90, nil, 90, nil, true)"), (90.0, 20.0, 90.0, 70.0));
+        // Two numbers move the rect, far corner with it (vtbl `+0x14`).
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, 100, 200, 340, 264)"), (100.0, 200.0, 340.0, 264.0));
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, 128, 68)"), (128.0, 68.0, 368.0, 132.0));
+        // A numeric string is a number to `lua_isnumber`.
+        assert_eq!(at("_GuiInternal.SetWidgetLocation(w, '0', '0', nil, 1)"), (0.0, 0.0, 368.0, 1.0));
     }
 
     /// The presentation namespaces drive the real `mercs2_core::RenderSettings`: the atmosphere generic

@@ -1,6 +1,6 @@
 //! The static watermap — the engine's "is this (x,z) over water and how high is the surface" data.
 //!
-//! Code map §4 (static waterline) + [`docs/watermap_format.md`](../../../../docs/watermap_format.md):
+//! Code map §4 (static waterline) + [`docs/watermap_format.md`](../../../docs/watermap_format.md):
 //! the watermap is a single reflection asset, type hash `0x4D7D30C4` = `pandemic_hash_m2("watermap")`,
 //! stored as a `watr` UCFX chunk. It is a **height field + wet mask over a regular XZ grid** — the
 //! static half of the water system (the *dynamic* wave displacement is rendered per-frame into the

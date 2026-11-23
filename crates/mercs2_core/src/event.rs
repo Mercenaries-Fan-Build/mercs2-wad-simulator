@@ -9,8 +9,8 @@
 //!   same four-call **quartet**: allocate an event frame (`FUN_8241d458`) → reserve N 8-byte arg
 //!   slots (`FUN_82878c50`, frame cap **2048** slots) → build-and-dispatch under a 32-bit event
 //!   hash + name label (`FUN_82420690`) → finalize (`FUN_8256eb28`). AI's `DirectAction` dispatches
-//!   the same way. Evidence: `docs/mercs2-pdb-analysis/gui-hud.md` §"ToggleHud is a textbook bus
-//!   call", `docs/mercs2-pdb-analysis/networking.md` §NetEventCallback,
+//!   the same way. Evidence: [`docs/mercs2-pdb-analysis/gui-hud.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/gui-hud.md) §"ToggleHud is a textbook bus
+//!   call", [`docs/mercs2-pdb-analysis/networking.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/networking.md) §NetEventCallback,
 //!   `docs/modernization/pangea_engine_alignment.md` §"Keystone B".
 //! - An event is identified by a **32-bit name hash** (the engine hashes the event name; the
 //!   `.rdata` string is carried alongside only as a debug label). Arguments are a **typed TLV

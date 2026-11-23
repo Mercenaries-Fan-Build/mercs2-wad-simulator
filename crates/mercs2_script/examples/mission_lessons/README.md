@@ -11,7 +11,7 @@ silently not if you don't.
 ## This is not a mock
 
 The lab loads the **actual decompiled `MrxTask`** from the shipped game
-([`docs/mercs2-luacd/src/resident/mrxtask.lua`](../../../../../../docs/mercs2-luacd/src/resident/mrxtask.lua))
+([`corpus/mercs2-luacd/src/resident/mrxtask.lua`](../../corpus/mercs2-luacd/src/resident/mrxtask.lua))
 and drives it through its real entry points:
 
 ```
@@ -72,7 +72,7 @@ Call your parent, and create everything through `self`. Do that and you write no
 
 ## Then: the real thing
 
-[`docs/mercs2-luacd/src/vz/pircon002.lua`](../../../../../../docs/mercs2-luacd/src/vz/pircon002.lua)
+[`corpus/mercs2-luacd/src/vz/pircon002.lua`](../../corpus/mercs2-luacd/src/vz/pircon002.lua)
 — the contract where you escort a truck full of parrots. `inherit("MrxTaskContract")`,
 `MrxTaskContract.Activated(self)` as line one, `self:CreateChild{...}` objectives with `[Token]`
 descriptions, `self:_CreateEvent(Event.ObjectProximity, ...)`. You can read it now.

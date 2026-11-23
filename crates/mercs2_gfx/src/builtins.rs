@@ -7,6 +7,7 @@ use mercs2_formats::gfx_def::Character;
 
 use crate::avm::{to_number, Kind, Listeners, Native, Obj, Player, Text, Value};
 use crate::stage::Node;
+use crate::text::ImageSub;
 
 fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or(Value::Undefined)
@@ -539,6 +540,119 @@ fn field_set_format(p: &mut Player, this: &Value, args: &[Value]) -> Result<Valu
     Ok(Value::Undefined)
 }
 
+/// `flash.display.BitmapData.loadBitmap(linkage)` (`FUN_007b5da0` → `FUN_007b6500`): the image the
+/// movie exports under `linkage`, else `null`. An `img://` or `imgps://` name goes to the host's image
+/// callback instead, which no host here has, so it stops the script.
+fn bitmap_load(p: &mut Player, _: &Value, args: &[Value]) -> Result<Value, String> {
+    if args.is_empty() {
+        return Ok(Value::Null);
+    }
+    let linkage = p.to_text(&args[0])?;
+    let scheme = |s: &str| linkage.get(..s.len()).is_some_and(|head| head.eq_ignore_ascii_case(s));
+    if scheme("img://") || scheme("imgps://") {
+        return Err(format!("loadBitmap({linkage}): the host image callback is not built"));
+    }
+    let def = &p.movie.def;
+    let image = def.exports.get(&*linkage).copied().filter(|id| matches!(def.characters.get(id), Some(Character::Image(_))));
+    Ok(match image {
+        Some(id) => {
+            let bitmap = p.new_object();
+            bitmap.0.borrow_mut().kind = Kind::Bitmap(id);
+            Value::Object(bitmap)
+        }
+        None => Value::Null,
+    })
+}
+
+/// `TextField.setImageSubstitutions(null | element | [element, …])` (`FUN_007a87f0`): `null` clears the
+/// field's images; otherwise each element goes in after those already there. An element that fails a
+/// check is left out with retail's message in the movie log, and the rest still go in. Retail's `%s` in
+/// those messages comes from a virtual call not traced; the field's instance name stands in for it.
+fn field_set_image_subs(p: &mut Player, this: &Value, args: &[Value]) -> Result<Value, String> {
+    let (parent, depth) = field_slot(this)?;
+    let name = p.field(parent, depth)?.name.clone().unwrap_or_default();
+    let elements = match arg(args, 0) {
+        Value::Null => {
+            p.field_mut(parent, depth)?.image_subs.clear();
+            return Ok(Value::Undefined);
+        }
+        Value::Object(o) => match &o.0.borrow().kind {
+            Kind::Array(items) => items.clone(),
+            _ => vec![Value::Object(o.clone())],
+        },
+        _ => {
+            p.log.push(format!("{name}.setImageSubstitutions() failed: parameter should be either 'null', object or array"));
+            return Ok(Value::Undefined);
+        }
+    };
+    for (index, element) in elements.iter().enumerate() {
+        let Some(sub) = image_sub(p, &name, index, element)? else { continue };
+        let subs = &mut p.field_mut(parent, depth)?.image_subs;
+        // `FUN_007e5000`: a key that starts with one already in is dropped.
+        if subs.iter().any(|s| sub.key.starts_with(&s.key)) {
+            continue;
+        }
+        if let Some(longer) = subs.iter().find(|s| s.key.starts_with(&sub.key)) {
+            return Err(format!(
+                "setImageSubstitutions: {:?} begins {:?}, which is already in; which one retail's bisection (FUN_007eec30) matches was not traced",
+                String::from_utf16_lossy(&sub.key),
+                String::from_utf16_lossy(&longer.key)
+            ));
+        }
+        subs.push(sub);
+    }
+    Ok(Value::Undefined)
+}
+
+/// One element of `setImageSubstitutions`, checked in retail's order (`FUN_007a81e0`); `None` when it
+/// is left out.
+fn image_sub(p: &mut Player, name: &str, index: usize, element: &Value) -> Result<Option<ImageSub>, String> {
+    if !matches!(element, Value::Object(_) | Value::Clip(_) | Value::Field(..)) {
+        return Ok(None);
+    }
+    let fail = |p: &mut Player, why: &str| {
+        p.log.push(format!("{name}.setImageSubstitutions() failed for #{index} element - {why}"));
+        Ok(None)
+    };
+    let key = p.get_member(element, "subString")?;
+    if matches!(key, Value::Undefined) {
+        return fail(p, "subString should be specified");
+    }
+    let key: Vec<u16> = p.to_text(&key)?.encode_utf16().collect();
+    if key.len() > 15 {
+        return fail(p, "length of subString should not exceed 15 characters");
+    }
+    if key.is_empty() {
+        return Err(format!("{name}.setImageSubstitutions(): an empty subString, which retail accepts but whose matching was not traced"));
+    }
+    let image = match p.get_member(element, "image")? {
+        Value::Object(o) => match o.0.borrow().kind {
+            Kind::Bitmap(id) => Some(id),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(image) = image else { return fail(p, "'image' is not specified or not a BitmapData") };
+    let Some(Character::Image(info)) = p.movie.def.characters.get(&image) else {
+        return Err(format!("a BitmapData holds character {image}, which is not an image"));
+    };
+    let natural = [info.width as f32 * 20.0, info.height as f32 * 20.0];
+    if natural[0] == 0.0 || natural[1] == 0.0 {
+        return fail(p, "image has one zero dimension");
+    }
+    // Pixels to twips, kept whole as retail's integer fields keep them.
+    let mut twips = |field: &str| -> Result<Option<f32>, String> {
+        Ok(match p.get_member(element, field)? {
+            Value::Undefined => None,
+            v => Some((to_number(&v) * 20.0).round_ties_even() as f32),
+        })
+    };
+    let size = [twips("width")?.unwrap_or(natural[0]), twips("height")?.unwrap_or(natural[1])];
+    // Absent, `baseLineX` is the 0.0 stored at `0x7A8300`, `baseLineY` the image's height less 20.
+    let base_line = [twips("baseLineX")?.unwrap_or(0.0), twips("baseLineY")?.unwrap_or(natural[1] - 20.0)];
+    Ok(Some(ImageSub { key, image, natural, size, base_line }))
+}
+
 pub fn field_get(p: &mut Player, parent: usize, depth: i32, name: &str) -> Result<Value, String> {
     let child = p.field(parent, depth)?.clone();
     let def = match p.movie.def.characters.get(&child.character) {
@@ -558,7 +672,7 @@ pub fn field_get(p: &mut Player, parent: usize, depth: i32, name: &str) -> Resul
                 p.movie.fontless = true;
                 return Ok(Value::Number(0.0));
             };
-            let [w, h] = crate::text::measure(&field, text, &font);
+            let [w, h] = crate::text::measure(&field, text, &font, &child.image_subs);
             Value::Number((if name == "textWidth" { w } else { h }) as f64 / 20.0)
         }
         _ => {
@@ -601,7 +715,7 @@ fn fit_field(p: &mut Player, parent: usize, depth: i32) -> Result<(), String> {
         p.movie.fontless = true;
         return Ok(());
     };
-    let [w, h] = crate::text::measure(&field, text, &font);
+    let [w, h] = crate::text::measure(&field, text, &font, &child.image_subs);
     let gutters = crate::text::GUTTER * 2.0;
     let [mut xmin, mut xmax, ymin, _] = field.bounds;
     if !field.word_wrap {
@@ -667,6 +781,7 @@ pub fn install(p: &mut Player) {
         method(p, &clip_proto, name, f);
     }
     method(p, &field_proto, "setTextFormat", field_set_format);
+    method(p, &field_proto, "setImageSubstitutions", field_set_image_subs);
     for (name, f) in [("getFullYear", date_year as Native), ("getMonth", date_month), ("getDate", date_day)] {
         method(p, &date_proto, name, f);
     }
@@ -735,6 +850,14 @@ pub fn install(p: &mut Player) {
     }
     global.set("Mouse", Value::Object(mouse));
 
+    let bitmap_data = p.new_object();
+    method(p, &bitmap_data, "loadBitmap", bitmap_load);
+    let display = p.new_object();
+    display.set("BitmapData", Value::Object(bitmap_data));
+    let flash = p.new_object();
+    flash.set("display", Value::Object(display));
+    global.set("flash", Value::Object(flash));
+
     for (name, f) in [
         ("isNaN", is_nan as Native),
         ("parseInt", parse_int),
@@ -742,5 +865,132 @@ pub fn install(p: &mut Player) {
         ("clearInterval", clear_interval),
     ] {
         method(p, &global, name, f);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stage::Movie;
+    use mercs2_formats::gfx_def::{Control, EditText, ExternalImage, MovieDef, Place};
+
+    /// A movie that exports a 10 × 8 pixel image as `flag`, and holds the text field `t`.
+    fn player() -> (Player, Value) {
+        let mut def = MovieDef::default();
+        def.stage = [0, 25600, 0, 14400];
+        let image = ExternalImage { format: 0, width: 10, height: 8, export_name: "flag".into(), file_name: "flag.tga".into() };
+        def.characters.insert(5, Character::Image(image));
+        def.exports.insert("flag".into(), 5);
+        def.characters.insert(3, Character::EditText(EditText { bounds: [0, 4000, 0, 400], height: 240, ..EditText::default() }));
+        def.timeline.frames = vec![vec![Control::Place(Place { depth: 1, character: Some(3), name: Some("t".into()), ..Place::default() })]];
+        let mut p = Player::new(Movie::new(Rc::new(def)).expect("movie")).expect("player");
+        let t = p.get_member(&Value::Clip(0), "t").expect("t");
+        (p, t)
+    }
+
+    fn load(p: &mut Player, linkage: &str) -> Value {
+        bitmap_load(p, &Value::Undefined, &[Value::Str(linkage.into())]).expect("loadBitmap")
+    }
+
+    fn element(p: &Player, props: Vec<(&str, Value)>) -> Value {
+        let o = p.new_object();
+        for (k, v) in props {
+            o.set(k, v);
+        }
+        Value::Object(o)
+    }
+
+    fn subs_of(p: &Player, t: &Value) -> Vec<ImageSub> {
+        let Value::Field(parent, depth) = t else { panic!("a field") };
+        p.field(*parent, *depth).expect("field").image_subs.clone()
+    }
+
+    fn set(p: &mut Player, t: &Value, arg: Value) {
+        field_set_image_subs(p, t, &[arg]).expect("setImageSubstitutions");
+    }
+
+    #[test]
+    fn load_bitmap_finds_an_exported_image_and_nothing_else() {
+        let (mut p, _) = player();
+        let Value::Object(o) = load(&mut p, "flag") else { panic!("a BitmapData") };
+        assert!(matches!(o.0.borrow().kind, Kind::Bitmap(5)));
+        assert!(matches!(load(&mut p, "nope"), Value::Null));
+        assert!(matches!(bitmap_load(&mut p, &Value::Undefined, &[]).expect("no argument"), Value::Null));
+        assert!(bitmap_load(&mut p, &Value::Undefined, &[Value::Str("img://flag".into())]).is_err(), "no host image callback");
+    }
+
+    #[test]
+    fn an_element_takes_retail_defaults() {
+        let (mut p, t) = player();
+        let flag = load(&mut p, "flag");
+        let e = element(&p, vec![("subString", Value::Str("[f]".into())), ("image", flag)]);
+        set(&mut p, &t, e);
+        let subs = subs_of(&p, &t);
+        assert_eq!(subs[0].natural, [200.0, 160.0]);
+        assert_eq!(subs[0].size, [200.0, 160.0], "its own size");
+        assert_eq!(subs[0].base_line, [0.0, 140.0], "baseLineX 0, baseLineY its height less 20 twips");
+    }
+
+    #[test]
+    fn element_pixels_become_twips() {
+        let (mut p, t) = player();
+        let flag = load(&mut p, "flag");
+        let n = |v: f64| Value::Number(v);
+        let e = element(
+            &p,
+            vec![("subString", Value::Str("[f]".into())), ("image", flag), ("width", n(4.0)), ("height", n(3.0)), ("baseLineX", n(1.0)), ("baseLineY", n(2.5))],
+        );
+        set(&mut p, &t, e);
+        let subs = subs_of(&p, &t);
+        assert_eq!((subs[0].size, subs[0].base_line), ([80.0, 60.0], [20.0, 50.0]));
+    }
+
+    #[test]
+    fn a_failing_element_is_logged_and_left_out() {
+        let (mut p, t) = player();
+        let flag = load(&mut p, "flag");
+        let no_image = element(&p, vec![("subString", Value::Str("[a]".into()))]);
+        let too_long = element(&p, vec![("subString", Value::Str("0123456789abcdef".into())), ("image", flag.clone())]);
+        let no_key = element(&p, vec![("image", flag.clone())]);
+        let good = element(&p, vec![("subString", Value::Str("[b]".into())), ("image", flag)]);
+        let list = p.new_array(vec![no_image, too_long, no_key, good]);
+        set(&mut p, &t, list);
+        assert_eq!(subs_of(&p, &t).len(), 1);
+        assert_eq!(
+            p.log,
+            [
+                "t.setImageSubstitutions() failed for #0 element - 'image' is not specified or not a BitmapData",
+                "t.setImageSubstitutions() failed for #1 element - length of subString should not exceed 15 characters",
+                "t.setImageSubstitutions() failed for #2 element - subString should be specified",
+            ]
+        );
+        set(&mut p, &t, Value::Number(1.0));
+        assert_eq!(p.log[3], "t.setImageSubstitutions() failed: parameter should be either 'null', object or array");
+    }
+
+    #[test]
+    fn elements_append_a_longer_key_is_dropped_and_null_clears() {
+        let (mut p, t) = player();
+        let flag = load(&mut p, "flag");
+        let a = element(&p, vec![("subString", Value::Str("[a".into())), ("image", flag.clone())]);
+        let b = element(&p, vec![("subString", Value::Str("[b]".into())), ("image", flag.clone())]);
+        let longer = element(&p, vec![("subString", Value::Str("[ab]".into())), ("image", flag)]);
+        set(&mut p, &t, a);
+        set(&mut p, &t, b);
+        set(&mut p, &t, longer);
+        let keys: Vec<String> = subs_of(&p, &t).iter().map(|s| String::from_utf16_lossy(&s.key)).collect();
+        assert_eq!(keys, ["[a", "[b]"], "a call appends; a key that starts with one already in goes nowhere");
+        set(&mut p, &t, Value::Null);
+        assert!(subs_of(&p, &t).is_empty());
+    }
+
+    #[test]
+    fn a_key_that_begins_one_already_in_stops_the_script() {
+        let (mut p, t) = player();
+        let flag = load(&mut p, "flag");
+        let long = element(&p, vec![("subString", Value::Str("[ab]".into())), ("image", flag.clone())]);
+        let short = element(&p, vec![("subString", Value::Str("[a".into())), ("image", flag)]);
+        set(&mut p, &t, long);
+        assert!(field_set_image_subs(&mut p, &t, &[short]).is_err());
     }
 }

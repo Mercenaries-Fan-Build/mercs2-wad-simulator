@@ -308,6 +308,13 @@ fn chunk_range(container: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
     None
 }
 
+/// The string table of a stringdb `UCFX` container.
+pub fn read_container(container: &[u8]) -> Result<StringDb, String> {
+    let (ks, kl) = chunk_range(container, b"KEYS").ok_or("container has no KEYS chunk")?;
+    let (ss, sl) = chunk_range(container, b"STRS").ok_or("container has no STRS chunk")?;
+    parse(&container[ks..ks + kl], &container[ss..ss + sl])
+}
+
 /// Apply text edits to a stringdb `UCFX` container and return the rebuilt container.
 ///
 /// This is what a `edit_stringdb` contribution lowers through, and it is the SAME writer the fix
@@ -329,9 +336,7 @@ pub fn apply_container<F>(container: &[u8], f: F) -> Result<Vec<u8>, String>
 where
     F: FnOnce(&mut StringDb) -> Result<(), String>,
 {
-    let (ks, kl) = chunk_range(container, b"KEYS").ok_or("container has no KEYS chunk")?;
-    let (ss, sl) = chunk_range(container, b"STRS").ok_or("container has no STRS chunk")?;
-    let mut db = parse(&container[ks..ks + kl], &container[ss..ss + sl])?;
+    let mut db = read_container(container)?;
     f(&mut db)?;
     let (new_keys, new_strs) = build(&db);
     rebuild_container(container, &[(*b"KEYS", &new_keys), (*b"STRS", &new_strs)])

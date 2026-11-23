@@ -1504,6 +1504,11 @@ impl Scene {
         &self.device
     }
 
+    /// The queue on [`Self::device`], for work an external layer submits ahead of the frame.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
     /// The swapchain color format (external overlay layers must render in it).
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format

@@ -1,5 +1,5 @@
 //! `GuidMap` — the entity-key world a script guid addresses
-//! (`docs/reverse_engineer/object_entity_core_code_map.md` §4.0).
+//! ([`docs/reverse_engineer/object_entity_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/object_entity_core_code_map.md) §4.0).
 //!
 //! A script guid is the entity's u32 key: a placed entity's WAD key, a template's bit-31 key, or a
 //! runtime key (`0x4000xxxx`) for anything spawned. This registry holds what retail resolves a guid
@@ -33,7 +33,7 @@ pub struct SceneRow {
     pub state: u8,
 }
 
-/// A layer record (`docs/reverse_engineer/layer_load_code_map.md` §1).
+/// A layer record ([`docs/reverse_engineer/layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md) §1).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LayerRecord {
     /// `+0x14`: 0 unloaded, 2 loaded, 3 failed.
@@ -104,7 +104,7 @@ impl GuidMap {
         }
     }
 
-    /// A layer request (`docs/reverse_engineer/layer_load_code_map.md` §2–3). Returns false when it is
+    /// A layer request ([`docs/reverse_engineer/layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md) §2–3). Returns false when it is
     /// refused (retail pushes nil and tracks nothing).
     /// - Load adds a reference, marks the record dynamic or static, and queues the load.
     /// - Unload is refused for a layer that is not dynamic unless static layers are being torn down

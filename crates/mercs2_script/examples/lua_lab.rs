@@ -15,7 +15,7 @@
 //!   kind (one module env per script resource), which is what makes module-level globals a trap
 //!   (`tEvents[uGuid]`-style per-guid tables are all over the resident corpus for exactly this reason).
 //! * Each `OnActivate` runs when its object's activation completes — the object is already awake
-//!   (`docs/reverse_engineer/hibernation_grid.md` §6a: the ObjectScript listener runs after state 2).
+//!   ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §6a: the ObjectScript listener runs after state 2).
 //!   Both objects are activated before any `Event.ObjectHibernation` condition is polled, which is
 //!   what turns a shared global into a silent identity swap.
 //! * The block streams **out and back in**, so anything you registered runs again. Most real script

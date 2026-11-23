@@ -1,7 +1,7 @@
 //! `mercs2_combat` — Weapons/combat: `wpn_*` gun stats, the projectile lifecycle, the homing/lock-on
 //! FSM, and a damage/explosion applier.
 //!
-//! **Code map** `docs/reverse_engineer/weapons_combat_code_map.md`. Owned Lua namespaces:
+//! **Code map** [`docs/reverse_engineer/weapons_combat_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/weapons_combat_code_map.md). Owned Lua namespaces:
 //! `Weapon`, `Airstrike` (+ `Human.Inventory`/`Object` ammo cfuncs). Hard edges: hit-tests consume
 //! `mercs2_core::PhysicsQuery`; firing/damage post on the `mercs2_core` event bus (Keystone
 //! B). Depends only on `mercs2_core` + `mercs2_formats` — no leaf→leaf edge (carve rule §4).

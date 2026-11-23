@@ -16,7 +16,7 @@
 //!
 //! - Retail table VA + binding count + which namespace(s) share the global.
 //! - A binding table with corpus-call count per row.
-//! - Cross-links back to `docs/reverse_engineer/scripting_host_binding_code_map.md` (the master
+//! - Cross-links back to [`docs/reverse_engineer/scripting_host_binding_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/scripting_host_binding_code_map.md) (the master
 //!   index) and to the paired EmmyLua stub at `output/emmylua/mercs2/<Global>.lua`.
 //!
 //! # What's NOT on each page (yet)
@@ -132,13 +132,15 @@ pub fn generate_index_from(namespaces: &[NamespaceMeta]) -> String {
 
     s.push_str("See also:\n\n");
     s.push_str(
-        "- [`docs/reverse_engineer/scripting_host_binding_code_map.md`](../../reverse_engineer/\
+        "- [`docs/reverse_engineer/scripting_host_binding_code_map.md`](https://github.com/\
+         Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/\
          scripting_host_binding_code_map.md) — the master index of every `luaL_Reg` table with \
          its retail VA + representative decoded cfuncs.\n",
     );
     s.push_str(
-        "- [`docs/lua_engine_bindings_audit_deep_dive.md`](../../lua_engine_bindings_audit_deep_\
-         dive.md) — the counts + call-site frequencies this table is built on.\n",
+        "- [`docs/lua_engine_bindings_audit_deep_dive.md`](https://github.com/Mercenaries-Fan-Build/\
+         notes-on-the-released-game/blob/main/docs/lua_engine_bindings_audit_deep_dive.md) — the \
+         counts + call-site frequencies this table is built on.\n",
     );
     s.push_str(
         "- [`docs/modding/lua_engine_seam_hardening.md`](../lua_engine_seam_hardening.md) — the \
@@ -195,7 +197,8 @@ fn render_page(global: &str, metas: &[&NamespaceMeta]) -> (String, usize) {
 
     s.push_str("See also:\n\n");
     s.push_str(
-        "- [Master binding-surface index](../../reverse_engineer/scripting_host_binding_code_map.md) \
+        "- [Master binding-surface index](https://github.com/Mercenaries-Fan-Build/\
+         notes-on-the-released-game/blob/main/docs/reverse_engineer/scripting_host_binding_code_map.md) \
          — every `luaL_Reg` table, its retail VA, and the representative cfuncs whose bodies are decoded.\n",
     );
     s.push_str(
@@ -215,8 +218,10 @@ fn render_page(global: &str, metas: &[&NamespaceMeta]) -> (String, usize) {
     s.push_str("## Bindings\n\n");
     s.push_str(&format!(
         "{count} binding{s} on this global. `Corpus` = distinct references to the binding \
-         across the decompiled shipped Lua (both `docs/mercs2-luacd/` and \
-         `docs/mercs2-dlc-luacd/src/`); `0` means no shipped script calls it, which is a hint \
+         across the decompiled shipped Lua (both \
+         [`corpus/mercs2-luacd/src/`](../../../crates/mercs2_script/corpus/mercs2-luacd/src/) and \
+         [`corpus/mercs2-dlc-luacd/src/`](../../../crates/mercs2_script/corpus/mercs2-dlc-luacd/src/)); \
+         `0` means no shipped script calls it, which is a hint \
          that a novel one may not have an established idiom to follow.\n\n",
         count = all.len(),
         s = if all.len() == 1 { "" } else { "s" }

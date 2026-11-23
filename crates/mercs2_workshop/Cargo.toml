@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_workshop"
-version = "5.0.4"
+version = "6.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — native asset workshop (browse / inspect / remix) on the mercs2_engine renderer."
 readme = "README.md"
@@ -45,7 +45,7 @@ bytemuck = { version = "1", features = ["derive"] }
 # script printed back from it is byte-for-byte the source it was parsed from — see
 # docs/modernization/workshop_charter.md §Mission designer. `lua52` for `goto`/`::label::`: unluac
 # emits them for control flow it cannot structure in the debug-stripped DLC chunks
-# (docs/mercs2-dlc-luacd/README.md). What retail accepts is decided by the mercs2_luac compile.
+# (https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-dlc-luacd/README.md). What retail accepts is decided by the mercs2_luac compile.
 full_moon = { version = "3", default-features = false, features = ["lua52"] }
 # The Blueprint's Compile: the workspace's one Lua 5.1.5 (the game's float VM), so a script that
 # compiles here is bytecode the game loads.

@@ -4,7 +4,7 @@
 //! The world is 20 × 20 cells of 400 m. Each cell is ONE `terrainmesh` container, carried in a c3 cell
 //! block next to its terrain texture and its `scrub` (`0x600B904E`) ground-cover packages. There is **no
 //! heightmap**: the ground is a triangle mesh, and the collider is a Havok `WpMeshShape16` + MOPP
-//! ([`crate::phy2_build`], `docs/reverse_engineer/terrain_collision_regeneration.md` §1).
+//! ([`crate::phy2_build`], [`docs/reverse_engineer/terrain_collision_regeneration.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/terrain_collision_regeneration.md) §1).
 //!
 //! # Container layout
 //!

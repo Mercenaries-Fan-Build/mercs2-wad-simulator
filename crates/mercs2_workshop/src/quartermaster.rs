@@ -760,6 +760,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::LevelAsset { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
         Contribution::AddShopItem { id, .. } | Contribution::FetchPackage { id, .. } => id.clone(),
+        Contribution::AddMenuItem { label, .. } => label.clone(),
         Contribution::AddSound { bank, .. } => bank.clone(),
         Contribution::ReplaceSoundBank { bank, language, .. } => {
             mercs2_quartermaster::sound::entry_name(bank, *language)
@@ -949,6 +950,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_script", "New script", "Mint a new Lua module (import-able)"),
             ("replace_lua", "Replace script", "Replace a shipped script's bytecode"),
             ("add_shop_item", "New shop item", "Add a purchasable shop item"),
+            ("add_menu_item", "New menu item", "An item on a retail menu page that runs a front-end Lua function"),
         ],
     ),
     (
@@ -1203,6 +1205,13 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             source: PathBuf::from("src/module.lua"),
             exports: Vec::new(),
             load: None,
+        },
+        "add_menu_item" => Contribution::AddMenuItem {
+            menu: "shell.main".into(),
+            label: name,
+            after: "SHELL.MainMenu.Options".into(),
+            help: None,
+            action: "module.Open".into(),
         },
         "replace_lua" => Contribution::ReplaceLua {
             target: "wifpmcinterior".into(),
@@ -2722,6 +2731,13 @@ fn contribution_form(
                 "ships as `.\\Data\\<name>-patch.wad` above a copy of vz.wad.",
             );
         }
+        Contribution::AddMenuItem { menu, label, after, help, action } => {
+            commit |= text_row(ui, "Menu", menu, "shell.main", true);
+            commit |= text_row(ui, "Label key", label, "Mods.Menu", true);
+            commit |= text_row(ui, "After", after, "SHELL.MainMenu.Options", true);
+            commit |= optional_text_row(ui, "Help key", help, "Mods.MenuHelp");
+            commit |= text_row(ui, "Action", action, "modsmenu.Open", true);
+        }
         Contribution::FetchPackage { id, format, url, sha256, size } => {
             commit |= text_row(ui, "Id", id, "biua_ps3", false);
             commit |= theme::combo_field(
@@ -3479,6 +3495,10 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::LevelAsset { level, asset_type, .. } => vec![
             ("Adds".to_string(), format!("{asset_type} to level {level}")),
             ("Merge".to_string(), "compiled into its level's patch".to_string()),
+        ],
+        Contribution::AddMenuItem { menu, label, .. } => vec![
+            ("Adds".to_string(), format!("menu item {label} on {menu}")),
+            ("Merge".to_string(), "composed into the page's movie by the link \u{2014} keyed on the label".to_string()),
         ],
         // `blast::claims` gives a fetch_package none: what it converts is claimed by the rows that
         // name it with `from:`.

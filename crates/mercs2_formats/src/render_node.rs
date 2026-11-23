@@ -1,5 +1,5 @@
 //! A model render node's bounding sphere when its entity's activation creates it — what the hibernation
-//! grid re-cells the entity with (`docs/reverse_engineer/hibernation_grid.md` §2).
+//! grid re-cells the entity with ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §2).
 //!
 //! - A `TinyGeometryObject` entity gets node class `0xBAB160` (`FUN_00477D10`): the model's `INFO`
 //!   box and the sphere the `INFO` reader `FUN_00470D60` derives from it, never recomputed.

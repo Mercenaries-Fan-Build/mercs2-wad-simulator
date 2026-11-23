@@ -1,5 +1,5 @@
 //! The display-mode sites, found in the game image without per-build addresses, for the BUG-016 fix
-//! (`docs/fixpack/bug_register.md`): the render state's constructor keeps a mode from
+//! ([`docs/fixpack/bug_register.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/bug_register.md)): the render state's constructor keeps a mode from
 //! `IDirect3D9::EnumAdapterModes` only at 85 Hz or less and only near 4:3 or 16:9 (v1.0; v1.1 keeps
 //! five aspect bands), and `RenderSystem::ApplySettings` falls back to 640×480 at 60 Hz when the
 //! `Mercs2.ini` mode is not kept, then returns an error its caller never checks when that is not kept

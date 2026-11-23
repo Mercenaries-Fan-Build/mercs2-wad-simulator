@@ -209,12 +209,18 @@ struct Hit {
 
 pub fn clip_names(wadpath: &str, out: &Path) -> Result<(), String> {
     let start = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-    let notes = game_paths::local_config_notes_docs_dir(&start)?;
+    let lua = mercs2_engine::script::corpus::root().ok_or(format!(
+        "the script corpus mercs2_script/corpus/mercs2-luacd/src (or {}) is not a directory",
+        mercs2_engine::script::corpus::CORPUS_ENV
+    ))?;
 
     // ── the name pool ──
     let mut pool: HashMap<u32, BTreeSet<String>> = HashMap::new();
     load_names_json(&game_paths::local_config_rainbow_table(&start)?, &mut pool)?;
-    load_names_json(&notes.join("data/aset_discovered_names.json"), &mut pool)?;
+    load_names_json(
+        &game_paths::repo_root().join("crates").join("mercs2_workshop").join("data").join("aset_discovered_names.json"),
+        &mut pool,
+    )?;
     let jul08 = game_paths::local_config_jul08_strings(&start)?;
     let jul08_txt = std::fs::read_to_string(&jul08).map_err(|e| format!("{}: {e}", jul08.display()))?;
     for line in jul08_txt.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -307,7 +313,7 @@ pub fn clip_names(wadpath: &str, out: &Path) -> Result<(), String> {
     let mut narrow: BTreeSet<String> = token_set.iter().chain(table_words.iter()).filter(|w| wordlike(w)).cloned().collect();
     // Compounds split where both halves are words of any source (`walkforward` = `walk` + `forward`).
     let mut wide: BTreeSet<String> = words(&jul08_txt).into_iter().filter(|w| wordlike(w)).collect();
-    lua_identifiers(&notes.join("mercs2-luacd/src"), &mut wide)?;
+    lua_identifiers(&lua, &mut wide)?;
     wide.retain(|w| wordlike(w));
     let dictionary: BTreeSet<String> = narrow.union(&wide).cloned().collect();
     let (halves, suffixes) = split_compounds(&token_set, &dictionary);

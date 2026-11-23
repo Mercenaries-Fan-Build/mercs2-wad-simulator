@@ -184,7 +184,7 @@ pub struct PlayerObject {
     /// The live lead for a name is the Xbox build's player mode machine — `PgPlayerPDAMapMode`,
     /// `PgPlayerBinocularsMode`, `PgPlayerHumanMode`, `PgPlayerEnterSeatMode`, `PgPlayerSeatedMode`
     /// (PPC strings 7507–7533); `PgPlayerPDAMapMode @825666a8` has a decompiled body in
-    /// `docs/mercs2-pdb-analysis/gui-hud.md:244`. **No name is invented here.**
+    /// [`docs/mercs2-pdb-analysis/gui-hud.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/gui-hud.md?plain=1#L244). **No name is invented here.**
     pub mode: PlayerMode,
     /// `+0x1B4` — cinematic-mode **counter** (not a flag): `InCinematicMode` is
     /// `0x005DC146 cmp dword [eax+0x1b4], 0`. **H**.

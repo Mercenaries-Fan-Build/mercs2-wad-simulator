@@ -210,6 +210,21 @@ impl Gui {
         self.tex_delta.append(out.textures_delta);
     }
 
+    /// Show a texture the app renders itself (a movie's frame) as an egui image, linearly filtered.
+    pub fn register_native(&mut self, device: &wgpu::Device, view: &wgpu::TextureView) -> egui::TextureId {
+        self.renderer.register_native_texture(device, view, wgpu::FilterMode::Linear)
+    }
+
+    /// Point a [`Self::register_native`] id at a new texture (the old one was resized away).
+    pub fn update_native(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, id: egui::TextureId) {
+        self.renderer.update_egui_texture_from_wgpu_texture(device, view, wgpu::FilterMode::Linear, id);
+    }
+
+    /// Forget a [`Self::register_native`] id.
+    pub fn free_native(&mut self, id: egui::TextureId) {
+        self.renderer.free_texture(&id);
+    }
+
     /// Paint the last `run` inside the engine's overlay hook (own render pass on the swapchain).
     pub fn paint(
         &mut self,

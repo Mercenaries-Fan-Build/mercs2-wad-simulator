@@ -1292,9 +1292,9 @@ fn a_compressed_movie_is_not_re_encoded() {
         "a CFX movie must ship as the CFX it arrived as"
     );
     assert!(
-        mercs2_formats::gfx::GfxMovie::parse(&carried)
+        mercs2_formats::gfx_stream::TagStream::parse(&carried)
             .expect("still a movie")
-            .compressed
+            .compressed()
     );
 }
 

@@ -3,7 +3,7 @@
 Non-blocking improvements intentionally left for a later pass. Each is tagged `[faithful-blocker: no]`
 — omitting it does NOT make the current behaviour less faithful to the exe oracle; it is scope/quality,
 not correctness. The exe's per-hit ballistic/explosion solver math — long the documented **wall** — is
-now **recovered from the sibling "WildStar" engine** (`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`);
+now **recovered from the sibling "WildStar" engine** ([`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/saboteur_damage_solver_symbol_map.md));
 what remains is confirming its constants against the Mercs2 prototype body (see the Damage/explosion
 section below), not a blind live capture.
 
@@ -49,7 +49,7 @@ section below), not a blind live capture.
   `WSDamageable::ApplyDamage` = `health -= amount * damageScale`; `WSExplosion::CreateExplosion` falloff =
   linear `(radius - dist)/radius` to the nearest box point, point-blank = 1.0; deferred + staggered apply
   (`dist × 1/30`, 1.5 s lifetime); force floor 200; 7-bone ragdoll spread
-  (`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`). `damage::apply_hit` /
+  ([`docs/reverse_engineer/saboteur_damage_solver_symbol_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/saboteur_damage_solver_symbol_map.md)). `damage::apply_hit` /
   `detonate_explosion` now implement that shape (`// WILDSTAR:` comments); the falloff, `DamageKey`
   taxonomy, and event contract are faithful. **Residual (verify vs Mercs2):** the exact numeric constants
   are WildStar's — confirm against the Mercs2 Jul-08 prototype body (`ApplyExplosionToBodies` /

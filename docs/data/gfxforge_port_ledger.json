@@ -1,0 +1,2734 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)",
+    "license_file": "LICENSE (Copyright (c) 2026 loganw234 (Improper Aperture))"
+  },
+  "target": {
+    "crate": "mercs2_formats",
+    "module": "gfx",
+    "fixtures_dir": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge"
+  },
+  "retail_corpus": {
+    "path": "output/gfx_movies",
+    "movies": 83,
+    "unique_content": 69,
+    "magic": {
+      "CFX": 80,
+      "GFX": 3
+    },
+    "swf_version": {
+      "8": 83
+    }
+  },
+  "totals": {
+    "tests_enumerated": 192,
+    "node_run_reported": {
+      "passed": 192,
+      "failed": 0,
+      "total": 192,
+      "printed_skip_counted_as_pass": 3
+    },
+    "reconciliation": "static count of top-level test( calls per suite file (grep -c \"^test(\") sums to 192; node tests/run.js reported \"192 passed, 0 failed\"; 3 uikit tests printed a skip line and returned early, counted as passes by run.js test(). tests/shape-decoder.js is a helper (no test() calls) and run.js only loads suite.*.js.",
+    "by_class": {
+      "codec": 143,
+      "editor-only": 41,
+      "superseded": 8
+    },
+    "codec_with_fixture": 140,
+    "codec_without_fixture": 3,
+    "by_rust_module": {
+      "gfx::interp": 52,
+      "gfx::as2": 16,
+      "gfx::build": 25,
+      "gfx::avm1": 6,
+      "gfx::tags::bitmap": 4,
+      "gfx::verify": 3,
+      "gfx::decode": 6,
+      "gfx::component": 1,
+      "gfx::spec": 11,
+      "gfx::tags::shape": 12,
+      "gfx::tags::place": 3,
+      "gfx::tags::text": 4
+    },
+    "per_file": {
+      "tests/suite.as2-features.js": {
+        "total": 31,
+        "codec": 31,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.autosave.js": {
+        "total": 9,
+        "codec": 0,
+        "editor-only": 9,
+        "superseded": 0
+      },
+      "tests/suite.avm1-encoding.js": {
+        "total": 8,
+        "codec": 8,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.bitmap.js": {
+        "total": 6,
+        "codec": 6,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.compiler-baseline.js": {
+        "total": 1,
+        "codec": 1,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.decode.js": {
+        "total": 2,
+        "codec": 2,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.interpreter.js": {
+        "total": 23,
+        "codec": 23,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.luagen.js": {
+        "total": 8,
+        "codec": 0,
+        "editor-only": 0,
+        "superseded": 8
+      },
+      "tests/suite.movie-shapes.js": {
+        "total": 6,
+        "codec": 6,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.multiselect.js": {
+        "total": 11,
+        "codec": 0,
+        "editor-only": 11,
+        "superseded": 0
+      },
+      "tests/suite.panels.js": {
+        "total": 7,
+        "codec": 0,
+        "editor-only": 7,
+        "superseded": 0
+      },
+      "tests/suite.play-mode.js": {
+        "total": 6,
+        "codec": 0,
+        "editor-only": 6,
+        "superseded": 0
+      },
+      "tests/suite.project-timeline.js": {
+        "total": 10,
+        "codec": 10,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.reference-image.js": {
+        "total": 6,
+        "codec": 0,
+        "editor-only": 6,
+        "superseded": 0
+      },
+      "tests/suite.regression.js": {
+        "total": 5,
+        "codec": 3,
+        "editor-only": 2,
+        "superseded": 0
+      },
+      "tests/suite.scripting-features.js": {
+        "total": 13,
+        "codec": 13,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.shape-ex.js": {
+        "total": 13,
+        "codec": 13,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.timeline.js": {
+        "total": 24,
+        "codec": 24,
+        "editor-only": 0,
+        "superseded": 0
+      },
+      "tests/suite.uikit-regression.js": {
+        "total": 3,
+        "codec": 3,
+        "editor-only": 0,
+        "superseded": 0
+      }
+    },
+    "compiler_baseline_programs": 54,
+    "tests_with_deviation": 32
+  },
+  "deviations": [
+    {
+      "id": "D1",
+      "title": "PlaceObject2 flag bits: HasClipActions is 0x80 and Move is 0x01",
+      "gfxforge": [
+        "js/codec/swf.js:349-353 (PLACE.HAS_CLIP_ACTIONS 0x01, PLACE.MOVE 0x80)",
+        "tests/suite.timeline.js:176 (asserts 0x01)",
+        "js/codec/decode.js:180 (comment: clip actions flag 0x01)"
+      ],
+      "retail_evidence": "PROVEN: 97186 PlaceObject2 records (top-level + inside DefineSprite) in the 83 movies under output/gfx_movies. Parsed with 0x80 = HasClipActions: 97186/97186 consume exactly their tag body. Parsed with gfxforge's 0x01 = HasClipActions: 10225/97186 (only the 10225 records with neither bit set). Of the 86961 records with 0x01 or 0x80 set, 86961 parse only under the retail reading, 0 only under gfxforge's. (86959 records carry 0x01, 2 carry 0x80.) (Consistent with the published SWF spec bit order — INFERRED, spec not re-read in this pass.) Driver: scratch drivers/retail_scan.js.",
+      "rust_expectation": "Writer sets 0x80 for clip actions, 0x01 for move; reader treats 0x80 as HasClipActions. Tests port suite.timeline.js:168 with the 0x80 assertion; decode tests use the retail_corrected fixture bytes.",
+      "affected_tests": [
+        "tests/suite.timeline.js:168",
+        "tests/suite.timeline.js:278"
+      ]
+    },
+    {
+      "id": "D2",
+      "title": "Long tag header on short bodies must be preserved (lossless layer)",
+      "gfxforge": [
+        "js/codec/swf.js:58-64 (tag(): short form whenever body.length < 0x3f)"
+      ],
+      "retail_evidence": "PROVEN: 8415 top-level tags in the 83 movies use the long (0x3f + u32) header for a body < 63 bytes, plus 7208 more inside DefineSprite (total 15623; by code: {\"2\":1419,\"12\":2169,\"26\":3993,\"32\":80,\"37\":1019,\"39\":1749,\"43\":2309,\"56\":2035,\"70\":2,\"71\":34,\"74\":569,\"75\":8,\"83\":237}). Over the 69 unique-content files (shell/ duplicates removed): 6759 top-level + 5606 nested. Driver: scratch drivers/retail_scan.js, drivers/retail_scan2.js.",
+      "rust_expectation": "gfx::tag records the header form per tag and re-emits it byte-identically. No gfxforge test exercises this; it needs new retail-identity tests (not from this ledger). Authoring output may keep gfxforge's short-form rule.",
+      "affected_tests": []
+    },
+    {
+      "id": "D3",
+      "title": "Raw GFX FileLength = actual size - 8",
+      "gfxforge": [
+        "js/codec/swf.js:513 (FileLength = 8 + body.length = total size)",
+        "js/codec/verify.js:99 (requires FileLength == data.length)"
+      ],
+      "retail_evidence": "PROVEN for the raw (uncompressed GFX) movies present: 3/3 (fanfare_new_contact.gfx 1292 vs 1300, fanfare_support_unlocked.gfx 1302 vs 1310, snatch_moment.gfx 3201 vs 3209). The 80 CFX movies instead store FileLength = full uncompressed length including the 8-byte header (offset just past the End tag; 80/80). Caveat: the 3 raw-GFX movies are exactly the 3 with ExporterInfo version 0x010f/0x010d flags 0x03 (see D4); no retail movie combines exporter 0x0207/flags 0x13 with raw GFX, so the retail_corrected fixture bytes (0x0207 + 0x13 + raw + len-8) are a combination not observed in retail. Also: every CFX movie inflates to more bytes than FileLength, with non-zero trailing bytes after the End tag (retail_scan2.json fileLenRows) — the lossless layer must preserve them. Driver: scratch drivers/retail_scan2.js.",
+      "rust_expectation": "Rust raw-GFX writer emits total-8; Rust verifier accepts total-8 for raw GFX and FileLength == decompressed-through-End for CFX. Fixtures carry both forms (movie.gfxforge / movie.retail_corrected).",
+      "affected_tests": [
+        "tests/suite.as2-features.js:311",
+        "tests/suite.bitmap.js:89",
+        "tests/suite.bitmap.js:113",
+        "tests/suite.decode.js:5",
+        "tests/suite.movie-shapes.js:5",
+        "tests/suite.movie-shapes.js:14",
+        "tests/suite.movie-shapes.js:22",
+        "tests/suite.movie-shapes.js:30",
+        "tests/suite.movie-shapes.js:46",
+        "tests/suite.movie-shapes.js:54",
+        "tests/suite.project-timeline.js:153",
+        "tests/suite.regression.js:11",
+        "tests/suite.regression.js:20",
+        "tests/suite.scripting-features.js:87",
+        "tests/suite.shape-ex.js:160",
+        "tests/suite.timeline.js:38",
+        "tests/suite.timeline.js:49",
+        "tests/suite.timeline.js:58",
+        "tests/suite.timeline.js:67",
+        "tests/suite.timeline.js:78",
+        "tests/suite.timeline.js:88",
+        "tests/suite.timeline.js:97",
+        "tests/suite.timeline.js:111",
+        "tests/suite.timeline.js:121",
+        "tests/suite.timeline.js:128",
+        "tests/suite.timeline.js:142",
+        "tests/suite.timeline.js:155",
+        "tests/suite.timeline.js:168",
+        "tests/suite.timeline.js:221",
+        "tests/suite.timeline.js:278",
+        "tests/suite.timeline.js:318"
+      ]
+    },
+    {
+      "id": "D4",
+      "title": "ExporterInfo flags = 0x13",
+      "gfxforge": [
+        "js/codec/swf.js:72-76 (exporterInfo writes u16 version 0x0207, u32 flags 0, u16 0x000d, u8 0)"
+      ],
+      "retail_evidence": "PROVEN: first 9 body bytes of tag 1000 across the 83 movies: {\"0702130000000d0000\":80,\"0f01030000000d0000\":2,\"0d01030000000d0000\":1} — 80/83 are 07 02 | 13 00 00 00 | 0d 00 | 00; the other 3 (fanfare_new_contact, fanfare_support_unlocked, snatch_moment) are version 0x010f/0x010d with flags 0x03. The meaning of the flag bits is not established here.",
+      "rust_expectation": "Authoring writer emits flags 0x00000013 with version 0x0207; codec round-trips whatever is present. Fixtures carry gfxforge (0) and retail_corrected (0x13).",
+      "affected_tests": [
+        "tests/suite.as2-features.js:311",
+        "tests/suite.bitmap.js:89",
+        "tests/suite.bitmap.js:113",
+        "tests/suite.decode.js:5",
+        "tests/suite.movie-shapes.js:5",
+        "tests/suite.movie-shapes.js:14",
+        "tests/suite.movie-shapes.js:22",
+        "tests/suite.movie-shapes.js:30",
+        "tests/suite.movie-shapes.js:46",
+        "tests/suite.movie-shapes.js:54",
+        "tests/suite.project-timeline.js:153",
+        "tests/suite.regression.js:11",
+        "tests/suite.regression.js:20",
+        "tests/suite.scripting-features.js:87",
+        "tests/suite.shape-ex.js:160",
+        "tests/suite.timeline.js:38",
+        "tests/suite.timeline.js:49",
+        "tests/suite.timeline.js:58",
+        "tests/suite.timeline.js:67",
+        "tests/suite.timeline.js:78",
+        "tests/suite.timeline.js:88",
+        "tests/suite.timeline.js:97",
+        "tests/suite.timeline.js:111",
+        "tests/suite.timeline.js:121",
+        "tests/suite.timeline.js:128",
+        "tests/suite.timeline.js:142",
+        "tests/suite.timeline.js:155",
+        "tests/suite.timeline.js:168",
+        "tests/suite.timeline.js:221",
+        "tests/suite.timeline.js:278",
+        "tests/suite.timeline.js:318"
+      ]
+    },
+    {
+      "id": "D5",
+      "title": "compiler-baseline does not fail when an ok:false program compiles",
+      "gfxforge": [
+        "tests/suite.compiler-baseline.js:15-18 and :21-24 (fails only when c.ok)"
+      ],
+      "retail_evidence": "PROVEN (test logic): a program with ok:false that compiles, or throws, is never reported. At this commit tests/fixture.compiler-baseline.json has 54 entries, 0 with ok:false, 7 EXPR: entries — so the gap is latent.",
+      "rust_expectation": "Rust test asserts byte equality for ok:true and a compile error for ok:false.",
+      "affected_tests": [
+        "tests/suite.compiler-baseline.js:9"
+      ]
+    },
+    {
+      "id": "D6",
+      "title": "DefineButton must not be emitted by components",
+      "gfxforge": [
+        "js/codec/movie.js:384 (button() -> swf.defineButton)",
+        "js/codec/movie.js:189-214 (menu() expands to button())",
+        "tests/suite.movie-shapes.js:41 (asserts tags[7] == 1)"
+      ],
+      "retail_evidence": "PROVEN: tag 7 (DefineButton) and tag 34 (DefineButton2) occur 0 times across the 83 movies (top-level + nested; tag counts {\"7\":0,\"34\":0}). Consistent with docs/reverse_engineer/gfx_golden_set.md:19 and gfx_authoring_feature_spec.md:47-48,143.",
+      "rust_expectation": "gfx::component never emits tag 7; gfx::tags codec still decodes/re-encodes DefineButton for identity. Fixtures from button()/menu() movies are marked retail_corrected_unavailable (no byte patch can produce the redesigned component).",
+      "affected_tests": [
+        "tests/suite.decode.js:5",
+        "tests/suite.movie-shapes.js:30",
+        "tests/suite.movie-shapes.js:54",
+        "tests/suite.regression.js:20"
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "id": "tests/suite.as2-features.js:20",
+      "file": "tests/suite.as2-features.js",
+      "line": 20,
+      "name": "as2: && and || short-circuit instead of evaluating both sides",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::and_short_circuit_instead_of_evaluating_both_sides",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=20",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:39",
+      "file": "tests/suite.as2-features.js",
+      "line": 39,
+      "name": "as2: && and || yield the operand value, not a coerced boolean",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::and_yield_the_operand_value_not_a_coerced_boolean",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=39",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:47",
+      "file": "tests/suite.as2-features.js",
+      "line": 47,
+      "name": "as2: var inside a function stays local instead of leaking to _root",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::var_inside_a_function_stays_local_instead_of_leaking_to_root",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=47",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:58",
+      "file": "tests/suite.as2-features.js",
+      "line": 58,
+      "name": "as2: compound assignment evaluates its target exactly once",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::compound_assignment_evaluates_its_target_exactly_once",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=58",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:72",
+      "file": "tests/suite.as2-features.js",
+      "line": 72,
+      "name": "as2: strict equality distinguishes types",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::strict_equality_distinguishes_types",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=72",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:81",
+      "file": "tests/suite.as2-features.js",
+      "line": 81,
+      "name": "as2: bitwise and shift operators",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::bitwise_and_shift_operators",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=81",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:93",
+      "file": "tests/suite.as2-features.js",
+      "line": 93,
+      "name": "as2: increment and decrement in both fixities",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::increment_and_decrement_in_both_fixities",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=93",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:104",
+      "file": "tests/suite.as2-features.js",
+      "line": 104,
+      "name": "as2: ++ drives a for loop",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::drives_a_for_loop",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=104",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:110",
+      "file": "tests/suite.as2-features.js",
+      "line": 110,
+      "name": "as2: ternary picks a branch and does not evaluate the other",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::ternary_picks_a_branch_and_does_not_evaluate_the_other",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=110",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:123",
+      "file": "tests/suite.as2-features.js",
+      "line": 123,
+      "name": "as2: typeof reports AVM1 type names",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::typeof_reports_avm1_type_names",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=123",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:133",
+      "file": "tests/suite.as2-features.js",
+      "line": 133,
+      "name": "as2: compound assignment covers the bitwise forms too",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::compound_assignment_covers_the_bitwise_forms_too",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=133",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:145",
+      "file": "tests/suite.as2-features.js",
+      "line": 145,
+      "name": "as2: do/while always runs its body at least once",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::do_while_always_runs_its_body_at_least_once",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=145",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:153",
+      "file": "tests/suite.as2-features.js",
+      "line": 153,
+      "name": "as2: switch matches, falls through, and honours default",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::switch_matches_falls_through_and_honours_default",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=153",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:164",
+      "file": "tests/suite.as2-features.js",
+      "line": 164,
+      "name": "as2: switch uses strict comparison, so \"1\" does not match 1",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::switch_uses_strict_comparison_so_1_does_not_match_1",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=164",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:170",
+      "file": "tests/suite.as2-features.js",
+      "line": 170,
+      "name": "as2: continue inside a switch targets the enclosing loop",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::continue_inside_a_switch_targets_the_enclosing_loop",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=170",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:184",
+      "file": "tests/suite.as2-features.js",
+      "line": 184,
+      "name": "as2: for-in walks object members",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::for_in_walks_object_members",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=184",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:190",
+      "file": "tests/suite.as2-features.js",
+      "line": 190,
+      "name": "as2: braceless if/while bodies parse",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::braceless_if_while_bodies_parse",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=190",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:197",
+      "file": "tests/suite.as2-features.js",
+      "line": 197,
+      "name": "as2: multiple declarators in one var statement",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::multiple_declarators_in_one_var_statement",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=197",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:205",
+      "file": "tests/suite.as2-features.js",
+      "line": 205,
+      "name": "as2: object literals build real objects",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::object_literals_build_real_objects",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=205",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:212",
+      "file": "tests/suite.as2-features.js",
+      "line": 212,
+      "name": "as2: nested object and array literals",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::nested_object_and_array_literals",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=212",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:219",
+      "file": "tests/suite.as2-features.js",
+      "line": 219,
+      "name": "as2: new constructs script-defined classes",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::new_constructs_script_defined_classes",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=219",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:229",
+      "file": "tests/suite.as2-features.js",
+      "line": 229,
+      "name": "as2: function expressions can be stored and called",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::function_expressions_can_be_stored_and_called",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=229",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:235",
+      "file": "tests/suite.as2-features.js",
+      "line": 235,
+      "name": "as2: hex literals and block comments",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::hex_literals_and_block_comments",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=235",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:243",
+      "file": "tests/suite.as2-features.js",
+      "line": 243,
+      "name": "as2: extended string escapes",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::extended_string_escapes",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=243",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:252",
+      "file": "tests/suite.as2-features.js",
+      "line": 252,
+      "name": "as2: trace() lowers to the Trace opcode and reaches the log",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::trace_lowers_to_the_trace_opcode_and_reaches_the_log",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=252",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:259",
+      "file": "tests/suite.as2-features.js",
+      "line": 259,
+      "name": "as2: Math and other builtins resolve",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::math_and_other_builtins_resolve",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=259",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:267",
+      "file": "tests/suite.as2-features.js",
+      "line": 267,
+      "name": "as2: a movie variable shadows a builtin of the same name",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::a_movie_variable_shadows_a_builtin_of_the_same_name",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=267",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:275",
+      "file": "tests/suite.as2-features.js",
+      "line": 275,
+      "name": "as2: every new construct produces a well-formed action stream",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::every_new_construct_produces_a_well_formed_action_stream",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=275",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.as2-features.js:311",
+      "file": "tests/suite.as2-features.js",
+      "line": 311,
+      "name": "as2: a compiled script survives a full movie build and verify",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::a_compiled_script_survives_a_full_movie_build_and_verify",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=311",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.as2-features.js:328",
+      "file": "tests/suite.as2-features.js",
+      "line": 328,
+      "name": "as2: try/catch is rejected rather than silently emitted",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::try_catch_is_rejected_rather_than_silently_emitted",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=328",
+      "deviation": [],
+      "note": "gfxforge rejects try/catch only because the parser has no try statement (error: 'Line 1, column 5: expected op \";\", got op \"{\"'), not via a dedicated diagnostic. Rust must reject it; a dedicated message is a design choice."
+    },
+    {
+      "id": "tests/suite.as2-features.js:337",
+      "file": "tests/suite.as2-features.js",
+      "line": 337,
+      "name": "as2: assigning to a non-lvalue is a clear error",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::assigning_to_a_non_lvalue_is_a_clear_error",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/as2-features.json#line=337",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.autosave.js:3",
+      "file": "tests/suite.autosave.js",
+      "line": 3,
+      "name": "autosave: detectStorageBackend picks localStorage when it works",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:10",
+      "file": "tests/suite.autosave.js",
+      "line": 10,
+      "name": "autosave: storageSet/storageGet/storageDelete round-trip through localStorage",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:19",
+      "file": "tests/suite.autosave.js",
+      "line": 19,
+      "name": "autosave: falls back to in-memory storage gracefully when localStorage throws",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:35",
+      "file": "tests/suite.autosave.js",
+      "line": 35,
+      "name": "autosave: doAutosave persists the current project and it can be read back",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:48",
+      "file": "tests/suite.autosave.js",
+      "line": 48,
+      "name": "autosave: checkForAutosaveOnStartup returns false and does nothing when there is no saved project",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:54",
+      "file": "tests/suite.autosave.js",
+      "line": 54,
+      "name": "autosave: checkForAutosaveOnStartup returns true when a non-empty autosave exists",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:67",
+      "file": "tests/suite.autosave.js",
+      "line": 67,
+      "name": "autosave: an empty-items autosave is treated as nothing to restore",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:75",
+      "file": "tests/suite.autosave.js",
+      "line": 75,
+      "name": "autosave: a corrupted autosave value does not throw and is treated as nothing to restore",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.autosave.js:86",
+      "file": "tests/suite.autosave.js",
+      "line": 86,
+      "name": "autosave: pushHistory schedules an autosave (does not throw, timer gets set)",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor autosave to browser storage (js/editor/autosave.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:25",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 25,
+      "name": "avm1: ActionPush doubles encode word-swapped, matching real game movies",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::avm1::tests::actionpush_doubles_encode_word_swapped_matching_real_game_movies",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=25",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:38",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 38,
+      "name": "avm1: the interpreter reads back exactly what the assembler wrote",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::the_interpreter_reads_back_exactly_what_the_assembler_wrote",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=38",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:51",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 51,
+      "name": "avm1: real game double bytes decode to their authoring values",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::real_game_double_bytes_decode_to_their_authoring_values",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=51",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:69",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 69,
+      "name": "avm1: DefineFunction2 header matches the layout GFx parses",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::avm1::tests::definefunction2_header_matches_the_layout_gfx_parses",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=69",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:84",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 84,
+      "name": "avm1: ConstantPool frames count + NUL-terminated strings",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::avm1::tests::constantpool_frames_count_nul_terminated_strings",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=84",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:94",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 94,
+      "name": "avm1: gotoFrame2 sets the play bit and optional scene bias",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::avm1::tests::gotoframe2_sets_the_play_bit_and_optional_scene_bias",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=94",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:101",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 101,
+      "name": "avm1: storeRegister carries a single register byte",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::avm1::tests::storeregister_carries_a_single_register_byte",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=101",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.avm1-encoding.js:106",
+      "file": "tests/suite.avm1-encoding.js",
+      "line": 106,
+      "name": "avm1: push wrappers cover null/undefined/register/constant",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::avm1::tests::push_wrappers_cover_null_undefined_register_constant",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/avm1-encoding.json#line=106",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.bitmap.js:38",
+      "file": "tests/suite.bitmap.js",
+      "line": 38,
+      "name": "bitmap: zlibStore output is cross-verified against Python's real zlib (several sizes)",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::bitmap::tests::zlibstore_output_is_cross_verified_against_python_s_real_zlib_several_sizes",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/bitmap.json#line=38",
+      "deviation": [],
+      "note": "JS test needs python3 zlib (ran: python3 present via asdf, no skip printed). Fixture cross-checked with node zlib.inflateSync instead; inputs >16 KiB stored as generator formula + sha256."
+    },
+    {
+      "id": "tests/suite.bitmap.js:55",
+      "file": "tests/suite.bitmap.js",
+      "line": 55,
+      "name": "bitmap: adler32 matches a known reference value",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::bitmap::tests::adler32_matches_a_known_reference_value",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/bitmap.json#line=55",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.bitmap.js:62",
+      "file": "tests/suite.bitmap.js",
+      "line": 62,
+      "name": "bitmap: rgbaToArgb reorders bytes correctly per pixel",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::bitmap::tests::rgbatoargb_reorders_bytes_correctly_per_pixel",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/bitmap.json#line=62",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.bitmap.js:69",
+      "file": "tests/suite.bitmap.js",
+      "line": 69,
+      "name": "bitmap: defineBitsLossless2 produces a well-formed tag with correct header fields",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::bitmap::tests::definebitslossless2_produces_a_well_formed_tag_with_correct_header_fields",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/bitmap.json#line=69",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.bitmap.js:89",
+      "file": "tests/suite.bitmap.js",
+      "line": 89,
+      "name": "bitmap: a movie containing a DefineBitsLossless2 image verifies structurally",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::verify::tests::a_movie_containing_a_definebitslossless2_image_verifies_structurally",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/bitmap.json#line=89",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.bitmap.js:113",
+      "file": "tests/suite.bitmap.js",
+      "line": 113,
+      "name": "bitmap: Movie.image() places a correctly-scaled bitmap end to end",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::movie_image_places_a_correctly_scaled_bitmap_end_to_end",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/bitmap.json#line=113",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.compiler-baseline.js:9",
+      "file": "tests/suite.compiler-baseline.js",
+      "line": 9,
+      "name": "compiler: all 54 Python-cross-checked baseline programs still compile byte-identically",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::all_54_python_cross_checked_baseline_programs_still_compile_byte_identically",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/compiler-baseline.json#cases[0..53]",
+      "deviation": [
+        "D5"
+      ],
+      "note": "D5: Rust test must assert a compile error for every ok:false entry (none exist at this commit) in addition to byte equality for ok:true. One JS test covering 54 programs; Rust should run one case per program (fixture index 0..53)."
+    },
+    {
+      "id": "tests/suite.decode.js:5",
+      "file": "tests/suite.decode.js",
+      "line": 5,
+      "name": "decode: round-trips an authored movie into editable items",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::decode::tests::round_trips_an_authored_movie_into_editable_items",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/decode.json#line=5",
+      "deviation": [
+        "D3",
+        "D4",
+        "D6"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13. D6: gfxforge emits DefineButton (movie.js:384) for button()/menu(); retail has none. Rust components must not emit tag 7; the gfxforge bytes are kept only as tag-codec decode/identity input. Corrected expectation for any assertion on tag 7 count: 0. The replacement button component design is not specified by gfxforge — open question for the user."
+    },
+    {
+      "id": "tests/suite.decode.js:37",
+      "file": "tests/suite.decode.js",
+      "line": 37,
+      "name": "decode: rejects non-movie input",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::decode::tests::rejects_non_movie_input",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/decode.json#line=37",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:13",
+      "file": "tests/suite.interpreter.js",
+      "line": 13,
+      "name": "interpreter: basic variable get/set and arithmetic",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::basic_variable_get_set_and_arithmetic",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=13",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:19",
+      "file": "tests/suite.interpreter.js",
+      "line": 19,
+      "name": "interpreter: string concatenation via +",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::string_concatenation_via",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=19",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:25",
+      "file": "tests/suite.interpreter.js",
+      "line": 25,
+      "name": "interpreter: comparisons and equality",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::comparisons_and_equality",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=25",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:36",
+      "file": "tests/suite.interpreter.js",
+      "line": 36,
+      "name": "interpreter: boolean and/or/not",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::boolean_and_or_not",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=36",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:44",
+      "file": "tests/suite.interpreter.js",
+      "line": 44,
+      "name": "interpreter: if/else branching picks the right side",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::if_else_branching_picks_the_right_side",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=44",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:52",
+      "file": "tests/suite.interpreter.js",
+      "line": 52,
+      "name": "interpreter: while loop accumulates correctly",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::while_loop_accumulates_correctly",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=52",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:59",
+      "file": "tests/suite.interpreter.js",
+      "line": 59,
+      "name": "interpreter: for loop with break and continue behaves like JS would",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::for_loop_with_break_and_continue_behaves_like_js_would",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=59",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:73",
+      "file": "tests/suite.interpreter.js",
+      "line": 73,
+      "name": "interpreter: continue in a for-loop still runs the update clause",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::continue_in_a_for_loop_still_runs_the_update_clause",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=73",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:88",
+      "file": "tests/suite.interpreter.js",
+      "line": 88,
+      "name": "interpreter: function definition, call with params, and return value",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::function_definition_call_with_params_and_return_value",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=88",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:97",
+      "file": "tests/suite.interpreter.js",
+      "line": 97,
+      "name": "interpreter: callFunction() invokes a previously-defined function on demand",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::callfunction_invokes_a_previously_defined_function_on_demand",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=97",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:110",
+      "file": "tests/suite.interpreter.js",
+      "line": 110,
+      "name": "interpreter: parameters shadow same-named root/global variables",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::parameters_shadow_same_named_root_global_variables",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=110",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:121",
+      "file": "tests/suite.interpreter.js",
+      "line": 121,
+      "name": "interpreter: nested function calls work",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::nested_function_calls_work",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=121",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:131",
+      "file": "tests/suite.interpreter.js",
+      "line": 131,
+      "name": "interpreter: _root.member get/set on a bound text variable updates textValues",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::root_member_get_set_on_a_bound_text_variable_updates_textvalues",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=131",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:143",
+      "file": "tests/suite.interpreter.js",
+      "line": 143,
+      "name": "interpreter: _root.clipname._y moves the actual clip item (menu highlight pattern)",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::root_clipname_y_moves_the_actual_clip_item_menu_highlight_pattern",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=143",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:155",
+      "file": "tests/suite.interpreter.js",
+      "line": 155,
+      "name": "interpreter: clip _xscale/_alpha/_visible/_rotation all settable via ClipProxy",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::clip_xscale_alpha_visible_rotation_all_settable_via_clipproxy",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=155",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:172",
+      "file": "tests/suite.interpreter.js",
+      "line": 172,
+      "name": "interpreter: fscommand fires onFsCommand with the right command and value",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::fscommand_fires_onfscommand_with_the_right_command_and_value",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=172",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:181",
+      "file": "tests/suite.interpreter.js",
+      "line": 181,
+      "name": "interpreter: fscommand with no second argument sends an empty string, matching the compiler",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::fscommand_with_no_second_argument_sends_an_empty_string_matching_the_compiler",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=181",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:190",
+      "file": "tests/suite.interpreter.js",
+      "line": 190,
+      "name": "interpreter: array literal, indexing, length, and push()/pop() all work",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::array_literal_indexing_length_and_push_pop_all_work",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=190",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:207",
+      "file": "tests/suite.interpreter.js",
+      "line": 207,
+      "name": "interpreter: array element assignment via index works",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::array_element_assignment_via_index_works",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=207",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:213",
+      "file": "tests/suite.interpreter.js",
+      "line": 213,
+      "name": "interpreter: compound assignment (+=, -=, etc.) actually mutates",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::compound_assignment_etc_actually_mutates",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=213",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:220",
+      "file": "tests/suite.interpreter.js",
+      "line": 220,
+      "name": "interpreter: infinite while loop is caught by the instruction budget, not a browser hang",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::infinite_while_loop_is_caught_by_the_instruction_budget_not_a_browser_hang",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=220",
+      "deviation": [],
+      "note": "Fixture trace is summarized (25,002 lines); the exact iteration count at the budget (x) is gfxforge-specific and need not be matched — assert the \"possible infinite loop\" cap trace and termination."
+    },
+    {
+      "id": "tests/suite.interpreter.js:232",
+      "file": "tests/suite.interpreter.js",
+      "line": 232,
+      "name": "interpreter: unbounded recursion is caught gracefully (no crash, no hang)",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::unbounded_recursion_is_caught_gracefully_no_crash_no_hang",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=232",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.interpreter.js:246",
+      "file": "tests/suite.interpreter.js",
+      "line": 246,
+      "name": "interpreter: calling an undefined function traces a warning instead of crashing",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::interp::tests::calling_an_undefined_function_traces_a_warning_instead_of_crashing",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/interpreter.json#line=246",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.luagen.js:18",
+      "file": "tests/suite.luagen.js",
+      "line": 18,
+      "name": "luagen: emits the verified FlashWidget host idiom",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). Asserts the lua-loader OnKey FlashWidget idiom (MrxGuiBase.FlashWidget:new, SetSwfFile, AddWidgetToHud, KEYVAL keybind). Our target is qm link glue for _QM.ui, not a lua-loader script.",
+      "preserve": "Nothing byte- or text-level. gfxforge asserts (luagen tests :28) that widget visibility uses SetVisible and that IsVisible is not a real widget method — an API claim by gfxforge, NOT verified here (INFERRED); check against the decompiled Lua corpus before relying on it in _QM.ui."
+    },
+    {
+      "id": "tests/suite.luagen.js:31",
+      "file": "tests/suite.luagen.js",
+      "line": 31,
+      "name": "luagen: one handler per distinct event, from buttons and menus",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). One SetFlashEventHandler per distinct event in a generated lua-loader script.",
+      "preserve": "The _QM.ui glue must bind exactly one handler per distinct fscommand event name, collected from button/menu items AND from fscommand(\"name\", ...) calls in the movie script, in first-appearance order (luagen.js collectEvents, lines 37-55)."
+    },
+    {
+      "id": "tests/suite.luagen.js:43",
+      "file": "tests/suite.luagen.js",
+      "line": 43,
+      "name": "luagen: scrapes script functions with the fields they update",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). Regex-scrapes AS2 function names and the _root fields/clips they touch into Lua comments.",
+      "preserve": "The set of host-callable AS2 function names must be available to the glue; derive it from the compiled bytes (gfx::verify AVM1 walk, as verify.js:22-87 does) rather than regex over source."
+    },
+    {
+      "id": "tests/suite.luagen.js:53",
+      "file": "tests/suite.luagen.js",
+      "line": 53,
+      "name": "luagen: default bodies teach bidirectional patterns",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). Asserts teaching text in default handler bodies (timers, polling examples).",
+      "preserve": "Nothing."
+    },
+    {
+      "id": "tests/suite.luagen.js:60",
+      "file": "tests/suite.luagen.js",
+      "line": 60,
+      "name": "luagen: generates a live, clamped menu key-watch (not a broken comment)",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). Generated edge-triggered menu key-watch in Lua (MENU_ROWS, clamped selection).",
+      "preserve": "If _QM.ui owns menu navigation: row count = number of menu options, selection clamped to [0, rows-1], one press moves one row (edge-triggered). Whether _QM.ui owns this is an open question for the user — not assumed."
+    },
+    {
+      "id": "tests/suite.luagen.js:76",
+      "file": "tests/suite.luagen.js",
+      "line": 76,
+      "name": "luagen: keybind is configurable",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). lua-loader keybind option (KEYVAL / deploy note).",
+      "preserve": "Nothing — keybinding is not part of qm link glue."
+    },
+    {
+      "id": "tests/suite.luagen.js:82",
+      "file": "tests/suite.luagen.js",
+      "line": 82,
+      "name": "luagen: findRegions gives inclusive line spans that bracket the handler",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). findRegions line spans for the editor's managed-region Lua panel.",
+      "preserve": "Nothing — editor-side managed-region model for a hand-edited file."
+    },
+    {
+      "id": "tests/suite.luagen.js:93",
+      "file": "tests/suite.luagen.js",
+      "line": 93,
+      "name": "luagen: regeneration preserves the modder --#user code, resets the glue",
+      "js_result": "pass",
+      "class": "superseded",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "superseded: different Lua target (gfxforge luagen emits a lua-loader OnKey script; ours is mercs2_quartermaster link glue for _QM.ui). Regeneration keeps --#user blocks of a hand-edited Lua file.",
+      "preserve": "Only if qm regenerates a file the user also edits; qm link glue is generated output. Open question for the user — not assumed."
+    },
+    {
+      "id": "tests/suite.movie-shapes.js:5",
+      "file": "tests/suite.movie-shapes.js",
+      "line": 5,
+      "name": "movie integration: rect() with no options produces byte-identical output to the original baseline",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::rect_with_no_options_produces_byte_identical_output_to_the_original_baseline",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/movie-shapes.json#line=5",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.movie-shapes.js:14",
+      "file": "tests/suite.movie-shapes.js",
+      "line": 14,
+      "name": "movie integration: rect() with a gradient fill builds and verifies",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::rect_with_a_gradient_fill_builds_and_verifies",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/movie-shapes.json#line=14",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.movie-shapes.js:22",
+      "file": "tests/suite.movie-shapes.js",
+      "line": 22,
+      "name": "movie integration: rect() with radius and stroke builds and verifies",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::rect_with_radius_and_stroke_builds_and_verifies",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/movie-shapes.json#line=22",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.movie-shapes.js:30",
+      "file": "tests/suite.movie-shapes.js",
+      "line": 30,
+      "name": "movie integration: button() with radius/stroke/gradient on both up and hover states",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::component::tests::button_with_radius_stroke_gradient_on_both_up_and_hover_states",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/movie-shapes.json#line=30",
+      "deviation": [
+        "D3",
+        "D4",
+        "D6"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13. D6: gfxforge emits DefineButton (movie.js:384) for button()/menu(); retail has none. Rust components must not emit tag 7; the gfxforge bytes are kept only as tag-codec decode/identity input. Corrected expectation for any assertion on tag 7 count: 0. The replacement button component design is not specified by gfxforge — open question for the user. Corrected assertion: tags[7] == 0 (gfxforge asserts tags[7] == 1 at suite.movie-shapes.js:41)."
+    },
+    {
+      "id": "tests/suite.movie-shapes.js:46",
+      "file": "tests/suite.movie-shapes.js",
+      "line": 46,
+      "name": "movie integration: clip() with radius and gradient (e.g. a styled health bar)",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::clip_with_radius_and_gradient_e_g_a_styled_health_bar",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/movie-shapes.json#line=46",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.movie-shapes.js:54",
+      "file": "tests/suite.movie-shapes.js",
+      "line": 54,
+      "name": "movie integration: full HUD combining plain, gradient, stroked, and rounded shapes together",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::full_hud_combining_plain_gradient_stroked_and_rounded_shapes_together",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/movie-shapes.json#line=54",
+      "deviation": [
+        "D3",
+        "D4",
+        "D6"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13. D6: gfxforge emits DefineButton (movie.js:384) for button()/menu(); retail has none. Rust components must not emit tag 7; the gfxforge bytes are kept only as tag-codec decode/identity input. Corrected expectation for any assertion on tag 7 count: 0. The replacement button component design is not specified by gfxforge — open question for the user."
+    },
+    {
+      "id": "tests/suite.multiselect.js:8",
+      "file": "tests/suite.multiselect.js",
+      "line": 8,
+      "name": "selection: selectOnly/toggleSelection/clearSelection manage the selectedIds set correctly",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:21",
+      "file": "tests/suite.multiselect.js",
+      "line": 21,
+      "name": "selection: getSelected() returns an item only when exactly one is selected",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:31",
+      "file": "tests/suite.multiselect.js",
+      "line": 31,
+      "name": "selection: getMultiSelection returns all currently-selected items regardless of count",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:39",
+      "file": "tests/suite.multiselect.js",
+      "line": 39,
+      "name": "align: left/right/top/bottom move every selected item to the shared bounding-box edge",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:56",
+      "file": "tests/suite.multiselect.js",
+      "line": 56,
+      "name": "align: center-h aligns every item's horizontal center to the selection bounding-box center",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:67",
+      "file": "tests/suite.multiselect.js",
+      "line": 67,
+      "name": "align: with fewer than 2 items selected, does nothing (no crash)",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:75",
+      "file": "tests/suite.multiselect.js",
+      "line": 75,
+      "name": "distribute: keeps first and last fixed, spaces the middle items with equal gaps",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:95",
+      "file": "tests/suite.multiselect.js",
+      "line": 95,
+      "name": "distribute: with fewer than 3 items selected, does nothing",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:103",
+      "file": "tests/suite.multiselect.js",
+      "line": 103,
+      "name": "bulk: bulkToggle(\"hidden\") turns hidden on for all when any are off, then off for all",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:114",
+      "file": "tests/suite.multiselect.js",
+      "line": 114,
+      "name": "bulk: deleteSelected removes every selected item at once",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.multiselect.js:123",
+      "file": "tests/suite.multiselect.js",
+      "line": 123,
+      "name": "bulk: duplicateSelected duplicates every selected item and selects the new copies",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor canvas selection/align/distribute/bulk operations (js/editor/interaction.js, panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.panels.js:3",
+      "file": "tests/suite.panels.js",
+      "line": 3,
+      "name": "panels: isGradient correctly distinguishes solid arrays from gradient objects",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor property-panel DOM construction and UI default-gradient helpers (js/editor/panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.panels.js:9",
+      "file": "tests/suite.panels.js",
+      "line": 9,
+      "name": "panels: defaultGradientFor produces a valid 2-stop gradient from a solid base color",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor property-panel DOM construction and UI default-gradient helpers (js/editor/panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.panels.js:18",
+      "file": "tests/suite.panels.js",
+      "line": 18,
+      "name": "panels: buildItemPanel does not throw for rect/button/clip across solid, linear, and radial fills",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor property-panel DOM construction and UI default-gradient helpers (js/editor/panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.panels.js:38",
+      "file": "tests/suite.panels.js",
+      "line": 38,
+      "name": "panels: buildItemPanel does not throw for rect/button/clip with a stroke and a radius set",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor property-panel DOM construction and UI default-gradient helpers (js/editor/panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.panels.js:52",
+      "file": "tests/suite.panels.js",
+      "line": 52,
+      "name": "panels: buildItemPanel does not throw for an image item, loaded or still pending",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor property-panel DOM construction and UI default-gradient helpers (js/editor/panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.panels.js:71",
+      "file": "tests/suite.panels.js",
+      "line": 71,
+      "name": "panels: stage panel (nothing selected) does not throw",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor property-panel DOM construction and UI default-gradient helpers (js/editor/panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.panels.js:80",
+      "file": "tests/suite.panels.js",
+      "line": 80,
+      "name": "panels: switching a rect fill from solid to gradient via the type-select handler produces a valid gradient object",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor property-panel DOM construction and UI default-gradient helpers (js/editor/panels.js); no codec/format surface"
+    },
+    {
+      "id": "tests/suite.play-mode.js:24",
+      "file": "tests/suite.play-mode.js",
+      "line": 24,
+      "name": "play mode: entering clones items, runs top-level script, registers functions",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor play-mode session (clone/enter/exit/click) in js/editor/play.js; the AVM1 behaviour it drives is covered by gfx::interp tests from suite.interpreter.js:97/:143/:155"
+    },
+    {
+      "id": "tests/suite.play-mode.js:34",
+      "file": "tests/suite.play-mode.js",
+      "line": 34,
+      "name": "play mode: calling a function updates bound text and clip scale on the live scene",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor play-mode session (clone/enter/exit/click) in js/editor/play.js; the AVM1 behaviour it drives is covered by gfx::interp tests from suite.interpreter.js:97/:143/:155"
+    },
+    {
+      "id": "tests/suite.play-mode.js:46",
+      "file": "tests/suite.play-mode.js",
+      "line": 46,
+      "name": "play mode: exiting restores edit mode and discards the play clone",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor play-mode session (clone/enter/exit/click) in js/editor/play.js; the AVM1 behaviour it drives is covered by gfx::interp tests from suite.interpreter.js:97/:143/:155"
+    },
+    {
+      "id": "tests/suite.play-mode.js:55",
+      "file": "tests/suite.play-mode.js",
+      "line": 55,
+      "name": "play mode: exiting never mutates the original authored items",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor play-mode session (clone/enter/exit/click) in js/editor/play.js; the AVM1 behaviour it drives is covered by gfx::interp tests from suite.interpreter.js:97/:143/:155"
+    },
+    {
+      "id": "tests/suite.play-mode.js:67",
+      "file": "tests/suite.play-mode.js",
+      "line": 67,
+      "name": "play mode: clicking a button (via onPlayCanvasClick) does not throw and finds the button",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor play-mode session (clone/enter/exit/click) in js/editor/play.js; the AVM1 behaviour it drives is covered by gfx::interp tests from suite.interpreter.js:97/:143/:155"
+    },
+    {
+      "id": "tests/suite.play-mode.js:77",
+      "file": "tests/suite.play-mode.js",
+      "line": 77,
+      "name": "play mode: re-entering after exiting starts from the current authored state, not stale play data",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor play-mode session (clone/enter/exit/click) in js/editor/play.js; the AVM1 behaviour it drives is covered by gfx::interp tests from suite.interpreter.js:97/:143/:155"
+    },
+    {
+      "id": "tests/suite.project-timeline.js:11",
+      "file": "tests/suite.project-timeline.js",
+      "line": 11,
+      "name": "project: frames declared on the stage survive load",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::frames_declared_on_the_stage_survive_load",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=11",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:22",
+      "file": "tests/suite.project-timeline.js",
+      "line": 22,
+      "name": "project: a project with no frames key still loads as single-frame",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::a_project_with_no_frames_key_still_loads_as_single_frame",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=22",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:28",
+      "file": "tests/suite.project-timeline.js",
+      "line": 28,
+      "name": "project: per-item frame membership loads and clamps to the declared range",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::per_item_frame_membership_loads_and_clamps_to_the_declared_range",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=28",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:43",
+      "file": "tests/suite.project-timeline.js",
+      "line": 43,
+      "name": "project: clip event handlers load, and are rejected on non-clip items",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::clip_event_handlers_load_and_are_rejected_on_non_clip_items",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=43",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:57",
+      "file": "tests/suite.project-timeline.js",
+      "line": 57,
+      "name": "project: alpha, export and scale9 load with sane defaults",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::alpha_export_and_scale9_load_with_sane_defaults",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=57",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:75",
+      "file": "tests/suite.project-timeline.js",
+      "line": 75,
+      "name": "project: text flags load from snake_case keys",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::text_flags_load_from_snake_case_keys",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=75",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:89",
+      "file": "tests/suite.project-timeline.js",
+      "line": 89,
+      "name": "project: an unknown align value is ignored rather than emitted",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::an_unknown_align_value_is_ignored_rather_than_emitted",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=89",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:99",
+      "file": "tests/suite.project-timeline.js",
+      "line": 99,
+      "name": "project: the new fields survive a serialize/load round trip",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::the_new_fields_survive_a_serialize_load_round_trip",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=99",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:137",
+      "file": "tests/suite.project-timeline.js",
+      "line": 137,
+      "name": "project: a single-frame project serializes without any timeline keys",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::a_single_frame_project_serializes_without_any_timeline_keys",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=137",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.project-timeline.js:153",
+      "file": "tests/suite.project-timeline.js",
+      "line": 153,
+      "name": "project: a loaded multi-frame project builds a real timeline",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::a_loaded_multi_frame_project_builds_a_real_timeline",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/project-timeline.json#line=153",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.reference-image.js:3",
+      "file": "tests/suite.reference-image.js",
+      "line": 3,
+      "name": "reference image: starts as null / not shown",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor tracing-overlay reference image (js/editor/reference-image.js); its only format-adjacent assertion is that it never reaches serialized output, which has no Rust counterpart"
+    },
+    {
+      "id": "tests/suite.reference-image.js:8",
+      "file": "tests/suite.reference-image.js",
+      "line": 8,
+      "name": "reference image: removeReferenceImage clears it back to null",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor tracing-overlay reference image (js/editor/reference-image.js); its only format-adjacent assertion is that it never reaches serialized output, which has no Rust counterpart"
+    },
+    {
+      "id": "tests/suite.reference-image.js:15",
+      "file": "tests/suite.reference-image.js",
+      "line": 15,
+      "name": "reference image: drawReferenceImage is a no-op (does not throw) when nothing is loaded",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor tracing-overlay reference image (js/editor/reference-image.js); its only format-adjacent assertion is that it never reaches serialized output, which has no Rust counterpart"
+    },
+    {
+      "id": "tests/suite.reference-image.js:25",
+      "file": "tests/suite.reference-image.js",
+      "line": 25,
+      "name": "reference image: never appears in serializeProject output, even conceptually",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor tracing-overlay reference image (js/editor/reference-image.js); its only format-adjacent assertion is that it never reaches serialized output, which has no Rust counterpart"
+    },
+    {
+      "id": "tests/suite.reference-image.js:34",
+      "file": "tests/suite.reference-image.js",
+      "line": 34,
+      "name": "reference image: never appears in an autosave payload",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor tracing-overlay reference image (js/editor/reference-image.js); its only format-adjacent assertion is that it never reaches serialized output, which has no Rust counterpart"
+    },
+    {
+      "id": "tests/suite.reference-image.js:43",
+      "file": "tests/suite.reference-image.js",
+      "line": 43,
+      "name": "reference image: loadReferenceImageFile rejects non-image files without throwing",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "editor tracing-overlay reference image (js/editor/reference-image.js); its only format-adjacent assertion is that it never reaches serialized output, which has no Rust counterpart"
+    },
+    {
+      "id": "tests/suite.regression.js:11",
+      "file": "tests/suite.regression.js",
+      "line": 11,
+      "name": "codec: readme quickstart movie builds to the known-good byte count",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::readme_quickstart_movie_builds_to_the_known_good_byte_count",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/regression.json#line=11",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.regression.js:20",
+      "file": "tests/suite.regression.js",
+      "line": 20,
+      "name": "codec: live text + compiled script + menu all verify correctly",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::live_text_compiled_script_menu_all_verify_correctly",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/regression.json#line=20",
+      "deviation": [
+        "D3",
+        "D4",
+        "D6"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13. D6: gfxforge emits DefineButton (movie.js:384) for button()/menu(); retail has none. Rust components must not emit tag 7; the gfxforge bytes are kept only as tag-codec decode/identity input. Corrected expectation for any assertion on tag 7 count: 0. The replacement button component design is not specified by gfxforge — open question for the user."
+    },
+    {
+      "id": "tests/suite.regression.js:33",
+      "file": "tests/suite.regression.js",
+      "line": 33,
+      "name": "project-io: menu shorthand expands and round-trips through serialize/load",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::spec::tests::menu_shorthand_expands_and_round_trips_through_serialize_load",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/regression.json#line=33",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.regression.js:47",
+      "file": "tests/suite.regression.js",
+      "line": 47,
+      "name": "project-io: locks round-trip and hitHandle refuses size-locked items",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "lock_size is an editor-only lock and hitHandle is canvas resize-handle hit testing (js/editor/interaction.js); neither affects emitted bytes"
+    },
+    {
+      "id": "tests/suite.regression.js:57",
+      "file": "tests/suite.regression.js",
+      "line": 57,
+      "name": "init: buildHelpBody does not throw and produces non-empty content",
+      "js_result": "pass",
+      "class": "editor-only",
+      "rust_test": null,
+      "fixture": null,
+      "deviation": [],
+      "note": "buildHelpBody builds the editor help panel DOM (js/editor/init.js)"
+    },
+    {
+      "id": "tests/suite.scripting-features.js:5",
+      "file": "tests/suite.scripting-features.js",
+      "line": 5,
+      "name": "scripting: for loop compiles and structurally verifies",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::for_loop_compiles_and_structurally_verifies",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=5",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:11",
+      "file": "tests/suite.scripting-features.js",
+      "line": 11,
+      "name": "scripting: for loop with var-declared counter parses",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::for_loop_with_var_declared_counter_parses",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=11",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:17",
+      "file": "tests/suite.scripting-features.js",
+      "line": 17,
+      "name": "scripting: empty for-clauses (infinite-loop shape) parse — for(;;) with a break",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::empty_for_clauses_infinite_loop_shape_parse_for_with_a_break",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=17",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:23",
+      "file": "tests/suite.scripting-features.js",
+      "line": 23,
+      "name": "scripting: break outside a loop is a compile error",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::break_outside_a_loop_is_a_compile_error",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=23",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:30",
+      "file": "tests/suite.scripting-features.js",
+      "line": 30,
+      "name": "scripting: continue outside a loop is a compile error",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::continue_outside_a_loop_is_a_compile_error",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=30",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:37",
+      "file": "tests/suite.scripting-features.js",
+      "line": 37,
+      "name": "scripting: compound assignment operators all parse and compile",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::compound_assignment_operators_all_parse_and_compile",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=37",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:45",
+      "file": "tests/suite.scripting-features.js",
+      "line": 45,
+      "name": "scripting: compound assignment on a member (obj.prop += n) compiles",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::compound_assignment_on_a_member_obj_prop_n_compiles",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=45",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:51",
+      "file": "tests/suite.scripting-features.js",
+      "line": 51,
+      "name": "scripting: array literal compiles to push-elements + count + InitArray(0x42)",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::array_literal_compiles_to_push_elements_count_initarray_0x42",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=51",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:58",
+      "file": "tests/suite.scripting-features.js",
+      "line": 58,
+      "name": "scripting: array indexing and .length still parse (existing member/index grammar)",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::array_indexing_and_length_still_parse_existing_member_index_grammar",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=58",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:64",
+      "file": "tests/suite.scripting-features.js",
+      "line": 64,
+      "name": "scripting: tokenizer error includes line and column",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::tokenizer_error_includes_line_and_column",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=64",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:71",
+      "file": "tests/suite.scripting-features.js",
+      "line": 71,
+      "name": "scripting: parser mismatch error includes line and column",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::parser_mismatch_error_includes_line_and_column",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=71",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:78",
+      "file": "tests/suite.scripting-features.js",
+      "line": 78,
+      "name": "scripting: unexpected-token error includes line and column, on a later line",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::as2::tests::unexpected_token_error_includes_line_and_column_on_a_later_line",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=78",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.scripting-features.js:87",
+      "file": "tests/suite.scripting-features.js",
+      "line": 87,
+      "name": "scripting: combined program using for/break/continue/compound-assign/arrays compiles",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::verify::tests::combined_program_using_for_break_continue_compound_assign_arrays_compiles",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/scripting-features.json#line=87",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.shape-ex.js:18",
+      "file": "tests/suite.shape-ex.js",
+      "line": 18,
+      "name": "shapeEx: plain rect (no stroke, no radius) decodes to the same path as defineShape3",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::plain_rect_no_stroke_no_radius_decodes_to_the_same_path_as_defineshape3",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=18",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:30",
+      "file": "tests/suite.shape-ex.js",
+      "line": 30,
+      "name": "shapeEx: rounded rect path starts at (x1+r, y1), closes, and stays within stroke-padded bounds",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::rounded_rect_path_starts_at_x1_r_y1_closes_and_stays_within_stroke_padded_bounds",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=30",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:47",
+      "file": "tests/suite.shape-ex.js",
+      "line": 47,
+      "name": "shapeEx: corner curve control points sit exactly at the sharp rectangle corners",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::corner_curve_control_points_sit_exactly_at_the_sharp_rectangle_corners",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=47",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:58",
+      "file": "tests/suite.shape-ex.js",
+      "line": 58,
+      "name": "shapeEx: radius is clamped so it can never exceed half the shorter side",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::radius_is_clamped_so_it_can_never_exceed_half_the_shorter_side",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=58",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:68",
+      "file": "tests/suite.shape-ex.js",
+      "line": 68,
+      "name": "shapeEx: stroke declares exactly one line style with the right width and color, selected on every edge",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::stroke_declares_exactly_one_line_style_with_the_right_width_and_color_selected",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=68",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:79",
+      "file": "tests/suite.shape-ex.js",
+      "line": 79,
+      "name": "shapeEx: no stroke means zero line styles and zero line bits",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::no_stroke_means_zero_line_styles_and_zero_line_bits",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=79",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:87",
+      "file": "tests/suite.shape-ex.js",
+      "line": 87,
+      "name": "shapeEx: stroke bounding rect is padded by half the stroke width on every side",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::stroke_bounding_rect_is_padded_by_half_the_stroke_width_on_every_side",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=87",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:96",
+      "file": "tests/suite.shape-ex.js",
+      "line": 96,
+      "name": "shapeEx: horizontal linear gradient — ratio 0 at left edge, ratio 255 at right edge, no rotation",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::horizontal_linear_gradient_ratio_0_at_left_edge_ratio_255_at_right_edge_no",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=96",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:114",
+      "file": "tests/suite.shape-ex.js",
+      "line": 114,
+      "name": "shapeEx: vertical linear gradient — ratio 0 at top edge, ratio 255 at bottom edge",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::vertical_linear_gradient_ratio_0_at_top_edge_ratio_255_at_bottom_edge",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=114",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:128",
+      "file": "tests/suite.shape-ex.js",
+      "line": 128,
+      "name": "shapeEx: radial gradient uses fill type 0x12 and a centered, non-rotated matrix",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::radial_gradient_uses_fill_type_0x12_and_a_centered_non_rotated_matrix",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=128",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:140",
+      "file": "tests/suite.shape-ex.js",
+      "line": 140,
+      "name": "shapeEx: three-stop gradient round-trips all stops in order",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::three_stop_gradient_round_trips_all_stops_in_order",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=140",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:151",
+      "file": "tests/suite.shape-ex.js",
+      "line": 151,
+      "name": "shapeEx: tiny 1px shape with both stroke and radius does not corrupt the bit-packing (nb>=2 clamp)",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::shape::tests::tiny_1px_shape_with_both_stroke_and_radius_does_not_corrupt_the_bit_packing_nb",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=151",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.shape-ex.js:160",
+      "file": "tests/suite.shape-ex.js",
+      "line": 160,
+      "name": "shapeEx: a movie built with rounded/stroked/gradient shapes still verifies structurally end to end",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::verify::tests::a_movie_built_with_rounded_stroked_gradient_shapes_still_verifies_structurally",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/shape-ex.json#line=160",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:38",
+      "file": "tests/suite.timeline.js",
+      "line": 38,
+      "name": "timeline: a movie with no declared frames still has exactly one frame",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::a_movie_with_no_declared_frames_still_has_exactly_one_frame",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=38",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:49",
+      "file": "tests/suite.timeline.js",
+      "line": 49,
+      "name": "timeline: a single-frame movie gets no implicit stop()",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::a_single_frame_movie_gets_no_implicit_stop",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=49",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:58",
+      "file": "tests/suite.timeline.js",
+      "line": 58,
+      "name": "timeline: declared frames produce that many ShowFrames and a matching header count",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::declared_frames_produce_that_many_showframes_and_a_matching_header_count",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=58",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:67",
+      "file": "tests/suite.timeline.js",
+      "line": 67,
+      "name": "timeline: frame labels are emitted, in order, with their names",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::frame_labels_are_emitted_in_order_with_their_names",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=67",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:78",
+      "file": "tests/suite.timeline.js",
+      "line": 78,
+      "name": "timeline: content present on one frame and absent on the next is removed",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::content_present_on_one_frame_and_absent_on_the_next_is_removed",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=78",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:88",
+      "file": "tests/suite.timeline.js",
+      "line": 88,
+      "name": "timeline: an item on every frame is placed once, never removed",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::an_item_on_every_frame_is_placed_once_never_removed",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=88",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:97",
+      "file": "tests/suite.timeline.js",
+      "line": 97,
+      "name": "timeline: an item returning on a later frame is re-placed at the same depth",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::an_item_returning_on_a_later_frame_is_re_placed_at_the_same_depth",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=97",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:111",
+      "file": "tests/suite.timeline.js",
+      "line": 111,
+      "name": "timeline: a multi-frame movie stops on frame 1 by default",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::a_multi_frame_movie_stops_on_frame_1_by_default",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=111",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:121",
+      "file": "tests/suite.timeline.js",
+      "line": 121,
+      "name": "timeline: stopAtStart:false leaves a multi-frame movie looping",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::stopatstart_false_leaves_a_multi_frame_movie_looping",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=121",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:128",
+      "file": "tests/suite.timeline.js",
+      "line": 128,
+      "name": "timeline: per-frame scripts land on their own frame",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::per_frame_scripts_land_on_their_own_frame",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=128",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:142",
+      "file": "tests/suite.timeline.js",
+      "line": 142,
+      "name": "timeline: a built multi-frame movie still passes structural verification",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::a_built_multi_frame_movie_still_passes_structural_verification",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=142",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:155",
+      "file": "tests/suite.timeline.js",
+      "line": 155,
+      "name": "timeline: exportAs emits ExportAssets naming the clip sprite",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::exportas_emits_exportassets_naming_the_clip_sprite",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=155",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:168",
+      "file": "tests/suite.timeline.js",
+      "line": 168,
+      "name": "timeline: clip events produce a PlaceObject2 carrying ClipActions",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::clip_events_produce_a_placeobject2_carrying_clipactions",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=168",
+      "deviation": [
+        "D1",
+        "D3",
+        "D4"
+      ],
+      "note": "D1: gfxforge sets PlaceObject2 flag 0x01 for clip actions; the Rust port must set/read 0x80 (HasClipActions). Fixture movie.retail_corrected carries the corrected flag byte. D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13. Corrected assertion: (place.body[0] & 0x80) != 0 (gfxforge asserts & 0x01 at suite.timeline.js:176)."
+    },
+    {
+      "id": "tests/suite.timeline.js:180",
+      "file": "tests/suite.timeline.js",
+      "line": 180,
+      "name": "timeline: ClipActions framing matches what the player parses",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::place::tests::clipactions_framing_matches_what_the_player_parses",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=180",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.timeline.js:197",
+      "file": "tests/suite.timeline.js",
+      "line": 197,
+      "name": "timeline: keyPress handlers carry their key code inside the measured length",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::place::tests::keypress_handlers_carry_their_key_code_inside_the_measured_length",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=197",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.timeline.js:209",
+      "file": "tests/suite.timeline.js",
+      "line": 209,
+      "name": "timeline: alpha lowers to a CXFORM with multiply terms over 256",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::place::tests::alpha_lowers_to_a_cxform_with_multiply_terms_over_256",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=209",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.timeline.js:221",
+      "file": "tests/suite.timeline.js",
+      "line": 221,
+      "name": "timeline: an item with alpha places via PlaceObject2 with the cxform flag",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::an_item_with_alpha_places_via_placeobject2_with_the_cxform_flag",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=221",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:231",
+      "file": "tests/suite.timeline.js",
+      "line": 231,
+      "name": "timeline: default text output is byte-identical to the original flags",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::text::tests::default_text_output_is_byte_identical_to_the_original_flags",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=231",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.timeline.js:252",
+      "file": "tests/suite.timeline.js",
+      "line": 252,
+      "name": "timeline: multiline/wordWrap/html/border set their flag bits",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::text::tests::multiline_wordwrap_html_border_set_their_flag_bits",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=252",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.timeline.js:267",
+      "file": "tests/suite.timeline.js",
+      "line": 267,
+      "name": "timeline: the default flag pair is exactly the historical 0x8d/0x11",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::text::tests::the_default_flag_pair_is_exactly_the_historical_0x8d_0x11",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=267",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.timeline.js:278",
+      "file": "tests/suite.timeline.js",
+      "line": 278,
+      "name": "timeline: the importer survives a movie using colour transforms and clip actions",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::decode::tests::the_importer_survives_a_movie_using_colour_transforms_and_clip_actions",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=278",
+      "deviation": [
+        "D1",
+        "D3",
+        "D4"
+      ],
+      "note": "D1: gfxforge sets PlaceObject2 flag 0x01 for clip actions; the Rust port must set/read 0x80 (HasClipActions). Fixture movie.retail_corrected carries the corrected flag byte. D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13. Decoder must treat 0x80 as HasClipActions (decode.js:180 comment names 0x01); decode both movie.gfxforge and movie.retail_corrected to the same project."
+    },
+    {
+      "id": "tests/suite.timeline.js:293",
+      "file": "tests/suite.timeline.js",
+      "line": 293,
+      "name": "timeline: the importer reads a CXFORM carrying BOTH add and multiply terms",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::decode::tests::the_importer_reads_a_cxform_carrying_both_add_and_multiply_terms",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=293",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.timeline.js:318",
+      "file": "tests/suite.timeline.js",
+      "line": 318,
+      "name": "timeline: the importer reads a multi-frame movie without losing frame-0 content",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::decode::tests::the_importer_reads_a_multi_frame_movie_without_losing_frame_0_content",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=318",
+      "deviation": [
+        "D3",
+        "D4"
+      ],
+      "note": "D3: fixture movie bytes 4..8 differ — gfxforge FileLength = total size (swf.js:513), retail-corrected raw GFX = total - 8; gfxforge verify.js:99 requires equality, the Rust verifier must accept the retail form. Test assertions themselves are unaffected unless they check FileLength. D4: fixture movie ExporterInfo flags differ — gfxforge writes 0 (swf.js:74), retail-corrected writes 0x13."
+    },
+    {
+      "id": "tests/suite.timeline.js:332",
+      "file": "tests/suite.timeline.js",
+      "line": 332,
+      "name": "timeline: alignment forces a layout record and survives decoding",
+      "js_result": "pass",
+      "class": "codec",
+      "rust_test": "gfx::tags::text::tests::alignment_forces_a_layout_record_and_survives_decoding",
+      "fixture": "tools/wad_simulator/crates/mercs2_formats/tests/fixtures/gfxforge/timeline.json#line=332",
+      "deviation": [],
+      "note": null
+    },
+    {
+      "id": "tests/suite.uikit-regression.js:50",
+      "file": "tests/suite.uikit-regression.js",
+      "line": 50,
+      "name": "uikit: every kit movie still rebuilds byte-identically from its .json source",
+      "js_result": "pass (printed skip — body did not run)",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::every_kit_movie_still_rebuilds_byte_identically_from_its_json_source",
+      "fixture": null,
+      "deviation": [],
+      "note": "Rebuilds the uilib kit movies from their gfxforge .json sources and diffs against the shipped .gfx. NOT run here: the JS test printed \"(skipped: uilib kit not found ...)\" and counted as a pass (tests/run.js test() records pass whenever fn returns). Searched: ~/OneDrive/Desktop/uilib, ~/Desktop/uilib (test KIT_DIRS), Spotlight for ui_panel.json (none), find /Volumes/Projects and ~/Desktop depth 6. Only the built .gfx files exist, at /Volumes/Projects/mercs2-lua-essentials/src/shipment/movies/ (ui_panel.gfx, ui_bar.gfx, ui_toast.gfx, ui_confirm.gfx, ui_input.gfx, ui_list.gfx, chat.gfx, contracts.gfx, forge.gfx and others); no .json sources were found, so no fixture can be frozen. Needs the uilib .json sources from the user.",
+      "fixture_unavailable": "uilib .json sources not found on this machine (see note)"
+    },
+    {
+      "id": "tests/suite.uikit-regression.js:78",
+      "file": "tests/suite.uikit-regression.js",
+      "line": 78,
+      "name": "uikit: kit projects load without warnings and pass structural verification",
+      "js_result": "pass (printed skip — body did not run)",
+      "class": "codec",
+      "rust_test": "gfx::build::tests::kit_projects_load_without_warnings_and_pass_structural_verification",
+      "fixture": null,
+      "deviation": [],
+      "note": "Rebuilds the uilib kit movies from their gfxforge .json sources and diffs against the shipped .gfx. NOT run here: the JS test printed \"(skipped: uilib kit not found ...)\" and counted as a pass (tests/run.js test() records pass whenever fn returns). Searched: ~/OneDrive/Desktop/uilib, ~/Desktop/uilib (test KIT_DIRS), Spotlight for ui_panel.json (none), find /Volumes/Projects and ~/Desktop depth 6. Only the built .gfx files exist, at /Volumes/Projects/mercs2-lua-essentials/src/shipment/movies/ (ui_panel.gfx, ui_bar.gfx, ui_toast.gfx, ui_confirm.gfx, ui_input.gfx, ui_list.gfx, chat.gfx, contracts.gfx, forge.gfx and others); no .json sources were found, so no fixture can be frozen. Needs the uilib .json sources from the user.",
+      "fixture_unavailable": "uilib .json sources not found on this machine (see note)"
+    },
+    {
+      "id": "tests/suite.uikit-regression.js:97",
+      "file": "tests/suite.uikit-regression.js",
+      "line": 97,
+      "name": "uikit: the text fields Ess.UI binds by name survive a rebuild",
+      "js_result": "pass (printed skip — body did not run)",
+      "class": "codec",
+      "rust_test": "gfx::decode::tests::the_text_fields_ess_ui_binds_by_name_survive_a_rebuild",
+      "fixture": null,
+      "deviation": [],
+      "note": "Rebuilds the uilib kit movies from their gfxforge .json sources and diffs against the shipped .gfx. NOT run here: the JS test printed \"(skipped: uilib kit not found ...)\" and counted as a pass (tests/run.js test() records pass whenever fn returns). Searched: ~/OneDrive/Desktop/uilib, ~/Desktop/uilib (test KIT_DIRS), Spotlight for ui_panel.json (none), find /Volumes/Projects and ~/Desktop depth 6. Only the built .gfx files exist, at /Volumes/Projects/mercs2-lua-essentials/src/shipment/movies/ (ui_panel.gfx, ui_bar.gfx, ui_toast.gfx, ui_confirm.gfx, ui_input.gfx, ui_list.gfx, chat.gfx, contracts.gfx, forge.gfx and others); no .json sources were found, so no fixture can be frozen. Needs the uilib .json sources from the user.",
+      "fixture_unavailable": "uilib .json sources not found on this machine (see note)"
+    }
+  ]
+}

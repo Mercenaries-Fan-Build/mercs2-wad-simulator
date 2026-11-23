@@ -1,7 +1,7 @@
 //! The retail runtime spawner — the 148-byte object `FUN_004E2840` builds from a
 //! [`SpawnerRecord`] when the record's owner goes live or a tweak turns its group on — and the helpers
 //! every family updater shares (`docs/reverse_engineer/population_spawner/shared_helpers.txt`; layout
-//! table in `docs/reverse_engineer/population_spawner_code_map.md` §6). Each field names its retail
+//! table in [`docs/reverse_engineer/population_spawner_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/population_spawner_code_map.md) §6). Each field names its retail
 //! offset; each helper names its function.
 
 use mercs2_core::glam::Vec3;

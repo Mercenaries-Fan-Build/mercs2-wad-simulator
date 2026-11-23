@@ -73,6 +73,7 @@ mod jc2_blockrt;
 mod jc2_script_probe;
 mod jc2_template_mint;
 mod layer;
+mod lettering;
 mod lod_neuter;
 mod lua_debug_live;
 mod lua_vehicle_hashes;
@@ -174,9 +175,9 @@ fn usage() -> ! {
          \x20 place-forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z [...] | --list <block.bin> [--near X,Z] [--radius R]\n\
          \x20 place-lift <in.bin> <out.bin> --key 0xKEY [--key ...] --dy <f32> | <in.bin> --list --key 0xKEY [...]\n\
          \x20 c3-veg-forge --base-wad <vz.wad> --out <overlay.wad> [--x X --z Z --radius M] [--donor-cell ID] [--model 0xH] [--max-cells N] [--advertise]\n\
-         \x20 jc2-blockrt [vz.wad]                           (worldentity block round-trip; writes ../../output/block3185_original.bin)\n\
+         \x20 jc2-blockrt --dir <dir> [vz.wad]               (worldentity block round-trip; writes <dir>/block3185_original.bin)\n\
          \x20 jc2-script-probe [vz.wad|block.bin] [name ...|--summary]   (resident-script INFO/DEPS/BINN structure)\n\
-         \x20 jc2-template-mint [vz.wad]                     (mint the JC2 template; reads and writes ../../output)\n\
+         \x20 jc2-template-mint --dir <dir> [vz.wad]         (mint the JC2 template; reads and writes <dir>)\n\
          \x20 worldentity-probe [vz.wad] [0xHANDLE ...]      (worldentity COMP groups and template recipes)\n\
          \x20 ragdoll-probe [--hashes] [--extract-fixture]  (Havok physics classes across vz.wad)\n\
          \x20 lua-vehicle-hashes [out.csv]                  (vehicle names in the decompiled Lua; run from the notes repo root)\n\
@@ -1208,6 +1209,83 @@ fn main() {
         };
         if let Err(e) = gfx_golden::gfx_actions(std::path::Path::new(movie), std::path::Path::new(out)) {
             eprintln!("gfx-actions failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "lettering-label" {
+        if let Err(e) = gfx_swap::run_lettering_label(&args) {
+            eprintln!("lettering-label failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "label-crops" {
+        if let Err(e) = gfx_swap::run_label_crops(&args) {
+            eprintln!("label-crops failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "lettering-compare" {
+        if let Err(e) = gfx_swap::run_lettering_compare(&args) {
+            eprintln!("lettering-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "lettering-draft" {
+        if let Err(e) = lettering::run(&args) {
+            eprintln!("lettering-draft failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "label-letters" {
+        if let Err(e) = gfx_swap::run_label_letters(&args) {
+            eprintln!("label-letters failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "label-parts" {
+        if let Err(e) = gfx_swap::run_label_parts(&args) {
+            eprintln!("label-parts failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tex-crop" {
+        if let Err(e) = gfx_swap::run_tex_crop(&args) {
+            eprintln!("tex-crop failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "font-compare" {
+        if let Err(e) = gfx_swap::run_font_compare(&args) {
+            eprintln!("font-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "font-coverage" {
+        if let Err(e) = gfx_swap::run_font_coverage(&args) {
+            eprintln!("font-coverage failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "label-art" {
+        if let Err(e) = gfx_swap::run_label_art(&args) {
+            eprintln!("label-art failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "menu-items" {
+        if let Err(e) = gfx_swap::run_menu_items(&args) {
+            eprintln!("menu-items failed: {e}");
             std::process::exit(1);
         }
         return;

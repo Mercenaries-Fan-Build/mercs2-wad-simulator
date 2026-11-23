@@ -19,7 +19,7 @@
 //!
 //! **Honesty boundary.** Retail's on-foot controller is Havok — `HumanPhysics::Activate`
 //! `FUN_004255c0` building 7 capsules + a phantom + an `hkpCharacterProxy`, driven by the 5-state
-//! `hkpCharacterContext` machine (`docs/reverse_engineer/physics_code_map.md`). This trait is *not* a
+//! `hkpCharacterContext` machine ([`docs/reverse_engineer/physics_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/physics_code_map.md)). This trait is *not* a
 //! recovered interface; it is the seam the reimpl's stand-in controller needs, sized so a later
 //! Havok-faithful implementation can satisfy it unchanged.
 

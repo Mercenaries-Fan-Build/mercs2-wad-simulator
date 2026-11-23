@@ -5,7 +5,7 @@
 //! runs on with part of its logic missing. Identifiers are case sensitive (every movie is SWF 8).
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use mercs2_formats::gfx_def::Matrix;
@@ -65,6 +65,9 @@ pub enum Kind {
     Native(Native),
     /// Milliseconds since the epoch.
     Date(f64),
+    /// A `flash.display.BitmapData`: the exported image character it holds (retail keeps the
+    /// resource at `GASBitmapData +0x30`, `FUN_007b5990`).
+    Bitmap(u16),
 }
 
 pub struct ObjectData {
@@ -117,6 +120,31 @@ impl Obj {
     fn same(&self, other: &Obj) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
+}
+
+/// The number a display property is set to, or `None` when the set leaves it as it was, as GFx's
+/// `SetStandardMember` (`FUN_0077e0b0`) decides: `undefined` and NaN (`FUN_00760410`) change nothing;
+/// an infinity (`FUN_00760480` −, `FUN_00760450` +) puts `_x`/`_y` at 0, is ignored by
+/// `_xscale`/`_yscale`, and on `_width`/`_height` −∞ is ignored and +∞ makes 0. Other properties take
+/// the number as it is.
+fn display_number(name: &str, value: &Value) -> Option<f64> {
+    if matches!(value, Value::Undefined) {
+        return None;
+    }
+    let n = to_number(value);
+    if n.is_nan() {
+        return None;
+    }
+    if n.is_infinite() {
+        return match name {
+            "_x" | "_y" => Some(0.0),
+            "_xscale" | "_yscale" => None,
+            "_width" | "_height" if n > 0.0 => Some(0.0),
+            "_width" | "_height" => None,
+            _ => Some(n),
+        };
+    }
+    Some(n)
 }
 
 pub fn to_number(v: &Value) -> f64 {
@@ -218,6 +246,16 @@ pub struct Player {
     pub traces: Vec<String>,
     /// Methods scripts called that do not exist here, for the gate to report.
     pub missing: BTreeSet<String>,
+    /// Methods scripts called on `undefined`, a target that did not resolve. Retail runs these as
+    /// no-ops too, so they are listed apart from [`Self::missing`]: an unbuilt global such as
+    /// `flash.display.BitmapData` shows up here, and so does a clip a host has not filled in.
+    pub on_undefined: BTreeSet<String>,
+    /// What the library writes to the movie's log, as retail's GFx does through `FUN_00773750`.
+    pub log: Vec<String>,
+    /// Names scripts read that nothing defined — no local, clip variable, child, display property or
+    /// global — by where they were looked for (`_level0.menu_mc.sTitle`, or the path as written), and
+    /// how often. What a host feeds a movie and has not: its reads come back `undefined`.
+    pub unresolved: BTreeMap<String, u32>,
     /// Keys held, by Flash key code.
     pub keys: BTreeSet<u32>,
     last_key: u32,
@@ -234,6 +272,21 @@ pub struct Player {
     depth: u32,
     budget: u64,
     random: u64,
+}
+
+/// A text field on stage ([`Player::text_fields`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldInfo {
+    pub parent: ClipId,
+    pub depth: i32,
+    /// `_level0.menu_mc.title_txt`; a field with no instance name is `<depth N>`.
+    pub path: String,
+    /// What it holds now, string keys untranslated.
+    pub text: String,
+    /// What the movie's definition gives it.
+    pub initial: String,
+    /// The variable its definition binds it to, empty for none.
+    pub variable: String,
 }
 
 /// A host's FSCommand handler: given the command and its argument, it answers with the movie
@@ -278,6 +331,9 @@ impl Player {
             fscommand_hook: None,
             traces: Vec::new(),
             missing: BTreeSet::new(),
+            on_undefined: BTreeSet::new(),
+            log: Vec::new(),
+            unresolved: BTreeMap::new(),
             keys: BTreeSet::new(),
             last_key: 0,
             last_ascii: 0,
@@ -457,10 +513,16 @@ impl Player {
     }
 
     fn set_display(&mut self, target: &Value, name: &str, value: &Value) -> Result<bool, String> {
-        let number = to_number(value);
         if !matches!(name, "_x" | "_y" | "_xscale" | "_yscale" | "_rotation" | "_alpha" | "_visible" | "_width" | "_height" | "_name") {
             return Ok(false);
         }
+        let number = match name {
+            "_visible" | "_name" => 0.0,
+            _ => match display_number(name, value) {
+                Some(n) => n,
+                None => return Ok(true),
+            },
+        };
         let Some((parent, depth)) = self.child_slot(target)? else { return Ok(true) };
         // A text field's size is its box: the text keeps its scale, the box's right or bottom edge moves.
         if (name == "_width" || name == "_height") && matches!(target, Value::Field(..)) {
@@ -736,6 +798,84 @@ impl Player {
         Ok(self.global.get(name).unwrap_or(Value::Undefined))
     }
 
+    /// Whether `name` is defined anywhere [`Self::lookup`] looks, even as `undefined`: a local or a
+    /// clip variable declared without a value is not a missing input.
+    fn declared(&mut self, frame: &Activation, name: &str) -> bool {
+        frame.scope.iter().any(|s| s.own(name).is_some())
+            || (self.movie.exists(frame.clip) && self.vars(frame.clip).get(name).is_some())
+            || self.global.get(name).is_some()
+    }
+
+    /// The functions the root timeline holds, in the order they were defined, each with its parameter
+    /// names (none for a native): what a host's `Invoke` reaches by a bare name.
+    pub fn root_functions(&mut self) -> Vec<(String, Vec<String>)> {
+        let root = self.vars(self.movie.root);
+        let data = root.0.borrow();
+        data.order
+            .iter()
+            .filter_map(|k| {
+                let Some(Value::Object(o)) = data.props.get(k) else { return None };
+                match &o.0.borrow().kind {
+                    Kind::Script(f) => Some((k.to_string(), f.params.iter().map(|(_, p)| p.to_string()).collect())),
+                    Kind::Native(_) => Some((k.to_string(), Vec::new())),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Every text field on stage, in draw order, under clips that are visible.
+    pub fn text_fields(&self) -> Result<Vec<FieldInfo>, String> {
+        let mut out = Vec::new();
+        self.collect_fields(self.movie.root, &mut out)?;
+        Ok(out)
+    }
+
+    /// Every named clip on stage, parents before children, with its path (`_level0.menu_mc.item_mc`).
+    pub fn named_clips(&self) -> Result<Vec<(ClipId, String)>, String> {
+        let mut out = Vec::new();
+        self.collect_clips(self.movie.root, &mut out)?;
+        Ok(out)
+    }
+
+    fn collect_clips(&self, clip: ClipId, out: &mut Vec<(ClipId, String)>) -> Result<(), String> {
+        for child in self.movie.clip(clip)?.children.values() {
+            if let Node::Clip(c) = &child.node {
+                if child.name.is_some() {
+                    out.push((*c, self.clip_path(*c)?));
+                }
+                self.collect_clips(*c, out)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_fields(&self, clip: ClipId, out: &mut Vec<FieldInfo>) -> Result<(), String> {
+        let path = self.clip_path(clip)?;
+        for (depth, child) in &self.movie.clip(clip)?.children {
+            if !child.visible {
+                continue;
+            }
+            match &child.node {
+                Node::Clip(c) => self.collect_fields(*c, out)?,
+                Node::Text(text) => {
+                    let def = self.movie.edit_text(child)?;
+                    let name = child.name.clone().unwrap_or_else(|| format!("<depth {depth}>"));
+                    out.push(FieldInfo {
+                        parent: clip,
+                        depth: *depth,
+                        path: format!("{path}.{name}"),
+                        text: text.clone(),
+                        initial: def.text,
+                        variable: def.variable,
+                    });
+                }
+                Node::Shape | Node::Morph => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Set a bare identifier where it already lives, else on the clip.
     fn assign(&mut self, frame: &Activation, name: &str, value: Value) -> Result<(), String> {
         for scope in frame.scope.iter().rev() {
@@ -900,7 +1040,9 @@ impl Player {
                 Value::Object(_) => "Object",
                 _ => "undefined",
             };
-            if on != "undefined" {
+            if on == "undefined" {
+                self.on_undefined.insert(name.to_string());
+            } else {
                 self.missing.insert(format!("{on}.{name}"));
             }
             return Ok(Value::Undefined);
@@ -1141,7 +1283,20 @@ impl Player {
                 0x1C => {
                     let name = Self::pop(&mut stack);
                     let name = self.to_text(&name)?;
-                    let v = if name.contains(['.', ':', '/']) { self.resolve_path(frame, &name)? } else { self.lookup(frame, &name)? };
+                    let v = if name.contains(['.', ':', '/']) {
+                        let v = self.resolve_path(frame, &name)?;
+                        if matches!(v, Value::Undefined) {
+                            *self.unresolved.entry(name.to_string()).or_default() += 1;
+                        }
+                        v
+                    } else {
+                        let v = self.lookup(frame, &name)?;
+                        if matches!(v, Value::Undefined) && !self.declared(frame, &name) {
+                            let at = if self.movie.exists(frame.clip) { format!("{}.{name}", self.clip_path(frame.clip)?) } else { name.to_string() };
+                            *self.unresolved.entry(at).or_default() += 1;
+                        }
+                        v
+                    };
                     stack.push(v);
                 }
                 0x1D => {
@@ -1293,7 +1448,14 @@ impl Player {
                     let name = Self::pop(&mut stack);
                     let name = self.to_text(&name)?;
                     let target = Self::pop(&mut stack);
-                    stack.push(self.get_member(&target, &name)?);
+                    let v = self.get_member(&target, &name)?;
+                    if let (Value::Undefined, Value::Clip(id)) = (&v, &target) {
+                        if self.vars(*id).get(&name).is_none() {
+                            let at = format!("{}.{name}", self.clip_path(*id)?);
+                            *self.unresolved.entry(at).or_default() += 1;
+                        }
+                    }
+                    stack.push(v);
                 }
                 0x4F => {
                     let value = Self::pop(&mut stack);
@@ -1659,6 +1821,14 @@ impl Player {
         Ok(result)
     }
 
+    /// Call method `name` of the clip `clip`, as [`Self::invoke`] does by path.
+    pub fn invoke_on(&mut self, clip: ClipId, name: &str, args: &[Value]) -> Result<Value, String> {
+        self.budget = MAX_ACTIONS;
+        let result = self.call_method(&Value::Clip(clip), name, args)?;
+        self.run_queued()?;
+        Ok(result)
+    }
+
     /// Call the function a dotted path names from the root, within whatever is running.
     fn call_path(&mut self, path: &str, args: &[Value]) -> Result<Value, String> {
         let root = self.movie.root;
@@ -2017,6 +2187,56 @@ mod tests {
         let mut p = player(vec![vec![]]);
         p.call_method(&Value::Clip(0), "nope", &[]).expect("call");
         assert!(p.missing.contains("MovieClip.nope"));
+    }
+
+    #[test]
+    fn a_method_called_on_undefined_is_listed_apart() {
+        let mut p = player(vec![vec![]]);
+        assert!(matches!(p.call_method(&Value::Undefined, "loadBitmap", &[]).expect("call"), Value::Undefined));
+        assert!(p.on_undefined.contains("loadBitmap"));
+        assert!(p.missing.is_empty());
+    }
+
+    /// A read nothing defines is listed where it was looked for; a variable that holds `undefined` is
+    /// not, and the root's functions are what a host can call.
+    #[test]
+    fn reads_nothing_defines_are_listed_with_the_root_functions() {
+        let mut code = Vec::new();
+        set_var(&mut code, "held", |c| c.extend([0x96, 1, 0, 3]));
+        for name in ["sTitle", "held", "_level0.sCash"] {
+            set_var(&mut code, "out", |c| {
+                push_str(c, name);
+                c.push(0x1C);
+            });
+        }
+        set_var(&mut code, "out", |c| {
+            push_str(c, "_root");
+            c.push(0x1C);
+            push_str(c, "count");
+            c.push(0x4E);
+        });
+        // `function setTitle() {}`
+        code.extend([0x9B, 13, 0]);
+        code.extend(b"setTitle\0");
+        code.extend([0, 0, 0, 0]);
+        let p = &mut player(vec![vec![Control::Action(code)]]);
+        p.advance(33.0).expect("advance");
+        let listed: Vec<(&str, u32)> = p.unresolved.iter().map(|(k, n)| (k.as_str(), *n)).collect();
+        assert_eq!(listed, vec![("_level0.count", 1), ("_level0.sCash", 1), ("_level0.sTitle", 1)]);
+        assert_eq!(p.root_functions(), vec![("setTitle".to_string(), Vec::new())]);
+    }
+
+    /// `FUN_0077e0b0`: `undefined` and NaN leave a position alone, an infinity puts it at 0; a scale
+    /// ignores an infinity; `_width` takes +∞ as 0 and ignores −∞.
+    #[test]
+    fn a_display_property_keeps_its_value_for_nan_and_undefined() {
+        assert_eq!(display_number("_x", &Value::Undefined), None);
+        assert_eq!(display_number("_x", &Value::Number(f64::NAN)), None);
+        assert_eq!(display_number("_y", &Value::Number(f64::NEG_INFINITY)), Some(0.0));
+        assert_eq!(display_number("_xscale", &Value::Number(f64::INFINITY)), None);
+        assert_eq!(display_number("_width", &Value::Number(f64::INFINITY)), Some(0.0));
+        assert_eq!(display_number("_height", &Value::Number(f64::NEG_INFINITY)), None);
+        assert_eq!(display_number("_alpha", &Value::Str("50".into())), Some(50.0));
     }
 
     #[test]

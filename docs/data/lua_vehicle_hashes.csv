@@ -1,0 +1,176 @@
+vehicle_name,pandemic_hash_m2_hex,pandemic_hash_m2_dec,name_kind,lua_call_sources,example_files
+AH1Z (Ewan),0xB8AE263B,3098420795,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+AMX30,0x36AEDE98,917429912,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+AMX30 AA,0x45D11D72,1171332466,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+AMX30 Elite,0x3F6EDBED,1064229869,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+AllJob002_04_Jeep01,0xB7EF5C84,3085917316,instance_label,named,docs/mercs2-luacd/src/vz/alljob002.lua
+Alouette3 Attack (PR) (Ewan),0x5076A026,1349951526,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Alouette3 Attack (VZ),0x0384A0EE,59023598,type,placed,docs/mercs2-luacd/src/vz/pmccon004.lua
+Alouette3 Attack (VZ) (Ewan),0x76908A00,1989184000,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Alouette3 Elite (Driver),0x34CE8229,885948969,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+Alouette3 Elite (Ewan),0x5F7B68E4,1601923300,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Alouette3 Superiority (Driver),0xC3E6EDC3,3286691267,type,spawn,docs/mercs2-luacd/src/vz/pmccon004.lua
+Alouette3 Superiority (Ewan),0x63E0E84A,1675683914,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Alouette3 Transport (PR) (Ewan),0x2EEC9423,787256355,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Alouette3 Transport (PR) (Full),0xD41A4509,3558491401,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Alouette3 Transport (VZ) (Ewan),0xEF9E6839,4020135993,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Ambulance (Driver),0x26FA5C20,653941792,type,spawn,docs/mercs2-luacd/src/vz/chicon009.lua
+Amx30 (Full),0x48B454BC,1219777724,type,spawn,docs/mercs2-luacd/src/vz/gurcon002.lua
+BoatGunnerMan,0x88839842,2290325570,instance_label,named,docs/mercs2-luacd/src/vz/oilcon020.lua
+Buggy (Hellfire),0x8E0908F1,2382956785,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Buggy (PR),0x86835E18,2256756248,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+CarmonaHeli,0x9320F9D2,2468411858,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+CarmonaJeep,0xA561F826,2774661158,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+ChiCon008_ZTZ98,0xA8A8BEB3,2829631155,instance_label,named,docs/mercs2-luacd/src/vz/chicon008.lua
+Chopper_PmcCon003_Bunker_ApproachEnc01,0x498C8EAC,1233948332,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+Coanda Attack (Ewan),0xFDBB6BA9,4256918441,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Coanda Gunship (Ewan),0x84E5AF7F,2229645183,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Coanda Superiority (Ewan),0x011C5856,18634838,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Coanda Transport,0x4925098C,1227164044,type,spawn,docs/mercs2-luacd/src/vz/allcon008.lua
+Coanda Transport (Driver),0x44CF1B8B,1154423691,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Coanda Transport (Ewan),0x8642C152,2252521810,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Coanda Transport (Full),0x4DF1FD48,1307704648,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+DLC_M1A1,0x28F72787,687286151,type,cargo,docs/mercs2-dlc-luacd/src/dlctest01/dlctest01.lua
+DSV Scout Vehicle,0x39870E26,965152294,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+EXT,0x26308AFA,640715514,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+EXT (GL),0xB60CD310,3054293776,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Endriago (Attack) (Ewan),0x373FE88F,926935183,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Endriago (Elite) (Ewan),0x52C22EBE,1388457662,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Endriago (Superiority) (Ewan),0x7856D228,2018955816,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+GunningBoat,0x4D5DE165,1297998181,instance_label,named,docs/mercs2-luacd/src/vz/oilcon020.lua
+Guntruck (OC),0x8730B849,2268117065,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+HMMWV (Armored) (50Cal),0x37905F6B,932208491,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+HMMWV (Armored) (GL),0x80B1B641,2159130177,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+HMMWV (Armored) (TOW),0x9B70EDF2,2607869426,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+HMMWV (Avenger),0xAAB4BBC1,2863971265,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+HMMWV (Softtop),0x1D5BDF68,492560232,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+JetCon001_AASite01_Jeep_Path,0x9CE4FD1F,2632252703,instance_label,named,docs/mercs2-luacd/src/vz/jetcon001.lua
+JetCon001_BeachAssault_Tank01,0xA88D609E,2827837598,instance_label,named,docs/mercs2-luacd/src/vz/jetcon001.lua
+JetCon001_Jeep_BunkerIsland,0x0CDF4A25,215960101,instance_label,named,docs/mercs2-luacd/src/vz/jetcon001.lua
+JetCon001_Supply_AAJeep01,0x3646B301,910603009,instance_label,named,docs/mercs2-luacd/src/vz/jetcon001.lua
+Ka29b (Driver),0xF3D88D83,4091055491,instance_label,named,docs/mercs2-dlc-luacd/src/dlc01/dlccopterdrop.lua;docs/mercs2-luacd/src/resident/mrxcopterdrop.lua
+Ka29b (Ewan),0x92265E0A,2451987978,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Ka29b (Full),0x0DB71EB0,230104752,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+LAVIII (25mm),0xCDC13EBD,3451993789,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+LAVIII (AD),0xA7F3F42B,2817782827,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+LAVIII (AT),0x965F28DB,2522818779,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+LAVIII (MEWSS),0x745AEC4D,1952115789,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+LAVIII (MGS),0x7E78EA99,2121853593,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+LAVIII (Minigun),0x7AADF15B,2058219867,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Listening Post,0x5023CB6E,1344523118,type,cargo,docs/mercs2-luacd/src/resident/mrxoilcon002delivery.lua
+M113 (GR),0xCE5E8D35,3462303029,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M113 (VZ),0xC9900D64,3381661028,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M113 (VZ) (Full),0x88D24F70,2295484272,type,spawn,docs/mercs2-luacd/src/vz/gurcon002.lua
+M113 AA (GR),0xEBD1DEE5,3956399845,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M113 AA (VZ),0x26D6AE34,651603508,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M113 Jammer (VZ),0x5F15847E,1595245694,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M113 Jammer (VZ) (Driver),0x63E36415,1675846677,type,placed,docs/mercs2-luacd/src/vz/gurcon001.lua
+M151 (MG) (GR),0xA72B34B2,2804626610,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M151 .50Cal (VZ),0xEEA87FED,4004020205,type,cargo;spawn,docs/mercs2-luacd/src/resident/mrxsupportdata.lua;docs/mercs2-luacd/src/vz/pmccon018.lua
+M151 .50Cal (VZ) (Full),0x888F587F,2291095679,type,placed,docs/mercs2-luacd/src/vz/gurcon001.lua
+M151 Softtop (GR),0x4411809C,1141997724,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M151 Softtop (VZ),0xD68A30FD,3599380733,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M1A2,0x0118204A,18358346,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M2A3,0xAE0761D0,2919719376,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M35 (AA) (GR),0x7E68250B,2120754443,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M35 (AA) (VZ),0x22A3CAEA,581159658,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M35 (Cargo) (VZ),0x69BA71A8,1773826472,type,spawn,docs/mercs2-luacd/src/vz/pmccon018.lua
+M35 (Cargo) (VZ) (Full),0xE0D2C7CC,3771910092,type,placed,docs/mercs2-luacd/src/vz/gurcon001.lua
+M35 (Guntruck) (GR),0x1EB74FCA,515329994,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M35 (Guntruck) (VZ),0x7BE5F40B,2078667787,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+M35 (Guntruck) (VZ) (Driver),0xE44A24A6,3830064294,type,spawn,docs/mercs2-luacd/src/vz/pircon004.lua
+M551,0x43C6A9CD,1137093069,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+MH53J (Ewan),0x70719716,1886492438,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+MH53J (Full),0xC97B7814,3380312084,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+MailTruck,0x978CBAF1,2542582513,instance_label,named,docs/mercs2-luacd/src/vz/oilcon021.lua
+Mattias Chopper,0x1ECD5E19,516775449,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Mi26 (CH) (Ewan),0x71CAED6B,1909124459,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Mi26 (PMC) (Driver),0x9F6ADD25,2674580773,type,delivery,docs/mercs2-dlc-luacd/src/dlctest01/dlctest01.lua;docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Mi26 (VZ) (Ewan),0x4AFFE432,1258284082,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Mi35 (AA Driver),0x7B286256,2066244182,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+Mi35 (Ewan),0x6E0D5F93,1846370195,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Mi35 (Solano Hijack),0x4BD22804,1272064004,instance_label,named,docs/mercs2-luacd/src/vz/pmccon004.lua
+Monster Truck,0xBA21D4C4,3122779332,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+NGLV (GL),0xD2EA92D0,3538588368,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+NGLV (MG),0xDBDEC16F,3688808815,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+OBJ_Wave02_APC01,0xA2345578,2721338744,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+OBJ_Wave02_APC02,0x2C315D1F,741432607,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+OBJ_Wave02_Tank01,0x91924424,2442282020,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+OBJ_Wave02_Tank02,0xAB902E7B,2878353019,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+OBJ_Wave02_Tank03,0x898DBA5E,2307766878,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+OBJ_Wave02_Tank04,0x939F133D,2476675901,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+Offroad Motorcycle (AI ONLY),0xF6B714A8,4139193512,type,spawn,docs/mercs2-luacd/src/vz/meccon001.lua
+OilCon002_Entrance2Helipad,0xEE732567,4000523623,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+OilCon002_HeliTele,0xF89C7830,4171003952,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+OilCon002_VZAirportHeli01,0xCB56616C,3411435884,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+OilCon002_VZAirportHeli02,0x65538243,1699971651,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+OilCon002_VZAirportHeliPath,0x71F895F8,1912116728,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+OilCon002_VZHeliPilot,0x1CBD70CE,482177230,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+OilCon020_takesTruck,0x970C8281,2534179457,instance_label,named,docs/mercs2-luacd/src/vz/oilcon020.lua
+Omen,0xCB516D9C,3411111324,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+PGZ95,0x76BE6D86,1992191366,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+PGZ95 Command,0x19CCC8A1,432851105,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+PLZ45,0x4515E6E4,1159063268,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+PLZ45 (DLC) (LongHib) (Prototype),0x715B8A9B,1901824667,instance_label,named,docs/mercs2-dlc-luacd/src/dlc01/dlccon003.lua
+PMC001_EntourageScorpion,0xBBD84866,3151513702,instance_label,named,docs/mercs2-luacd/src/vz/pmccon001.lua
+Panhard (Assault),0x449BB52B,1151055147,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Patrol Boat (PMC),0x1D9FC746,497010502,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Patrol Boat (VZ),0xBB5331F4,3142791668,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+PirCon004_OrganTruck,0xEA0D357D,3926734205,instance_label,named,docs/mercs2-luacd/src/vz/pircon004.lua
+PirCon004_Player2Truck,0x9ACB2FA1,2597007265,instance_label,named,docs/mercs2-luacd/src/vz/pircon004.lua
+PirCon004_Tanker(explode),0x37FEA3B4,939434932,instance_label,named,docs/mercs2-luacd/src/vz/pircon004.lua
+PirCon004_TruckGoal,0x211C3F5B,555499355,instance_label,named,docs/mercs2-luacd/src/vz/pircon004.lua
+PirCon004_TruckSpawn,0x5D55625F,1565876831,instance_label,named,docs/mercs2-luacd/src/vz/pircon004.lua
+Piranha,0x42C221BA,1120018874,type,cargo;spawn,docs/mercs2-luacd/src/resident/mrxsupportdata.lua;docs/mercs2-luacd/src/vz/gurcon003.lua
+PmcCon003_Heli_BridgeAmbush,0xD0DD9D81,3504184705,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+Region_AllJob002_04_TriggerJeep,0xB8C71EEA,3100057322,instance_label,named,docs/mercs2-luacd/src/vz/alljob002.lua
+Region_Pmc003_Bunker_TankAmbush01,0xD6DF4D09,3604958473,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+SX2150 (MLRS),0xFBDC7E43,4225531459,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Scorpion90,0x46E480D9,1189380313,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Scorpion_TankAmbush01,0xD35E6720,3546179360,instance_label,named,docs/mercs2-luacd/src/vz/pmccon003.lua
+Sidecar Motorcycle,0x07856105,126181637,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Speed Boat,0xF6515BBC,4132527036,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Stingray II,0xF7E45E52,4158938706,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Support Vehicle (AC130),0x5676F5D3,1450636755,type,flyby,docs/mercs2-luacd/src/resident/mrxgunship.lua
+Support Vehicle (Autogunship),0xE76E828E,3882779278,type,flyby,docs/mercs2-luacd/src/vz/allcon003.lua
+Support Vehicle (B2),0x3B379C6F,993500271,type,flyby,docs/mercs2-luacd/src/resident/mrxcarpetbomb.lua
+Support Vehicle (C130),0xA4FEAE5C,2768154204,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Support Vehicle (F117),0x70C3E492,1891886226,type,flyby,docs/mercs2-luacd/src/resident/mrxharmstrike.lua
+Support Vehicle (F35),0xE616BA41,3860249153,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Support Vehicle (OV10) low altitude,0x69308989,1764788617,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Support Vehicle (Q5),0xD78EE851,3616467025,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Support Vehicle (Tucano),0x03501723,55580451,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+T300 (M60),0x9A974376,2593604470,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Tank Bike,0x0ADFFAD4,182450900,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+TankBuster_Instant,0xAAC52C08,2865048584,type,spawn,docs/mercs2-dlc-luacd/src/dlc01/dlccon003.lua
+TransitHeli_Landing,0x5F1A124E,1595544142,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+TransitHeli_Landing02,0xD5760274,3581280884,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+TransitHeli_Spawn,0xE2366E1A,3795217946,instance_label,named,docs/mercs2-luacd/src/vz/oilcon002.lua
+TruckMoveLoc,0xC07DF8C5,3229481157,instance_label,named,docs/mercs2-luacd/src/vz/pmccon034.lua
+Turbosquid (GR),0x25588685,626558597,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Turbosquid (OC),0xAB3108D6,2872117462,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+UH1 Transport (GR) (Driver),0x05B41E73,95690355,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+UH1 Transport (GR) (Ewan),0x0CF7687A,217540730,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+UH1 Transport (GR) (Full),0x1BAAE2A0,464183968,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+UH1 Transport (GR) (Full) (RPG),0xDBFA90EA,3690631402,type,spawn,docs/mercs2-luacd/src/vz/gurcon002.lua
+UH1 Transport (PMC),0x79415FA1,2034327457,type,placed,docs/mercs2-luacd/src/vz/pmccon034.lua
+UH1 Transport (PMC) (Driver),0x0CCF93BC,214930364,type,delivery;spawn,docs/mercs2-luacd/src/resident/mrxsupportdata.lua;docs/mercs2-luacd/src/vz/oilcon002.lua
+UH1 Transport (PMC) (Ghost),0xECB8938F,3971519375,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Valiant (Python),0xCF4FA909,3478104329,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+Veyron (Assault),0x046E1AA2,74324642,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+VzaCon001_StartingBoat,0x2333B028,590589992,instance_label,named,docs/mercs2-luacd/src/vz/vzacon001.lua
+WZ10 (Ewan),0x73EF463D,1945060925,type,delivery,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+WZ551,0xCC9CEB99,3432835993,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+ZBD2000,0x58827779,1484945273,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+ZTZ63a,0xC36271CF,3278008783,type,cargo,docs/mercs2-luacd/src/resident/mrxsupportdata.lua
+ZTZ63a (DLC) (LongHib) (Prototype),0x1EDE8624,517899812,instance_label,named,docs/mercs2-dlc-luacd/src/dlc01/dlccon003.lua
+ZTZ98,0x28CFA508,684696840,type,cargo;spawn,docs/mercs2-luacd/src/resident/mrxsupportdata.lua;docs/mercs2-luacd/src/vz/chicon008.lua
+ZTZ98 (DLC) (LongHib) (Prototype),0xE9D2F907,3922917639,instance_label,named,docs/mercs2-dlc-luacd/src/dlc01/dlccon003.lua
+oc001.oc.boatrunner,0xAB0EF2D6,2869883606,instance_label,named,docs/mercs2-luacd/src/vz/oilcon001.lua
+oc001.pth.ship_patrol,0xF6C01DF3,4139785715,instance_label,named,docs/mercs2-luacd/src/vz/oilcon001.lua
+patrolBoat_2,0x9002F82E,2416113710,instance_label,named,docs/mercs2-luacd/src/vz/allcon001.lua
+patrolBoat_3,0xF205D10B,4060467467,instance_label,named,docs/mercs2-luacd/src/vz/allcon001.lua
+patrolBoat_4,0x7011D058,1880215640,instance_label,named,docs/mercs2-luacd/src/vz/allcon001.lua
+patrolBoat_west2,0xD20C4F01,3524022017,instance_label,named,docs/mercs2-luacd/src/vz/allcon001.lua
+region_killvzaheli,0x26DCCB81,652004225,instance_label,named,docs/mercs2-luacd/src/vz/vzacon001.lua
+region_vza_tankswitch,0x78744E34,2020888116,instance_label,named,docs/mercs2-luacd/src/vz/vzacon001.lua

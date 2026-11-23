@@ -37,9 +37,9 @@ modules are *game* Lua and arrive from the decompiled corpus through `import`, n
 
 * The **cfunc surface** (`REQUIRED`, per-namespace) is seeded from the live Surface-B binding trace
   `mods/lua_trace_asi/reference/binding_map.json`; the human index is
-  `docs/reverse_engineer/scripting_host_binding_code_map.md` §3. Each namespace records the `luaL_Reg`
+  [`docs/reverse_engineer/scripting_host_binding_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/scripting_host_binding_code_map.md) §3. Each namespace records the `luaL_Reg`
   table's VA in the unpacked image (e.g. `Pg` = `0x00b99328` — the trace corrected the doc's label).
-  `corpus_calls` per name = call sites counted in the decompiled game Lua (`docs/mercs2-luacd`).
+  `corpus_calls` per name = call sites counted in the decompiled game Lua ([`corpus/mercs2-luacd/src`](corpus/mercs2-luacd/src)).
   The list is **never trimmed**: a name only leaves the "stubs remaining" tally by gaining a real body.
 * There is no compat prelude: every 5.1 construct the corpus uses (`table.getn`, `unpack`,
   `getfenv`/`setfenv`, …) is native to the VM (the table on `PRELUDE` in `lib.rs`).

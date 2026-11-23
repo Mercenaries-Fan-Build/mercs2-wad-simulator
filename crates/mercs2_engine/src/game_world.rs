@@ -1906,7 +1906,7 @@ impl StreamingWorld {
     }
 
     /// Perform the layer requests queued on the registry since the last call
-    /// (`docs/reverse_engineer/layer_load_code_map.md` §2–3). A load of a layer that is already loaded
+    /// ([`docs/reverse_engineer/layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md) §2–3). A load of a layer that is already loaded
     /// or has failed does nothing. `exempt` names the entities a dynamic layer's unload must not
     /// destroy: the player-controlled entity and what is linked to it (`FUN_82437CF8`). Needs no scene:
     /// the visuals of destroyed entities and the scene's light set follow in the next
@@ -2140,7 +2140,7 @@ impl StreamingWorld {
     }
 
     /// `Pg.Spawn`'s spawn of `template` (`FUN_006746D0` → `FUN_00673070`;
-    /// `docs/reverse_engineer/hibernation_grid.md` §6 "Runtime spawns"), inside the call:
+    /// [`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §6 "Runtime spawns"), inside the call:
     /// - the key is taken first, so a spawn that fails below still consumes one;
     /// - `flags` = `net` && `net_enabled` && the template's NetCategoryInfo low nibble; the entity
     ///   registers non-static with `flags`, else with NetCategoryInfo bit 9;
@@ -3117,7 +3117,7 @@ mod prop_anim_tests {
         /// mattias 0.57 mm, chris 2.82 mm, jen 9.47 mm at bone #23 `0xF3D12F3C`), so this guards
         /// regressions rather than asserting perfection. Those residuals are retail's too: retail
         /// skins with exactly the raw `+80` (solved from its live palette —
-        /// `docs/reverse_engineer/animation_code_map.md` §2).
+        /// [`docs/reverse_engineer/animation_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/animation_code_map.md) §2).
         #[test]
         fn skin_joints_stay_together_under_animation() {
             use mercs2_formats::skeleton::transform_point;

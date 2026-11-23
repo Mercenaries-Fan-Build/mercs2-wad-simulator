@@ -40,7 +40,7 @@ then re-read the output and assert the edit is present.
 
 Provenance as recorded in the source itself:
 
-* Block/container layout and the CSUM model: `docs/modding_deep_dive.md` §4.6 / §5.2 / §5.3. Each
+* Block/container layout and the CSUM model: [`docs/modding_deep_dive.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/modding_deep_dive.md) §4.6 / §5.2 / §5.3. Each
   UCFX container ends with an 8-byte `CSUM` trailer = `"CSUM"` + CRC-32/JAMCRC
   (`mercs2_formats::crc32::crc32_mercs2`) over `[UCFX .. pre-CSUM]`. Names are matched by
   `pandemic_hash_m2`.

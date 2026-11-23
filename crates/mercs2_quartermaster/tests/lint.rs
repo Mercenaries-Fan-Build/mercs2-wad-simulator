@@ -57,16 +57,17 @@ fn errors_block_the_build_and_warnings_do_not() {
         "an unknown wearer must block"
     );
 
-    // Editing one copy of a string table shared between shell.wad and vz.wad is advisory (M0191):
-    // the fix is a deploy question, not a defect in the manifest.
+    // A source outside `src/` is advisory (M0112): it resolves inside the Shipment, it is only filed
+    // somewhere unusual.
     let warning_only = shipment_with(
         "  - kind: edit_stringdb
     target: english
-    strings: src/english.txt
+    strings: text/english.txt
 ",
     );
-    let diags = lint::lint(&warning_only, None, None);
-    assert_eq!(codes(&diags), vec!["M0191"]);
+    let root = scratch("warning_only", &[("text/english.txt", "[Menu.Play] = Play\n")]);
+    let diags = lint::lint(&warning_only, Some(&root), None);
+    assert_eq!(codes(&diags), vec!["M0112"]);
     assert_eq!(diags[0].severity, Severity::Warning);
     assert!(!lint::blocks_build(&diags), "a warning must not block");
 }
@@ -1050,16 +1051,54 @@ fn the_language_rules_are_registered() {
 }
 
 // ---------------------------------------------------------------------------
-// M0191 / M0202 — message text and registration
+// M0202 — registration
 // ---------------------------------------------------------------------------
 
-/// The M0191 message is one sentence run, not a string with the source's indentation embedded in it.
+/// A string table shell.wad and vz.wad both carry is edited in both copies, so editing it is no
+/// half-fix and nothing warns.
 #[test]
-fn the_m0191_message_has_no_runs_of_spaces() {
+fn editing_a_shared_string_table_is_quiet() {
     let m = shipment_with("  - kind: edit_stringdb\n    target: english\n    strings: src/e.txt\n");
-    let diags = lint::lint(&m, None, None);
-    let d = diags.iter().find(|d| d.rule.code == "M0191").expect("M0191 fires");
-    assert!(!d.message.contains("  "), "double space in: {:?}", d.message);
+    assert!(lint::lint(&m, None, None).is_empty());
+    assert!(!lint::RULES.iter().any(|r| r.code == "M0191"));
+}
+
+// ---------------------------------------------------------------------------
+// M0320 / M0321 / M0322 — add_menu_item
+// ---------------------------------------------------------------------------
+
+fn menu_item(menu: &str, label: &str, after: &str, action: &str) -> String {
+    format!("  - kind: add_menu_item\n    menu: {menu}\n    label: {label}\n    after: {after}\n    action: {action}\n")
+}
+
+/// An item on a catalogue page, anchored on a retail item, running `Module.Function`, is clean.
+#[test]
+fn a_menu_item_on_a_catalogue_page_is_clean() {
+    let m = shipment_with(&menu_item("shell.main", "Mods.Menu.Open", "SHELL.MainMenu.Options", "ModsMenu.Open"));
+    assert!(lint::lint(&m, None, None).is_empty());
+}
+
+#[test]
+fn a_menu_item_off_the_catalogue_or_with_a_bad_action_or_key_is_refused() {
+    let page = lint::lint(&shipment_with(&menu_item("shell.nowhere", "A.B", "SHELL.MainMenu.Options", "M.F")), None, None);
+    assert_eq!(codes(&page), vec!["M0320"]);
+    assert!(page[0].message.contains("shell.main"), "{}", page[0].message);
+    for action in ["ModsMenu", "ModsMenu.", ".Open", "Mods.Menu.Open", "Mods-Menu.Open"] {
+        let d = lint::lint(&shipment_with(&menu_item("shell.main", "A.B", "SHELL.MainMenu.Options", action)), None, None);
+        assert_eq!(codes(&d), vec!["M0321"], "{action}");
+    }
+    let empty = lint::lint(&shipment_with(&menu_item("shell.main", "\"[]\"", "SHELL.MainMenu.Options", "M.F")), None, None);
+    assert_eq!(codes(&empty), vec!["M0322"]);
+    assert!(lint::blocks_build(&empty));
+}
+
+/// One Shipment adding one label to one page twice collides with itself (M0120): a page's items are a
+/// set keyed on their labels.
+#[test]
+fn one_label_twice_on_one_page_is_a_self_conflict() {
+    let item = menu_item("shell.main", "Mods.Menu.Open", "SHELL.MainMenu.Options", "ModsMenu.Open");
+    let d = lint::lint(&shipment_with(&format!("{item}{item}")), None, None);
+    assert_eq!(codes(&d), vec!["M0120"], "{d:?}");
 }
 
 /// Every rule the hermetic `lint` can emit is registered, so a modder can look its code up.

@@ -8,11 +8,12 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use mercs2_formats::gfx_def::{Character, Control, Cxform, EditText, Matrix, MovieDef, Place, Timeline};
 
 use crate::tess::{tessellate, tessellate_morph, Part};
-use crate::text::FontLib;
+use crate::text::{FontLib, ImageSub};
 
 pub type ClipId = usize;
 
@@ -49,6 +50,8 @@ pub struct Child {
     /// A text field's own box once a script sized it (`_width`, `_height`, `autoSize`), twips
     /// `[xmin, xmax, ymin, ymax]`; else its definition's.
     pub bounds: Option<[i32; 4]>,
+    /// A text field's `setImageSubstitutions` images, in the order they went in.
+    pub image_subs: Vec<ImageSub>,
     pub node: Node,
 }
 
@@ -83,7 +86,7 @@ pub enum Item {
 
 #[derive(Clone, Debug)]
 pub struct Draw {
-    pub parts: Rc<Vec<Part>>,
+    pub parts: Arc<Vec<Part>>,
     /// Twips to stage pixels.
     pub matrix: Matrix,
     pub cxform: Cxform,
@@ -95,7 +98,7 @@ pub struct Movie {
     clips: Vec<Option<Clip>>,
     pub root: ClipId,
     pub actions: VecDeque<Action>,
-    meshes: HashMap<(u16, u16), Rc<Vec<Part>>>,
+    meshes: HashMap<(u16, u16), Arc<Vec<Part>>>,
     local_fonts: HashMap<u16, Rc<FontLib>>,
     /// What `gfxfontlib.swf` resolves to: retail's `FUN_0060e9c0` picks the language's font movie.
     pub font_lib: Option<Rc<FontLib>>,
@@ -200,6 +203,7 @@ impl Movie {
             scripted: false,
             timeline: true,
             bounds: None,
+            image_subs: Vec::new(),
             node,
         };
         self.clip_mut(parent)?.children.insert(depth, child);
@@ -434,7 +438,7 @@ impl Movie {
         self.step(self.root)
     }
 
-    fn parts(&mut self, character: u16, ratio: u16) -> Result<Rc<Vec<Part>>, String> {
+    fn parts(&mut self, character: u16, ratio: u16) -> Result<Arc<Vec<Part>>, String> {
         let key = match self.def.characters.get(&character) {
             Some(Character::Morph(_)) => (character, ratio),
             _ => (character, 0),
@@ -442,7 +446,7 @@ impl Movie {
         if let Some(parts) = self.meshes.get(&key) {
             return Ok(parts.clone());
         }
-        let parts = Rc::new(match self.def.characters.get(&character) {
+        let parts = Arc::new(match self.def.characters.get(&character) {
             Some(Character::Shape(s)) => tessellate(s).map_err(|e| format!("shape {character}: {e}"))?,
             Some(Character::Morph(m)) => tessellate_morph(m, ratio).map_err(|e| format!("morph {character}: {e}"))?,
             other => return Err(format!("character {character} has no shape: {other:?}")),
@@ -467,8 +471,9 @@ impl Movie {
             }
             Node::Clip(id) => self.draw_clip(*id, matrix, cxform, blend, out)?,
             Node::Text(text) => {
-                if let Some(part) = self.text_part(child, text)? {
-                    out.push(Item::Draw(Draw { parts: Rc::new(vec![part]), matrix, cxform, blend }));
+                let parts = self.text_parts(child, text)?;
+                if !parts.is_empty() {
+                    out.push(Item::Draw(Draw { parts: Arc::new(parts), matrix, cxform, blend }));
                 }
             }
         }
@@ -495,17 +500,17 @@ impl Movie {
         Ok(field)
     }
 
-    fn text_part(&mut self, child: &Child, text: &str) -> Result<Option<Part>, String> {
+    fn text_parts(&mut self, child: &Child, text: &str) -> Result<Vec<Part>, String> {
         let field = self.edit_text(child)?;
         let Some(font) = self.font_of(&field)? else {
             self.fontless = true;
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let shown = match &self.strings {
             Some(strings) => crate::text::translate(text, &|key| strings.get(&key).cloned()),
             None => text.to_string(),
         };
-        Ok(crate::text::layout(&field, &shown, &font))
+        Ok(crate::text::layout(&field, &shown, &font, &child.image_subs))
     }
 
     fn draw_clip(&mut self, clip: ClipId, matrix: Matrix, cxform: Cxform, blend: u8, out: &mut Vec<Item>) -> Result<(), String> {
@@ -552,6 +557,35 @@ impl Movie {
     pub fn draw(&mut self) -> Result<Vec<Item>, String> {
         let mut out = Vec::new();
         self.draw_clip(self.root, STAGE, Cxform::IDENTITY, 0, &mut out)?;
+        Ok(out)
+    }
+
+    /// `clip` alone, where it stands on stage: its parents' transforms, colour and blend reach it, and
+    /// nothing else draws, the masks over it included. Nothing at all when it or a parent is hidden.
+    pub fn draw_only(&mut self, clip: ClipId) -> Result<Vec<Item>, String> {
+        let mut chain = Vec::new();
+        let mut at = clip;
+        while let Some(slot) = self.child_of(at)? {
+            chain.push(slot);
+            at = slot.0;
+        }
+        chain.reverse();
+        let Some((&(parent, depth), above)) = chain.split_last() else { return self.draw() };
+        let (mut matrix, mut cxform, mut blend) = (STAGE, Cxform::IDENTITY, 0u8);
+        for &(p, d) in above {
+            let c = &self.clip(p)?.children[&d];
+            if !c.visible {
+                return Ok(Vec::new());
+            }
+            matrix = matrix.then(&c.matrix);
+            cxform = cxform.then(&c.cxform);
+            if c.blend > 2 {
+                blend = c.blend;
+            }
+        }
+        let child = self.clip(parent)?.children[&depth].clone();
+        let mut out = Vec::new();
+        self.draw_child(&child, matrix, cxform, blend, &mut out)?;
         Ok(out)
     }
 }
