@@ -17,7 +17,7 @@
 //!                                         pandemic_hash_m2(stem + "_3.sho"), or "_3l.sho" with --low
 //!
 //! The splice is the CTAB-driven operand redirect documented in
-//! `docs/reverse_engineer/density_render_instancing_design.md` §2.1: it moves the
+//! [`docs/reverse_engineer/density_render_instancing_design.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/density_render_instancing_design.md) §2.1: it moves the
 //! per-object World matrix off constant registers onto four per-instance vertex
 //! inputs, leaving the shared ViewProj (`viewContextData`) and all math untouched.
 
