@@ -8,7 +8,7 @@ Used by: the `gfx` module's Scaleform GFx authoring layers (SWF tag writers, the
 the AS2 compiler, the movie builder, the verifier, the AVM1 interpreter) and the frozen test
 fixtures under tests/fixtures/gfxforge/. Where the upstream behaviour disagrees with the retail
 Mercenaries 2 movies, the retail bytes are followed and the difference is recorded in
-docs/data/gfxforge_port_ledger.json of the notes repository.
+docs/data/gfxforge_port_ledger.json of this repository.
 
 gfxforge-web:
 
