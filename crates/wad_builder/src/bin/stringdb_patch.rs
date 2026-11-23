@@ -16,7 +16,7 @@
 //! `shell.wad` and `vz.wad` SHARE the single `<level>.wad` slot — shell serves the front end, vz
 //! serves gameplay — and both ship a byte-identical `English` stringdb. So patching only one of
 //! them fixes only half the game. `English-patch.wad` mounts last in *every* session, so in
-//! principle one file overrides both. See `docs/fixpack/wad_duplicate_inventory.md`.
+//! principle one file overrides both. See [`docs/fixpack/wad_duplicate_inventory.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/wad_duplicate_inventory.md).
 //!
 //! # Safety
 //!
