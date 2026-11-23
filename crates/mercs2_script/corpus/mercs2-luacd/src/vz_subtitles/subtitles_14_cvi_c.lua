@@ -1,0 +1,42 @@
+Type = "Time"
+SubtitleData = {
+  {
+    0.76,
+    "[Peng-Briefing-Cinematic-ChinaVictory-02]"
+  },
+  {
+    3.91,
+    "[Chris-Briefing-Cinematic-ChinaVictory-05]"
+  },
+  {
+    6.52,
+    "[Peng-Briefing-Cinematic-ChinaVictory-06]",
+    6.95
+  },
+  {
+    22.18,
+    "[Peng-Briefing-Cinematic-ChinaVictory-07]"
+  },
+  {
+    23.4,
+    "[Chris-Briefing-Cinematic-ChinaVictory-10]"
+  },
+  {
+    24.21,
+    "[Fiona-Briefing-Cinematic-ChinaVictory-14]"
+  },
+  {
+    28.39,
+    "[Solano-Briefing-Cinematic-ChinaVictory-15]",
+    6.29
+  },
+  {
+    35.23,
+    "[Peng-Briefing-Cinematic-ChinaVictory-16]",
+    8.35
+  },
+  {
+    44.82,
+    "[Chris-Briefing-Cinematic-ChinaVictory-19]"
+  }
+}
