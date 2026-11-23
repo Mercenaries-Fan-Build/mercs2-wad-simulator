@@ -8,7 +8,7 @@ exclude = ["crates/mercs2_mod_runtime"]
 # `repository.workspace = true`). Single source of truth — do not re-declare these per crate.
 [workspace.package]
 license = "MIT"
-repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game"
+repository = "https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator"
 
 # Internal crate versions for publishing. Each publishable member references its intra-workspace
 # deps as `<name> = { workspace = true }`; the version here is what crates.io resolves against.
