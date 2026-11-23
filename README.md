@@ -325,7 +325,7 @@ and v1.1 22,124, PS3 v1.00 and v1.03 every one of 28,289, the Xbox 360 preview F
 image about 2,790–2,800 (nearly all also confirmed through another image), PC and PS3 1,974
 (1,700–1,706 directly, the rest through an Xbox 360 image), and Xbox 360 and PS3 about 1,990. The
 Xbox 360 images are analysed with the Xenon language (see the notes repository's
-`docs/xbox360_ghidra_xenon.md`).
+[`docs/xbox360_ghidra_xenon.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/xbox360_ghidra_xenon.md)).
 
 `exemap annotate <image_id> --functions <jsonl> --exports <dir> --matches <dir> --out <jsonl>`
 writes one JSON line per function of an image's Ghidra functions export
@@ -344,7 +344,7 @@ the declared one, with a repeated address, of another image or of bytes other th
 listing each.
 
 The PC images' SecuROM layout is mapped by Ghidra scripts in the notes repository (see its
-`docs/securom_splice_map.md`): `<id>.splices.tsv` lists every `.text` transfer into the SecuROM
+[`docs/securom_splice_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/securom_splice_map.md)): `<id>.splices.tsv` lists every `.text` transfer into the SecuROM
 blocks and how the code it reaches ends, and `<id>.securom_reach.tsv` labels every function that
 starts in a SecuROM block by how `.text` reaches it.
 
@@ -424,7 +424,7 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `ps3_eu_disc_dir` | the PS3 European disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Europe) (En,Fr,De,Es,It,Ru) [BLES00323]`) | the `mercs2_exemap` Lua corpus test |
 | `rainbow_table` | the hash rainbow table, `rainbow_table.json` (in the parent `mercenaries-game/tools/`) | `mercs2_workshop --pack-data` (raw-names path), the engine diag commands, the name-mining `wad_simulator` bins and `mercs2_probe` probes |
 | `jul08_strings` | the Jul-08 Xbox 360 devkit strings dump, `mercs2_xenon_p.pe_full_strings.txt` | `mercs2_workshop --pack-data` (raw-names path) |
-| `notes_docs_dir` | the notes repo's `docs/` folder (`data/`, `mercs2-ecs/`, `mercs2-luacd/`, `mercs2-dlc-luacd/`) | `mercs2_workshop --pack-data` |
+| `bone_name_candidates` | `bone_name_candidates.txt`, a generated list of candidate bone names | `mercs2_workshop --pack-data` (raw-names path) |
 | `unluac_jar` | the unluac jar | tests and dev tools that convert console Lua bytecode |
 | `java_binary` | the `java` executable that runs unluac | tests and dev tools that convert console Lua bytecode |
 | `unrar_binary` | `UnRAR.exe` | tests of the RAR'd Xbox 360 DLC path |
