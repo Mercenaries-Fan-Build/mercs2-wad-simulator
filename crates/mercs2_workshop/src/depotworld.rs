@@ -899,15 +899,20 @@ fn settle<T: Clone + PartialEq + Send + Sync + 'static>(
     None
 }
 
-/// The narrowest row three X/Y/Z cells of a world coordinate (`-3900.000`) fit across
-/// (`vec3_rows_fit_the_column`).
-const VEC3_ROW: f32 = 262.0;
+/// The farthest world coordinate as a cell shows it.
+const FARTHEST: &str = "-3900.000";
 
-/// A caption, then X, Y and Z: across one row where the column is [`VEC3_ROW`] wide, else one row
+/// The narrowest row three X/Y/Z cells of [`FARTHEST`] fit across, in the faces `ui` draws with
+/// (`vec3_rows_fit_the_column`).
+fn vec3_row(ui: &egui::Ui) -> f32 {
+    theme::vec3_cells_width(ui, FARTHEST)
+}
+
+/// A caption, then X, Y and Z: across one row where the column is [`vec3_row`] wide, else one row
 /// per axis. Returns whether a value changed.
 fn vec3_rows(ui: &mut egui::Ui, caption: &str, v: &mut [f32; 3], speed: f32) -> bool {
     theme::field_label(ui, caption);
-    if ui.available_width() >= VEC3_ROW {
+    if ui.available_width() >= vec3_row(ui) {
         return theme::vec3_field(ui, "", v, speed);
     }
     let mut changed = false;
@@ -1582,9 +1587,13 @@ mod tests {
             single: false,
             records: vec![EntityRecord { key: 0x7E00_0001, model: "global_barrela".into(), pos: [-3095.0, 105.746, -2610.0], quat: None, yaw: Some(45.0), name: None }],
         };
+        let unset = WorldDoc { edits: vec![EntityEdit { entity: "0x000B4E38".into(), pos: None, quat: None, model: None }] };
         let parts: Vec<FormPart<'_>> = vec![
             ("edit form", Box::new(|ui: &mut egui::Ui| {
                 edit_form(ui, (Path::new("/w.yaml"), 0), &d, None, &s);
+            })),
+            ("edit form, nothing set", Box::new(|ui: &mut egui::Ui| {
+                edit_form(ui, (Path::new("/w.yaml"), 0), &unset, None, &s);
             })),
             ("record form", Box::new(|ui: &mut egui::Ui| {
                 let ctx = KeyCtx { stack: None };
@@ -1598,16 +1607,18 @@ mod tests {
         }
     }
 
-    /// [`VEC3_ROW`] holds three cells of the farthest world coordinate, and a narrower column takes
+    /// [`vec3_row`] holds three cells of the farthest world coordinate, and a narrower column takes
     /// one row per axis.
     #[test]
     fn vec3_rows_fit_the_column() {
+        let mut row = 0.0;
+        drawn_width(1200.0, |ui| row = vec3_row(ui));
         let mut far = [-3900.0f32, -103.0, -3900.0];
-        let across = drawn_width(VEC3_ROW, |ui| {
+        let across = drawn_width(row, |ui| {
             theme::vec3_field(ui, "", &mut far, 0.05);
         });
-        assert!(across <= VEC3_ROW, "{across}");
-        for w in [200.0, VEC3_ROW - 1.0] {
+        assert!(across <= row, "{across} > {row}");
+        for w in [200.0, row - 1.0] {
             let x = drawn_width(w, |ui| {
                 vec3_rows(ui, "Position", &mut far, 0.05);
             });

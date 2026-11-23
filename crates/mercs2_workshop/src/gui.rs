@@ -1194,6 +1194,33 @@ pub mod theme {
         (avail * 0.5).max(60.0)
     }
 
+    /// A small button on its own row, starting at the value column where it fits there; a button
+    /// wider than the value column starts as far right as its measured width allows.
+    pub fn value_column_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+        let lw = field_label_w(ui.available_width());
+        ui.horizontal(|ui| {
+            let w = ui.painter().layout_no_wrap(text.to_string(), egui::TextStyle::Button.resolve(ui.style()), TX).size().x
+                + 2.0 * ui.spacing().button_padding.x;
+            ui.add_space((lw + 4.0).min(ui.available_width() - w).max(0.0));
+            ui.small_button(text)
+        })
+        .inner
+    }
+
+    /// The narrowest row a captionless [`vec3_field`] draws three cells showing `widest` across
+    /// without a cell overrunning: per cell the value's text in the drag-value face, the button
+    /// padding either side and `scrub_cell`'s 9 + 4 px inset; then the 12 px `vec3_field` keeps
+    /// for the gaps.
+    pub fn vec3_cells_width(ui: &egui::Ui, widest: &str) -> f32 {
+        let text = ui
+            .painter()
+            .layout_no_wrap(widest.to_string(), ui.style().drag_value_text_style.resolve(ui.style()), TX)
+            .size()
+            .x;
+        let value = (text + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x);
+        3.0 * (value + 13.0) + 12.0
+    }
+
     /// A left-aligned caption cell of the shared width; truncates long text (full text on hover).
     pub fn field_label(ui: &mut egui::Ui, label: &str) {
         let lw = field_label_w(ui.available_width());
