@@ -1,6 +1,6 @@
 //! `mercs2_destruction` — entity destruction: the health→state-machine→node-enable pipeline.
 //!
-//! **Code map:** [`docs/reverse_engineer/state_machine_destruction_code_map.md`], with the
+//! **Code map:** [`docs/reverse_engineer/state_machine_destruction_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/state_machine_destruction_code_map.md), with the
 //! vehicle-side reading in [`docs/modernization/vehicle_model_spec.md`] §5.
 //!
 //! # What retail does
