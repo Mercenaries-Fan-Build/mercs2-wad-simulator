@@ -20,7 +20,7 @@ use crate::index::AssetIndex;
 use glam::{Mat4, Quat, Vec3, Vec4};
 use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
 use mercs2_engine::render_state::RenderState;
-use mercs2_engine::scene::Scene;
+use mercs2_engine::scene::{Scene, WorldScope};
 use mercs2_engine::wad;
 use mercs2_engine::worldutil::{PlacedCatalog, TemplateRecords};
 use mercs2_formats::mixr::Mixr;
@@ -97,6 +97,11 @@ pub struct Templates {
 }
 
 impl Templates {
+    /// The `TerrainFade` a terrain tile of template `parent` draws with (none: the default).
+    pub fn terrain_fade(&self, parent: u32) -> mercs2_formats::terrainmesh::TerrainFade {
+        self.world.terrain_fade.get(&parent).copied().unwrap_or_default()
+    }
+
     pub fn read(w: &mut WadStack) -> Result<Templates, String> {
         let we = WorldEntity::parse(&w.worldentity()?)?;
         let world = TemplateRecords::from_worldentity(&we)?;
@@ -339,7 +344,7 @@ impl LayerView {
                 *n += 1;
             }
             if let Some(tm) = o.terrain_mesh {
-                pending.push(Job::Terrain(tm, o.pos, t.world.terrain_fade.get(&o.parent).copied().unwrap_or_default()));
+                pending.push(Job::Terrain(tm, o.pos, t.terrain_fade(o.parent)));
             }
             if let Some(scrub) = o.scrub {
                 pending.push(Job::Scrub(k, scrub, o.pos));
@@ -426,7 +431,7 @@ impl LayerView {
     }
 
     /// Load what fits in this frame and spawn what became ready.
-    pub fn step(&mut self, w: &mut WadStack, scene: &mut Scene, world: &mut World, t: &Templates, index: &AssetIndex) {
+    pub fn step(&mut self, w: &mut WadStack, scene: &mut Scene, (world, scope): (&mut World, WorldScope), t: &Templates, index: &AssetIndex) {
         if self.pending.is_empty() {
             return;
         }
@@ -434,15 +439,15 @@ impl LayerView {
         while start.elapsed() < STEP_BUDGET {
             let Some(job) = self.pending.pop_front() else { break };
             match job {
-                Job::Model(m) => self.load_model(m, w, scene),
-                Job::Terrain(tm, pos, fade) => self.spawn_terrain(tm, pos, fade, w, scene, world),
-                Job::Scrub(key, hash, pos) => self.place_scrub(key, hash, pos, w, scene),
+                Job::Model(m) => self.load_model(m, w, (scene, scope)),
+                Job::Terrain(tm, pos, fade) => self.spawn_terrain(tm, pos, fade, w, (scene, scope), world),
+                Job::Scrub(key, hash, pos) => self.place_scrub(key, hash, pos, w, (scene, scope)),
             }
         }
-        self.spawn_ready(scene, world, t, index);
+        self.spawn_ready(scene, (world, scope), t, index);
     }
 
-    fn load_model(&mut self, m: u32, w: &mut WadStack, scene: &mut Scene) {
+    fn load_model(&mut self, m: u32, w: &mut WadStack, (scene, scope): (&mut Scene, WorldScope)) {
         let shipped = w.wads.iter().any(|x| wad::aset_types(x, m).iter().any(|(ty, _, _)| *ty == wad::MODEL_ASET_TYPE_ID));
         if !shipped {
             self.missing.insert(m);
@@ -460,8 +465,8 @@ impl LayerView {
                 return;
             }
         };
-        if !scene.has_model(m) {
-            scene.load_model(m, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
+        if !scene.has_model(scope, m) {
+            scene.load_model(scope, m, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
             self.owned.push(m);
         }
         let (lo, hi) = match &md.header {
@@ -486,45 +491,45 @@ impl LayerView {
         pos: [f32; 3],
         fade: mercs2_formats::terrainmesh::TerrainFade,
         w: &mut WadStack,
-        scene: &mut Scene,
+        (scene, scope): (&mut Scene, WorldScope),
         world: &mut World,
     ) {
         let mut failed = Vec::new();
         let m = w.wads.iter_mut().rev().find_map(|x| {
-            mercs2_engine::game_world::load_terrainmesh_tile(x, tm, pos, fade, &|h| scene.has_terrain_view(h)).map_err(|e| failed.push(e)).ok()
+            mercs2_engine::game_world::load_terrainmesh_tile(x, tm, pos, fade, &|h| scene.has_terrain_view(scope, h)).map_err(|e| failed.push(e)).ok()
         });
         let Some(m) = m else {
             self.errors.push(failed.join("; "));
             return;
         };
         let radius = m.verts.iter().map(|v| (Vec3::from(v.pos) - Vec3::from(pos)).length()).fold(1.0, f32::max);
-        if !scene.has_model(m.hash) {
-            scene.load_terrain_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+        if !scene.has_model(scope, m.hash) {
+            scene.load_terrain_model(scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             self.owned.push(m.hash);
         }
-        let mats = scene.model_rest_palette(m.hash);
+        let mats = scene.model_rest_palette(scope, m.hash);
         self.spawned.push(world.spawn((Transform::IDENTITY, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats })));
         if let Some(e) = self.entities.iter_mut().find(|e| e.terrain == Some(tm) && e.bounds.is_none()) {
             e.bounds = Some((Vec3::from(pos), radius));
         }
     }
 
-    fn place_scrub(&mut self, key: u32, hash: u32, pos: [f32; 3], w: &mut WadStack, scene: &mut Scene) {
-        if !scene.has_scrub(hash) {
+    fn place_scrub(&mut self, key: u32, hash: u32, pos: [f32; 3], w: &mut WadStack, (scene, scope): (&mut Scene, WorldScope)) {
+        if !scene.has_scrub(scope, hash) {
             let shipped = w.wads.iter_mut().rev().find(|x| wad::has_scrub(x, hash));
             let Some(x) = shipped else {
                 self.missing.insert(hash);
                 return;
             };
-            match mercs2_engine::game_world::load_scrub(x, hash, &|h| scene.has_terrain_view(h)) {
-                Ok((geometry, textures)) => scene.load_scrub(hash, geometry, &textures),
+            match mercs2_engine::game_world::load_scrub(x, hash, &|h| scene.has_terrain_view(scope, h)) {
+                Ok((geometry, textures)) => scene.load_scrub(scope, hash, geometry, &textures),
                 Err(e) => {
                     self.errors.push(e);
                     return;
                 }
             }
         }
-        scene.place_scrub(key, hash, pos);
+        scene.place_scrub(scope, key, hash, pos);
         self.scrubs.push(key);
     }
 
@@ -555,7 +560,7 @@ impl LayerView {
     }
 
     /// Spawn every part whose model and parent are ready.
-    fn spawn_ready(&mut self, scene: &mut Scene, world: &mut World, t: &Templates, index: &AssetIndex) {
+    fn spawn_ready(&mut self, scene: &mut Scene, (world, scope): (&mut World, WorldScope), t: &Templates, index: &AssetIndex) {
         for ei in 0..self.entities.len() {
             let root = match self.entity_world(ei, 0) {
                 None => continue,
@@ -604,8 +609,8 @@ impl LayerView {
                 };
                 let (scale, rotation, translation) = at.to_scale_rotation_translation();
                 let tf = Transform { translation, rotation, scale };
-                let e = world.spawn((tf, ModelRef { model }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(model) }));
-                scene.set_entity_render_state(e, rs);
+                let e = world.spawn((tf, ModelRef { model }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(scope, model) }));
+                scene.set_entity_render_state(scope, e, rs);
                 self.spawned.push(e);
                 self.entities[ei].parts[pi].spawned = true;
                 changed = true;
@@ -716,18 +721,19 @@ impl LayerView {
         self.entities[ei].bounds = Some(((lo + hi) * 0.5, (hi - lo).length() * 0.5 / 3f32.sqrt()));
     }
 
-    /// Everything the view put in the scene comes out, but for `keep`, a model something else draws.
-    pub fn teardown(self, scene: &mut Scene, world: &mut World, keep: &[u32]) {
+    /// Everything the view put in the scene comes out, but for `keep`, a model something else in the
+    /// same world draws.
+    pub fn teardown(self, scene: &mut Scene, (world, scope): (&mut World, WorldScope), keep: &[u32]) {
         for e in self.spawned {
             world.despawn(e).ok();
-            scene.forget_entity(e);
+            scene.forget_entity(scope, e);
         }
         for key in self.scrubs {
-            scene.remove_scrub(key);
+            scene.remove_scrub(scope, key);
         }
         for m in self.owned {
             if !keep.contains(&m) {
-                scene.unload_model(m);
+                scene.unload_model(scope, m);
             }
         }
     }
@@ -740,7 +746,7 @@ pub fn view_proj(eye: Vec3, target: Vec3, aspect: f32) -> Mat4 {
 }
 
 /// `p` on a screen `size` points big, with its clip depth; `None` behind the camera.
-fn project(vp: Mat4, p: Vec3, size: egui::Vec2) -> Option<(egui::Pos2, f32)> {
+pub(crate) fn project(vp: Mat4, p: Vec3, size: egui::Vec2) -> Option<(egui::Pos2, f32)> {
     let c: Vec4 = vp * p.extend(1.0);
     (c.w > NEAR).then(|| {
         let (x, y) = (c.x / c.w, c.y / c.w);
