@@ -17,7 +17,7 @@
 //! `--tsv`: also written as a table). `groups` is display only: each named texture's first four `_`
 //! tokens (`vz_veh_helicopter_mi26`), counted. The citations themselves are the evidence.
 //!
-//! Names come from `docs/data/aset_names.csv` under the `notes_docs_dir` of `.mercs2-local.toml`.
+//! Names come from this repository's `docs/data/aset_names.csv`.
 //!
 //! Exit 0 = every block and every model MTRL was read; 1 = something could not be read (listed);
 //! 2 = usage or setup.
@@ -62,7 +62,7 @@ fn main() {
     }
 
     // hash -> name, from the ASET export, to label what the scan finds.
-    let name_of = dev_aset_names(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| setup_fail(e));
+    let name_of = dev_aset_names().unwrap_or_else(|e| setup_fail(e));
     let label = |h: u32| name_of.get(&h).cloned().unwrap_or_else(|| "(unnamed)".into());
 
     let wadpath = wad::resolve_vz_wad(wad_arg.as_deref())
