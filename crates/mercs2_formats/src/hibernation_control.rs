@@ -2,7 +2,7 @@
 //! `schm`, from a placed block's COMP or a worldentity template.
 //!
 //! Retail registers every placed entity in the hibernation grid with its own record, else its
-//! template's (`Transform.Parent`), else the defaults (`docs/reverse_engineer/hibernation_grid.md`
+//! template's (`Transform.Parent`), else the defaults ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md)
 //! §2, §7).
 
 use std::collections::{BTreeMap, HashMap};
