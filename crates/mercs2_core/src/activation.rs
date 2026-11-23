@@ -1,6 +1,6 @@
 //! Entity activation — retail's `FUN_004F8DA0` (begin, then complete now or later) and the pending
 //! queue its deferred path fills, pumped once a frame by the second half of `FUN_004F8460`
-//! (`0x4F85FC..0x4F8D92`; `docs/reverse_engineer/hibernation_grid.md` §6).
+//! (`0x4F85FC..0x4F8D92`; [`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §6).
 //!
 //! The queue is pure bookkeeping; the host supplies the entity side through [`ActivationHost`]:
 //! begin (state 0 → 1, asset requests), the readiness poll `CanActivate` (`FUN_004F7710`), complete
