@@ -1,0 +1,35 @@
+Type = "Time"
+SubtitleData = {
+  {
+    1.67,
+    "[Carmona-Briefing-Cinematic-Carmona-01]"
+  },
+  {
+    5.47,
+    "[Ewan-Briefing-Cinematic-Carmona-02]"
+  },
+  {
+    9.41,
+    "[Jennifer-Briefing-Cinematic-Carmona-04]"
+  },
+  {
+    9.86,
+    "[Ewan-Briefing-Cinematic-Carmona-06]"
+  },
+  {
+    11.4,
+    "[Ewan-Briefing-Cinematic-Carmona-08]"
+  },
+  {
+    12.89,
+    "[Fiona-Briefing-Cinematic-Carmona-12]"
+  },
+  {
+    17.02,
+    "[Jennifer-Briefing-Cinematic-Carmona-15]"
+  },
+  {
+    20.81,
+    "[Misha-Briefing-Cinematic-Carmona-21]"
+  }
+}
