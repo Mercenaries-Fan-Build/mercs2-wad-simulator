@@ -2,7 +2,7 @@
 
 Non-blocking improvements intentionally left for a later system. Each is tagged `[faithful-blocker: no]`
 — omitting it does **not** make the current behaviour less faithful to the exe oracle
-(`docs/reverse_engineer/audio_code_map.md`); it is scope/quality, not correctness. Things the exe does
+([`docs/reverse_engineer/audio_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/audio_code_map.md)); it is scope/quality, not correctness. Things the exe does
 that we do not yet (parity gaps) belong in the code map's confirm-live list (see §10) and are marked
 `// CONFIRM-LIVE:` in-source, **not** here.
 
