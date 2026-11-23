@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # 6.0.4: `mod_runtime::namespace_add_refused` (lua_host.rs) arrived in it.
-mercs2_formats = "7.0.0"
+mercs2_formats = "7.1.0"
 # The Lua debugger names engine bindings from the game's own luaL_Reg registry (`luareg`) and labels the
 # running build from the catalogue.
 mercs2_exemap = "1.1.3"
@@ -40,7 +40,7 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 cc = "1.2"
 # The C header of the load ladder the DLL matches against (`load_ladder::c_header`).
-mercs2_formats = "7.0.0"
+mercs2_formats = "7.1.0"
 
 [profile.release]
 panic = "abort"
