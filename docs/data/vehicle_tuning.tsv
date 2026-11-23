@@ -1,0 +1,215 @@
+class	model	model_hash	templates	shortest_template	Mass	MaxSpeed	ReverseMaxSpeed	MaxSpeedReverse	EngineTorque	EngineReverseTorque	MaxFwdSpeed	FwdSpeedAcc	MaxRightSpeed	RightSpeedAcc	MaxElevationSpeed	MaxYawSpeed
+_CarPhysicsV2			1	Trailer	1000	80	15		0							
+_CarPhysicsV2			1	Pony (base)	1634	150	50		250							
+_CarPhysicsV2			1	Valiant (base)	2000	105	70		295							
+_CarPhysicsV2			1	W series	2000	110	55		300							
+_CarPhysicsV2			1	MTV (base)	26000	95	50		1600							
+_CarPhysicsV2			1	Ofroad Motorcycle	300	110	9		65							
+_CarPhysicsV2			1	Motorcycle	300	120	30		40							
+_CarPhysicsV2			2	HMMWV (base)	3400	100	50		350							
+_CarPhysicsV2		0x20197359	1	Opentop Trailer	5500	80	15		0							
+_CarPhysicsV2		0x225EE70A	5	Police Cruiser	1000	105	50		125							
+_CarPhysicsV2		0x3CAC72AB	6	RTR (crappy)	3000	115	65		225							
+_CarPhysicsV2		0x95F4BA55	3	Valiant (4door)	2000	95	70		275							
+_CarPhysicsV2		0x9C3D4104	3	RTR (racing)	2100	130	85		450							
+_CarPhysicsV2	al_veh_apc_lav3_25mm	0x7A9E926A	3	LAVIII (25mm)	20000	85	69		1000							
+_CarPhysicsV2	al_veh_apc_lav3_ad	0x13709C60	3	LAVIII (AD)	20000	85	69		1000							
+_CarPhysicsV2	al_veh_apc_lav3_at	0x3397DE30	3	LAVIII (AT)	20000	85	69		1000							
+_CarPhysicsV2	al_veh_apc_lav3_icv	0x36550AFF	5	LAV III (Base)	20000	85	69		1000							
+_CarPhysicsV2	al_veh_apc_lav3_mewss	0x6DB6CF96	3	LAVIII (MEWSS)	20000	85	69		1000							
+_CarPhysicsV2	al_veh_apc_lav3_mgs	0x0307555E	3	LAVIII (MGS)	20000	85	69		1000							
+_CarPhysicsV2	al_veh_truck_hmmwv_armored	0x0065B09D	9	HMMWV (Armored) (GL)	3400	100	50		350							
+_CarPhysicsV2	al_veh_truck_hmmwv_armored	0x0065B09D	4	HMMWV (Armored) (TOW)	3900	90	50		350							
+_CarPhysicsV2	al_veh_truck_hmmwv_avenger	0xAC990539	4	HMMWV (Avenger)	3400	100	50		320							
+_CarPhysicsV2	al_veh_truck_hmmwv_softtop	0xEC0DAFF2	3	HMMWV (Softtop)	3400	100	50		350							
+_CarPhysicsV2	al_veh_truck_mtv_cargo_50cal	0xA2EB8265	3	MTV (Cargo)	26000	95	50		1600							
+_CarPhysicsV2	al_veh_truck_mtv_exp	0x1282963C	3	MTV (Expandible Van)	27000	95	50		1600							
+_CarPhysicsV2	al_veh_truck_mtv_semi	0x228FE801	2	MTV (semi)	26000	95	50		1600							
+_CarPhysicsV2	al_veh_truck_mtv_tanker	0xA6EE41C6	3	MTV (Fuel)	27000	95	50		1600							
+_CarPhysicsV2	ch_veh_apc_wz551	0xA35416A8	3	WZ551	16000	90	35		800							
+_CarPhysicsV2	ch_veh_truck_nglv_armored_50cal	0xBDED558F	9	NGLV	1800	95	60		160							
+_CarPhysicsV2	ch_veh_truck_sx2150_cargo	0x6BDD88C3	3	SX2150 (Cargo)	26000	90	50		1800							
+_CarPhysicsV2	ch_veh_truck_sx2150_mlrs	0x1A221527	3	SX2150 (MLRS)	28500	90	50		1800							
+_CarPhysicsV2	ch_veh_truck_sx2150_semi	0x32150ACF	3	SX2150 (Semi)	26000	90	50		1800							
+_CarPhysicsV2	ch_veh_truck_sx2150_tanker	0xEEC143F4	3	SX2150 (Fuel)	27000	90	50		1800							
+_CarPhysicsV2	civ_veh_bus_escort	0xE31521AD	3	Escort	11000	100	30		550							
+_CarPhysicsV2	civ_veh_car_crx_racing	0xFCAE37AB	3	CRX (racing)	1700	110	65		225							
+_CarPhysicsV2	civ_veh_car_l300_normal	0xA4937D58	3	L300 (base)	2000	115	55		255							
+_CarPhysicsV2	civ_veh_car_l300_normal	0xA4937D58	9	L300	2000	115	70		255							
+_CarPhysicsV2	civ_veh_car_l300_racing	0x9302194B	5	L300 (Racing)	1700	125	75		300							
+_CarPhysicsV2	civ_veh_car_phoenix_crappy	0x8C83F560	3	Phoenix (crappy)	2000	100	75		300							
+_CarPhysicsV2	civ_veh_car_phoenix_racing	0x9F5A4DB7	3	Phoenix (racing)	2500	130	85		450							
+_CarPhysicsV2	civ_veh_car_pony_crappy	0xDA219845	4	Pony (crappy)	1250	85	50		100							
+_CarPhysicsV2	civ_veh_car_pony_normal	0xCBABA641	11	Pony (normal)	1050	85	50		90							
+_CarPhysicsV2	civ_veh_car_r90	0xCAAF4D42	10	R90	2800	115	65		400							
+_CarPhysicsV2	civ_veh_car_r90_limo	0x0F9B9B04	1	R90 Limo	2800	115	65		400							
+_CarPhysicsV2	civ_veh_car_r90_taxi	0xBBDC51DD	3	R90 Taxi	2800	115	65		400							
+_CarPhysicsV2	civ_veh_car_taxi_shuttle	0xB32053A7	3	Van (Taxi)	2900	100	70		250							
+_CarPhysicsV2	civ_veh_car_taxi_tercel	0xBD552CD3	3	Taxi (Tercel)	1000	90	60		100							
+_CarPhysicsV2	civ_veh_car_valiant_crappy	0x73E8C0A4	4	Valiant (crappy)	2300	95	65		190							
+_CarPhysicsV2	civ_veh_car_van_commercial	0xE9E253D5	6	Van (Commercial)	2900	100	70		200							
+_CarPhysicsV2	civ_veh_car_van_crappy	0x4AEE11CE	4	Van (Crappy)	3250	90	70		150							
+_CarPhysicsV2	civ_veh_car_van_racing	0x70DACFC5	3	Van (Racing)	2750	115	76		325							
+_CarPhysicsV2	civ_veh_car_veyron	0xB4FE2B80	4	Veyron	1800	143	85		500							
+_CarPhysicsV2	civ_veh_car_w12_normal	0xF3809C05	13	W12 (normal)	2300	115	65		265							
+_CarPhysicsV2	civ_veh_car_w12_sprint	0x46C5012C	4	W12 (sprint)	2800	120	70		400							
+_CarPhysicsV2	civ_veh_car_w12_z12	0xF2BEF3FF	4	W12 (Z12)	2100	130	80		400							
+_CarPhysicsV2	civ_veh_car_w8_normal	0x9C318A56	4	W8 (normal)	2400	110	60		245							
+_CarPhysicsV2	civ_veh_motorcycle_chopper	0xF762CFC3	3	Chopper	300	110	10		50							
+_CarPhysicsV2	civ_veh_motorcycle_scooter	0x18674F1F	7	Scooter	200	90	30		50							
+_CarPhysicsV2	civ_veh_motorcycle_sportbike	0xCAC9D01F	12	Sportbike (Civ)	300	135	10		150							
+_CarPhysicsV2	civ_veh_semi_austin	0x926D9ECB	4	Austin (CIV)	27000	90	50		1600							
+_CarPhysicsV2	civ_veh_semi_mark	0x155C8246	4	Mark (Civ)	27000	90	50		1500							
+_CarPhysicsV2	civ_veh_towed_fuel	0x7A5DCB7C	2	Civ Fueltrailer	5500	80	15		0							
+_CarPhysicsV2	civ_veh_trailer_box	0x7E013B43	1	Box Trailer	4000	80	15		0							
+_CarPhysicsV2	civ_veh_trailer_flatbed	0x4A6BC856	1	Flatbed Trailer	4000	80	15		0							
+_CarPhysicsV2	civ_veh_truck_ambulance	0x179A7702	4	Ambulance	3500	110	50		410							
+_CarPhysicsV2	civ_veh_truck_bank	0x63E4703A	3	Armored Bank Truck	7000	95	50		500							
+_CarPhysicsV2	civ_veh_truck_garbage	0x2B97DD31	4	Garbage Truck	23000	90	50		1200							
+_CarPhysicsV2	civ_veh_truck_impact	0x5B172306	5	Impact	3600	105	55		350							
+_CarPhysicsV2	civ_veh_truck_impact_sut	0x7D0B00CB	4	Impact (sut)	3200	110	55		350							
+_CarPhysicsV2	civ_veh_truck_ridgeline	0xB37E7DB3	4	Ridgeline	3200	110	50		210							
+_CarPhysicsV2	civ_veh_truck_thunder	0x1623BB16	16	Thunder	2100	105	60		265							
+_CarPhysicsV2	civ_veh_truck_transport	0x02195587	3	Transport Truck	3500	100	50		200							
+_CarPhysicsV2	global_veh_68valiant	0x80659E62	7	Valiant	2000	105	70		295							
+_CarPhysicsV2	global_veh_fordf150	0x720F3948	4	El Grande	3000	95	65		240							
+_CarPhysicsV2	global_veh_hondacrx	0x9F2D315C	5	CRX	1000	90	65		100							
+_CarPhysicsV2	global_veh_klr650	0x51F277BD	2	Offroad Motorcycle (AL)	300	110	9		65							
+_CarPhysicsV2	global_veh_klr650	0x51F277BD	1	MotorcycleOld	300	90	30		50							
+_CarPhysicsV2	global_veh_phoenix	0x4A579010	4	Phoenix	2500	120	65		350							
+_CarPhysicsV2	global_veh_rtr	0x9B994D39	12	RTR	2800	120	75		375							
+_CarPhysicsV2	global_veh_scorpiondpv	0x2255CE3E	3	Buggy	1250	115	50		200							
+_CarPhysicsV2	global_veh_van	0xD64E8456	4	Van (Green)	2900	100	70		200							
+_CarPhysicsV2	gr_veh_motorcycle_offroad	0x4A41B9BA	2	Offroad Motorcycle (GR)	300	110	9		65							
+_CarPhysicsV2	gr_veh_motorcycle_offroad	0x4A41B9BA	1	Offroad Motorcycle (AI ONLY)	300	110	9		75							
+_CarPhysicsV2	gr_veh_truck_m151_50cal	0x12181179	10	M151 (MG)	1000	85	55		130							
+_CarPhysicsV2	gr_veh_truck_m35	0x5111F8CA	3	M35 (Cargo) (GR)	26000	80	50		1800							
+_CarPhysicsV2	gr_veh_truck_m35_aa	0x2DD31CFB	3	M35 (AA) (GR)	26000	80	50		1500							
+_CarPhysicsV2	gr_veh_truck_m35_guntruck_50cal	0x968CE876	3	M35 (Guntruck) (GR)	26000	80	50		1800							
+_CarPhysicsV2	gr_veh_truck_m35_tanker	0xB187C134	3	M35 (Fuel) (GR)	26000	80	50		1500							
+_CarPhysicsV2	oc_veh_semi_austin	0x1125CB99	3	Austin (OC)	27000	100	50		1700							
+_CarPhysicsV2	oc_veh_semi_fueltrailer	0x08E25CDC	1	Fuel Trailer	6000	80	15		0							
+_CarPhysicsV2	oc_veh_truck_esv	0xB5C2D9F8	4	ESV	2800	105	55		300							
+_CarPhysicsV2	oc_veh_truck_ext	0x0E9502CF	15	EXT	2800	110	55		290							
+_CarPhysicsV2	oc_veh_truck_mtv_guntruck	0xD7BB0643	5	Guntruck (OC)	26000	80	50		1800							
+_CarPhysicsV2	pmc_veh_car_camo_veyron	0x807D1C3B	1	Veyron (Cannon)	1800	165	50		500							
+_CarPhysicsV2	pmc_veh_car_camo_veyron	0x807D1C3B	2	Veyron (Assault)	2000	135	85		400							
+_CarPhysicsV2	pmc_veh_car_dragster	0xC159BBC9	2	Valiant (Python)	2800	130	100		900							
+_CarPhysicsV2	pmc_veh_car_offroad_buggy	0x2D1D4D03	1	Buggy (PR)	1100	125	65		275							
+_CarPhysicsV2	pmc_veh_car_panhard	0x8C58E7EB	3	Panhard	3200	115	55		375							
+_CarPhysicsV2	pmc_veh_car_rocket_buggy	0xC23032BC	1	Buggy (Hellfire)	1250	115	55		265							
+_CarPhysicsV2	pmc_veh_car_vanquish	0xCDDC96EC	1	Vanquish	1800	130	85		350							
+_CarPhysicsV2	pmc_veh_car_vanquish	0xCDDC96EC	2	Veyron (base)	1800	145	50		400							
+_CarPhysicsV2	pmc_veh_car_vanquish_racer	0xEB20325A	1	Vanquish (Racing)	1800	140	85		450							
+_CarPhysicsV2	pmc_veh_car_w12_z12_racer	0xB9CAAC7B	1	W12 (Z12) Racer	2000	135	75		450							
+_CarPhysicsV2	pmc_veh_motorcycle_devastator	0xC25E48DB	2	Devastator	200	75	30		50							
+_CarPhysicsV2	pmc_veh_motorcycle_mattias	0x10A1D397	2	Mattias Chopper	300	130	30		65							
+_CarPhysicsV2	pmc_veh_motorcycle_r71_sidecar	0x19E2962E	3	Sidecar Motorcycle	800	110	15		85							
+_CarPhysicsV2	pmc_veh_motorcycle_tankbike	0xC1EEB3B3	1	Tank Bike	2000	120	30		300							
+_CarPhysicsV2	pmc_veh_truck_cougar	0x4C998949	2	Cougar	3000	85	50		650							
+_CarPhysicsV2	pmc_veh_truck_esv	0x2915F4A0	2	Esv (lowrider)	3000	105	70		300							
+_CarPhysicsV2	pmc_veh_truck_ext	0x31F0FE47	1	EXT (monster)	5000	90	50		600							
+_CarPhysicsV2	pmc_veh_truck_monster_ridgeline	0x717EB6DA	2	Monster Ridgeline	3000	85	50		650							
+_CarPhysicsV2	pmc_veh_truck_monster_rtr	0x5B3458E9	1	Monster truck test	2500	120	50		500							
+_CarPhysicsV2	pmc_veh_truck_monster_rtr	0x5B3458E9	1	Monster Truck (base)	3000	85	50		650							
+_CarPhysicsV2	pmc_veh_truck_monster_rtr	0x5B3458E9	1	Monster Truck	5000	92	50		720							
+_CarPhysicsV2	pr_veh_car_t300_m60	0x19676216	8	T300 (M60)	2600	110	65		320							
+_CarPhysicsV2	pr_veh_semi_mark	0xC7C3C08C	3	Mark (PR)	27000	100	50		1800							
+_CarPhysicsV2	vz_veh_truck_m151_50cal	0x4BE3E7C4	7	M151 .50Cal (VZ)	1000	85	55		130							
+_CarPhysicsV2	vz_veh_truck_m35	0x1903A169	2	M35 (AA)	26000	80	50		1500							
+_CarPhysicsV2	vz_veh_truck_m35	0x1903A169	5	M35 (Cargo)	26000	80	50		1800							
+_CarPhysicsV2	vz_veh_truck_m35_aa	0x191D5D76	3	M35 (AA) (VZ)	26000	80	50		1500							
+_CarPhysicsV2	vz_veh_truck_m35_guntruck_50cal	0xAACA3CFB	5	M35 (Guntruck)	26000	80	50		1800							
+_CarPhysicsV2	vz_veh_truck_m35_tanker	0xB6FE28B5	4	M35 (Fuel)	26000	80	50		1500							
+_TankPhysics			1	AMX30 (Base)	32000	45			2000							
+_TankPhysics			4	M113 (Base)	6000	55			500							
+_TankPhysics	al_veh_tank_m1a2	0xCE77D4CB	3	M1A2	32000	60			2000							
+_TankPhysics	al_veh_tank_m2a3	0xB645EE21	3	M2A3	22000	65			1000							
+_TankPhysics	al_veh_tank_m2a3_m6	0xB98FB059	1	M6 - DO NOT USE	22000	65			1000							
+_TankPhysics	ch_veh_apc_zbd2000	0x340B1CB8	4	ZBD2000	16000	55			1400							
+_TankPhysics	ch_veh_tank_pgz95	0x56EE6A1F	3	PGZ95	22000	50			1300							
+_TankPhysics	ch_veh_tank_pgz95_command	0xE8E58109	2	PGZ95 Command	22000	65			1000							
+_TankPhysics	ch_veh_tank_plz45b	0x16497BF1	1	PLZ45	28000	45			1800							
+_TankPhysics	ch_veh_tank_plz45b	0x16497BF1	2	PLZ45 (Full)	28000	60			1400							
+_TankPhysics	ch_veh_tank_ztz63a	0x80C357EC	3	ZTZ63a	34000	60			1700							
+_TankPhysics	ch_veh_tank_ztz98	0xF88147A1	3	ZTZ98	54000	55			2000							
+_TankPhysics	dlc_al_veh_tank_m1a1	0x7EE94B4E	1	DLC_M1A1	32000	65			1500							
+_TankPhysics	global_veh_stingray	0x461F1A3A	5	Stingray II	21000	50			1000							
+_TankPhysics	gr_veh_apc_m113	0xBDA1507E	4	M113 (GR)	6000	55			500							
+_TankPhysics	gr_veh_apc_m113_aa	0xD745E58F	4	M113 AA (GR)	6000	55			500							
+_TankPhysics	gr_veh_tank_m551sheridan	0x12732DD2	4	M551	20000	40			1000							
+_TankPhysics	vz_veh_apc_m113_50cal	0x8D7C78FF	5	M113 (VZ)	6000	55			500							
+_TankPhysics	vz_veh_apc_m113_aa	0x40858AFC	3	M113 AA (VZ)	6000	55			500							
+_TankPhysics	vz_veh_apc_m113_command	0x080D83D1	3	M113 Jammer	6000	55			500							
+_TankPhysics	vz_veh_tank_amx30_aa	0xB6EDE80B	2	AMX30 AA	32000	45			2000							
+_TankPhysics	vz_veh_tank_amx30_base	0x11640B62	4	AMX30	32000	45			2000							
+_TankPhysics	vz_veh_tank_amx30_elite	0xCC84A986	3	AMX30 Elite	32000	45			2000							
+_TankPhysics	vz_veh_tank_scorpion90	0x8CA421C3	4	Scorpion90	12000	40			700							
+_BoatPhysics			1	RIB36	1200	90		35	100	70						
+_BoatPhysics			1	Jetski (Base)	200	100		10	60	10						
+_BoatPhysics			1	Salton Seahorse (base)	29000	84		15	1800	500						
+_BoatPhysics	al_veh_boat_lcur	0x4FC2D374	5	LCUR	29000	80		15	2000	500						
+_BoatPhysics	al_veh_boat_markv	0xD4E88AFD	5	MarkV	15000	105		25	1000	200						
+_BoatPhysics	ch_veh_apc_wz551	0xA35416A8	1	WZ551 (Amphibious) (DoNotUse)	100000	20		15	2500	500						
+_BoatPhysics	ch_veh_apc_zbd2000	0x340B1CB8	1	ZBD2000 (Amphibious) (DoNotUse)	100000	20		15	2500	500						
+_BoatPhysics	ch_veh_boat_huangfeng	0xC733E65D	4	Huangfeng	100000	70		25	2500	1000						
+_BoatPhysics	ch_veh_tank_ztz63a	0x80C357EC	1	ZTZ63a (Amphibious) (DoNotUse)	100000	20		15	2500	500						
+_BoatPhysics	civ_veh_boat_barco	0x96195816	4	Barco	2500	35		15	90	40						
+_BoatPhysics	civ_veh_boat_cigarette	0xB1EB099F	7	Speed Boat	8000	120		40	1000	500						
+_BoatPhysics	civ_veh_boat_dinghy	0x044EDB9C	4	Dinghy	250	40		15	30	20						
+_BoatPhysics	civ_veh_boat_fishing	0x74EB59B1	5	Fishing Boat	20000	40		6	2000	1000						
+_BoatPhysics	civ_veh_boat_jetski	0xECEFD1CD	6	Jetski (Civ)	200	100		10	60	10						
+_BoatPhysics	civ_veh_boat_saltonsea	0x13A86EF7	4	Salton Seahorse (Civ)	29000	84		15	1800	500						
+_BoatPhysics	civ_veh_boat_smallfishing	0x4D72B2BC	4	Small Fishing Boat	250	40		15	40	30						
+_BoatPhysics	civ_veh_boat_swamp	0xA176803B	5	Air Boat	1200	50		25	100	50						
+_BoatPhysics	global_veh_rib36	0x0C95FF35	8	Gar	1200	90		35	100	70						
+_BoatPhysics	global_veh_turbosquid	0x36B43DD1	6	Turbosquid	500	55		15	100	50						
+_BoatPhysics	global_weightbench	0x47C472D3	1	Lifestyle Job HighVoltage	1000000	40		10	100	10						
+_BoatPhysics	gr_veh_boat_cigarette	0x79905D82	5	Piranha	8000	135		40	1000	500						
+_BoatPhysics	gr_veh_boat_turbosquid	0x299E2340	4	Turbosquid (GR)	500	55		15	100	50						
+_BoatPhysics	oc_veh_boat_turbosquid	0xEC6C211D	3	Turbosquid (OC)	500	55		15	100	50						
+_BoatPhysics	ocoutpost_tablearmwrestling	0x75BEFD49	2	Lifestyle OilLif001 Table	1000000	40		10	100	10						
+_BoatPhysics	pmc_veh_boat_cigarette	0xFB89A3B1	2	Patrol Boat (PMC)	8000	135		40	2000	500						
+_BoatPhysics	pr_veh_boat_cutter	0x7366155A	5	Cutter (PR)	43000	75		15	2500	3000						
+_BoatPhysics	pr_veh_boat_jetski	0x02D1FC23	2	Jetski (PR)	200	100		10	60	10						
+_BoatPhysics	pr_veh_boat_saltonsea	0x9387F335	3	Salton Seahorse (PR)	29000	84		15	2000	500						
+_BoatPhysics	vz_veh_boat_patrol	0x60E7FFEB	4	Patrol Boat (VZ)	15000	125		30	1100	320						
+_BoatPhysics	vz_veh_boat_type14311	0xC142F94B	6	Type 14310	40000	100		45	2000	1000						
+_HelicopterPhysics			1	Helicopter	6000						30	0.5	10	1	10	1.5
+_HelicopterPhysics		0x2E7CB0B5	3	V22 (Driver)	20000						30	1	20	3	10	1.5
+_HelicopterPhysics	al_veh_helicopter_ah1z	0x994E1953	4	AH1Z	8300						30	0.8	30	1	25	3.5
+_HelicopterPhysics	al_veh_helicopter_mh53pavelow	0xB993D852	7	MH53J	20000						35	0.5	15	0.5	17	4
+_HelicopterPhysics	al_veh_vtol_f35b	0xD038D631	2	F35b	10205						50	0.5	20	4	10	3
+_HelicopterPhysics	ch_veh_helicopter_ka29b	0xF6DEC8EA	1	Ka29b (bomber)	11000						20	0.5	12	0.5	12	4
+_HelicopterPhysics	ch_veh_helicopter_ka29b	0xF6DEC8EA	9	Ka29b	8500						25	0.65	25	0.5	28	5.3
+_HelicopterPhysics	ch_veh_helicopter_mi26_halo	0xADE3CED6	5	Mi26 (CH)	30000						38	0.2	25	0.55	25	3
+_HelicopterPhysics	ch_veh_helicopter_wz10	0x6D394A7B	4	WZ10	6000						30	0.7	30	0.7	25	3.5
+_HelicopterPhysics	global_veh_uh1huey	0x89D8DE72	7	Endriago (Elite) (Ewan)	6000						30	0.5	10	1	10	1.35
+_HelicopterPhysics	global_veh_uh1huey	0x89D8DE72	16	UH1	8000						25	0.5	25	1	20	4
+_HelicopterPhysics	oc_veh_helicopter_md500	0x9FCAE910	24	Coanda	1200						32	0.9	32	0.9	28	2.6
+_HelicopterPhysics	pmc_veh_helicopter_mi26_halo	0x3177639B	2	Mi26 (PMC)	30000						38	0.2	25	0.55	25	3
+_HelicopterPhysics	pmc_veh_helicopter_uh1huey	0x905B2A87	13	UH1 Attack (PMC)	8000						25	0.5	25	1	20	4
+_HelicopterPhysics	pmc_veh_helicopter_uh1huey_delivery	0x71DC712E	1	UH1 Transport (PMC) (Ghost)	8000						25	0.5	25	1	20	4
+_HelicopterPhysics	pr_veh_helicopter_alouetteiii	0x4A95F55C	10	Alouette3 Attack (PR)	1500						30	1.2	30	1.2	20	3
+_HelicopterPhysics	vz_veh_helicopter_alouetteiii	0x22435EEA	21	Alouette3 Elite	1500						30	1.2	30	1.2	20	3
+_HelicopterPhysics	vz_veh_helicopter_mi26_halo	0xFCD79D6D	4	Mi26 (VZ)	30000						38	0.2	25	0.55	25	3
+_HelicopterPhysics	vz_veh_helicopter_mi35hind	0x1CE8F54F	9	Mi35	20000						35	0.5	35	0.8	30	3
+_HelicopterPhysicsAi			1	Helicopter							30	0.5	10	1	10	2
+_HelicopterPhysicsAi	al_veh_helicopter_ah1z	0x994E1953	4	AH1Z							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	al_veh_helicopter_mh53pavelow	0xB993D852	7	MH53J							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	ch_veh_helicopter_ka29b	0xF6DEC8EA	10	Ka29b							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	ch_veh_helicopter_mi26_halo	0xADE3CED6	5	Mi26 (CH)							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	ch_veh_helicopter_wz10	0x6D394A7B	4	WZ10							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	global_veh_uh1huey	0x89D8DE72	9	UH1 Transport							30	0.5	10	1	20	2
+_HelicopterPhysicsAi	global_veh_uh1huey	0x89D8DE72	14	UH1							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	oc_veh_helicopter_md500	0x9FCAE910	24	Coanda							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	pmc_veh_helicopter_mi26_halo	0x3177639B	2	Mi26 (PMC)							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	pmc_veh_helicopter_uh1huey	0x905B2A87	1	UH1 Attack (PMC) (Driver) (Railshooter)							30	0.5	10	1	10	2
+_HelicopterPhysicsAi	pmc_veh_helicopter_uh1huey	0x905B2A87	9	UH1 Transport (PMC)							30	0.5	10	1	20	2
+_HelicopterPhysicsAi	pmc_veh_helicopter_uh1huey	0x905B2A87	3	UH1 Attack (PMC)							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	pmc_veh_helicopter_uh1huey_delivery	0x71DC712E	1	UH1 Transport (PMC) (Ghost)							30	0.5	10	1	20	2
+_HelicopterPhysicsAi	pr_veh_helicopter_alouetteiii	0x4A95F55C	10	Alouette3 Attack (PR)							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	vz_veh_helicopter_alouetteiii	0x22435EEA	21	Alouette3 Elite							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	vz_veh_helicopter_mi26_halo	0xFCD79D6D	4	Mi26 (VZ)							30	0.5	10	1	25	2
+_HelicopterPhysicsAi	vz_veh_helicopter_mi35hind	0x1CE8F54F	9	Mi35							30	0.5	10	1	25	2
+_JetPhysics	al_veh_vtol_f35b	0xD038D631	1	JetTest	10000											
