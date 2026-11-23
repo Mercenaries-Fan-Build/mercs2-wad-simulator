@@ -1,7 +1,7 @@
 //! Build-side editing of a `scripts_vz`-style block (a flat table of UCFX
 //! containers, each wrapping one Lua chunk).
 //!
-//! Block layout (decompressed), see `docs/modding_deep_dive.md` §4.6 / §5.2:
+//! Block layout (decompressed), see [`docs/modding_deep_dive.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/modding_deep_dive.md) §4.6 / §5.2:
 //! ```text
 //!   u32 entry_count
 //!   entry_count × { u32 name_hash, u32 type_hash(=0x42498680), u32 field_c, u32 chunk_size }
