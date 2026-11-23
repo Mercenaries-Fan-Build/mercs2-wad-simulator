@@ -124,42 +124,6 @@ pub fn nth_container_span(block: &[u8], idx: usize) -> Option<(usize, usize)> {
     nth_container(block, idx)
 }
 
-/// True if the UCFX container at `idx` carries a `Name` + `ModelName` + `Transform` COMP triple —
-/// i.e. can serve as an `append_placements` template.
-pub fn container_has_scaffolding(block: &[u8], idx: usize) -> bool {
-    let Some((off, len)) = nth_container(block, idx) else { return false; };
-    let Some(c) = block.get(off..off + len) else { return false; };
-    if c.len() < HDR || &c[0..4] != b"UCFX" { return false; }
-    let daf = rd_u32(c, 4) as usize;
-    let ndesc = rd_u32(c, 16) as usize;
-    if daf != HDR + ndesc * 20 || daf > c.len() { return false; }
-    let mut current_comp: Option<String> = None;
-    let mut have = (false, false, false);
-    for k in 0..ndesc {
-        let ro = HDR + k * 20;
-        let u0 = rd_u32(c, ro + 4);
-        let size = rd_u32(c, ro + 8) as usize;
-        if u0 == 0xFFFF_FFFF { current_comp = None; continue; }
-        let tag = &c[ro..ro + 4];
-        let body_start = daf + u0 as usize;
-        let body_end = body_start + size;
-        if body_end > c.len() { return false; }
-        let body = &c[body_start..body_end];
-        if tag == b"info" {
-            let n = body.iter().position(|&x| x == 0).unwrap_or(body.len());
-            current_comp = Some(String::from_utf8_lossy(&body[..n]).into_owned());
-        } else if tag == b"data" {
-            match current_comp.as_deref() {
-                Some("Name") => have.0 = true,
-                Some("ModelName") => have.1 = true,
-                Some("Transform") => have.2 = true,
-                _ => {}
-            }
-        }
-    }
-    have == (true, true, true)
-}
-
 fn nth_container(block: &[u8], idx: usize) -> Option<(usize, usize)> {
     let (count, entries) = parse_block_entry_table(block);
     if idx >= count as usize {
@@ -362,22 +326,8 @@ pub fn append_placements(
         .get(t_off..t_off + t_len)
         .ok_or("template span out of range")?;
     let container = build_layer_container(template, ents)?;
-
-    const LAYER_TYPE: u32 = 0xE6B8_1A54;
-    let count = rd_u32(block, 0);
-    let table_end = 4 + count as usize * 16;
-    let name_hash = layer_hash; // entry-table name = the layer's ASET asset hash H
-
-    let mut result = Vec::with_capacity(block.len() + 16 + container.len());
-    result.extend_from_slice(&(count + 1).to_le_bytes()); // bumped sub-block count
-    result.extend_from_slice(&block[4..table_end]); // original entries
-    result.extend_from_slice(&name_hash.to_le_bytes());
-    result.extend_from_slice(&LAYER_TYPE.to_le_bytes());
-    result.extend_from_slice(&0u32.to_le_bytes());
-    result.extend_from_slice(&(container.len() as u32).to_le_bytes());
-    result.extend_from_slice(&block[table_end..]); // original sub-block data
-    result.extend_from_slice(&container); // our new sub-block (matches the appended entry)
-    Ok(result)
+    // The entry-table name is the layer's ASET asset hash H.
+    append_entry(block, layer_hash, 0xE6B8_1A54, &container)
 }
 
 #[cfg(test)]
@@ -594,14 +544,143 @@ pub fn append_placement(
 
 // ── in-place: one entity into (or out of) an existing layer sub-block ───────────────────────────
 
-/// The `flgs` state of a `TinyGeometryObject` placement: bit 111 (byte 13, `0x80`) alone. Every
-/// retail placement of a TINY model carries exactly this state (1,208 of 1,208). Bit 111 is not
-/// theirs alone: 55 placements of other models carry it too, 31 with no other bit.
-pub const FLGS_TINY_GEOMETRY_OBJECT: [u8; 32] = {
+/// The `flgs` state of an entity whose records are `Name`, `ModelName` and `Transform`: bit 111
+/// (byte 13, `0x80`) alone, the bit of `ModelName`. A layer's `flgs` sets bit `i` when the key has
+/// a record in the class the worldentity's `flgt` lists at `i`, as the worldentity's own `flgs`
+/// does: 19,387 of the 19,434 retail layer records, the other 47 setting the bit of a
+/// `PointLocation` record the measuring probe does not split. `ModelName` is `flgt[111]`; `Name`
+/// and `Transform` are not in `flgt` (`mercs2_probe layer-scaffold`).
+pub const FLGS_MODEL_PLACEMENT: [u8; 32] = {
     let mut p = [0u8; 32];
     p[13] = 0x80;
     p
 };
+
+/// The `flgs` state of a `TinyGeometryObject` placement: bit 111 (byte 13, `0x80`) alone. Every
+/// retail placement of a TINY model carries exactly this state (1,208 of 1,208). Bit 111 is not
+/// theirs alone: 55 placements of other models carry it too, 31 with no other bit.
+pub const FLGS_TINY_GEOMETRY_OBJECT: [u8; 32] = FLGS_MODEL_PLACEMENT;
+
+/// The COMPs a placement has records in, in the order a layer that has all three lists them.
+pub const PLACEMENT_COMPS: [&str; 3] = ["Name", "ModelName", "Transform"];
+
+/// The `info` (record count 0) and `schm` bodies of a layer's [`PLACEMENT_COMPS`]: what a COMP a
+/// layer lacks is built from. Every PC retail layer that has one of the three carries the same two
+/// bodies for it, the record count aside (`mercs2_probe layer-scaffold`: 914, 346 and 914 layers,
+/// one variant each).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerScaffold {
+    /// `(info, schm)` of each of [`PLACEMENT_COMPS`], in that order.
+    pub comps: [(Vec<u8>, Vec<u8>); 3],
+}
+
+impl LayerScaffold {
+    /// Read from `layers` (layer sub-block containers): each COMP's `info` with its record count
+    /// zeroed, and its `schm`. Two layers that differ in either, and a COMP no layer has, are
+    /// errors naming the COMP.
+    pub fn read<'a>(layers: impl IntoIterator<Item = &'a [u8]>) -> Result<LayerScaffold, String> {
+        let mut found: [Option<(Vec<u8>, Vec<u8>)>; 3] = [None, None, None];
+        for c in layers {
+            let roots = crate::ucfx::parse_ucfx_tree(c)?;
+            for (i, comp) in PLACEMENT_COMPS.iter().enumerate() {
+                let Some(at) = comp_nodes(&roots, comp) else { continue };
+                let kids = &roots[at].children;
+                let mut info = kids.first().and_then(|n| n.body.clone()).ok_or_else(|| format!("{comp} COMP has no info"))?;
+                let o = comp.len() + 1 + 8;
+                if info.len() < o + 4 {
+                    return Err(format!("{comp} COMP info is {} bytes, short of its record count", info.len()));
+                }
+                info[o..o + 4].fill(0);
+                let schm = kids
+                    .iter()
+                    .find(|n| &n.tag == b"schm")
+                    .and_then(|n| n.body.clone())
+                    .ok_or_else(|| format!("{comp} COMP has no schm"))?;
+                match &found[i] {
+                    None => found[i] = Some((info, schm)),
+                    Some(f) if f.0 == info && f.1 == schm => {}
+                    Some(_) => return Err(format!("two layers give the {comp} COMP different info or schm bodies")),
+                }
+            }
+        }
+        let [name, model, transform] = found;
+        let need = |f: Option<(Vec<u8>, Vec<u8>)>, comp: &str| f.ok_or_else(|| format!("no layer has a {comp} COMP"));
+        Ok(LayerScaffold { comps: [need(name, "Name")?, need(model, "ModelName")?, need(transform, "Transform")?] })
+    }
+
+    fn comp(&self, i: usize) -> crate::ucfx::UcfxNode {
+        use crate::ucfx::UcfxNode;
+        let (info, schm) = &self.comps[i];
+        UcfxNode::marker(
+            *b"COMP",
+            vec![UcfxNode::leaf(*b"info", info.clone()), UcfxNode::leaf(*b"schm", schm.clone()), UcfxNode::leaf(*b"data", Vec::new())],
+        )
+    }
+}
+
+/// `container` with each of [`PLACEMENT_COMPS`] it lacks added, with no records, from `scaffold`,
+/// before its `flgt` row; every other row keeps its bytes. The engine's layer installer
+/// (`FUN_00654940`) reads each COMP through the deserializer its `info` class name selects
+/// (`worldentity_container_format.md` §3.1), so a COMP's place among the others does not matter:
+/// retail layers keep no one order (265 of 923 in name order). A container without `flgt` or
+/// `flgs` is refused.
+pub fn with_comps(container: &[u8], scaffold: &LayerScaffold) -> Result<Vec<u8>, String> {
+    let mut roots = crate::ucfx::parse_ucfx_tree(container)?;
+    flgs_body(&roots)?;
+    let at = roots.iter().position(|n| &n.tag == b"flgt").ok_or("the layer has no flgt")?;
+    let missing: Vec<crate::ucfx::UcfxNode> =
+        (0..PLACEMENT_COMPS.len()).filter(|&i| comp_nodes(&roots, PLACEMENT_COMPS[i]).is_none()).map(|i| scaffold.comp(i)).collect();
+    if missing.is_empty() {
+        return Ok(container.to_vec());
+    }
+    roots.splice(at..at, missing);
+    Ok(crate::ucfx::write_ucfx_tree(&roots))
+}
+
+/// A layer container with no entities on the shared rows of `carrier` (a layer of the block it
+/// will go in): `carrier`'s `CHDR`, `enum` and `flgt` bodies, [`PLACEMENT_COMPS`] with no records
+/// from `scaffold`, and an empty `flgs`. `carrier`'s COMPs are left out. A carrier lacking one of
+/// those rows, or with a top-level row of another tag, is refused.
+pub fn empty_layer(carrier: &[u8], scaffold: &LayerScaffold) -> Result<Vec<u8>, String> {
+    use crate::ucfx::UcfxNode;
+    let roots = crate::ucfx::parse_ucfx_tree(carrier)?;
+    if let Some(n) = roots.iter().find(|n| !matches!(&n.tag, b"CHDR" | b"enum" | b"COMP" | b"flgt" | b"flgs")) {
+        return Err(format!("the carrier layer has a {:?} row, which a layer is not known to carry", String::from_utf8_lossy(&n.tag)));
+    }
+    let body = |tag: &[u8; 4]| {
+        roots
+            .iter()
+            .find(|n| &n.tag == tag)
+            .and_then(|n| n.body.clone())
+            .ok_or_else(|| format!("the carrier layer has no {}", String::from_utf8_lossy(tag)))
+    };
+    let mut out = vec![UcfxNode::leaf(*b"CHDR", body(b"CHDR")?), UcfxNode::leaf(*b"enum", body(b"enum")?)];
+    out.extend((0..PLACEMENT_COMPS.len()).map(|i| scaffold.comp(i)));
+    out.push(UcfxNode::leaf(*b"flgt", body(b"flgt")?));
+    out.push(UcfxNode::leaf(*b"flgs", 0u32.to_le_bytes().to_vec()));
+    Ok(crate::ucfx::write_ucfx_tree(&out))
+}
+
+/// `block` with one entry added last: `name_hash`, `type_hash`, a zero third word, and
+/// `container`. Every other entry and container keeps its bytes.
+pub fn append_entry(block: &[u8], name_hash: u32, type_hash: u32, container: &[u8]) -> Result<Vec<u8>, String> {
+    let (count, entries) = parse_block_entry_table(block);
+    let table_end = 4 + count as usize * 16;
+    let covered = table_end + entries.iter().map(|e| e.chunk_size as usize).sum::<usize>();
+    if covered != block.len() {
+        return Err(format!("the block's entries cover {covered} of its {} bytes", block.len()));
+    }
+    let mut out = Vec::with_capacity(block.len() + 16 + container.len());
+    out.extend_from_slice(&(count + 1).to_le_bytes());
+    out.extend_from_slice(&block[4..table_end]);
+    out.extend_from_slice(&name_hash.to_le_bytes());
+    out.extend_from_slice(&type_hash.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(container.len() as u32).to_le_bytes());
+    out.extend_from_slice(&block[table_end..]);
+    out.extend_from_slice(container);
+    Ok(out)
+}
 
 /// The keyed records of one layer sub-block's `Name`, `ModelName` and `Transform` COMPs and its
 /// `flgs`, each in stored order.
@@ -976,5 +1055,111 @@ mod in_place_tests {
         assert_eq!((n, e[0].chunk_size, e[1].chunk_size, e[0].field_c), (2, 5, 2, 7));
         assert_eq!(&out[out.len() - 7..], &[9, 9, 9, 9, 9, 2, 2]);
         assert_eq!(find_entry(&out, 2, 0xE6B8_1A54).map(|(i, c)| (i, c.to_vec())), Some((1, vec![2, 2])));
+    }
+
+    /// The scaffold of [`layer`]: each COMP's `info` with its count zeroed, and its `schm`.
+    fn scaffold() -> LayerScaffold {
+        LayerScaffold::read([layer().as_slice()]).unwrap()
+    }
+
+    /// A layer of `rows` between `CHDR`/`enum` and `flgt`/`flgs`, its `flgs` holding `flags`.
+    fn layer_of(rows: Vec<UcfxNode>, flags: &[u32]) -> Vec<u8> {
+        let mut fl = (flags.len() as u32).to_le_bytes().to_vec();
+        for k in flags {
+            fl.extend_from_slice(&k.to_le_bytes());
+            fl.extend_from_slice(&[7u8; 32]);
+        }
+        let mut all = vec![UcfxNode::leaf(*b"CHDR", vec![0; 8]), UcfxNode::leaf(*b"enum", vec![9; 4])];
+        all.extend(rows);
+        all.push(UcfxNode::leaf(*b"flgt", vec![0x4a, 0xbb, 0xda, 0xe9]));
+        all.push(UcfxNode::leaf(*b"flgs", fl));
+        write_ucfx_tree(&all)
+    }
+
+    #[test]
+    fn the_scaffold_zeroes_each_count_and_refuses_two_that_differ() {
+        let s = scaffold();
+        assert_eq!(s.comps[1].0[b"ModelName".len() + 1 + 8..][..4], [0, 0, 0, 0]);
+        assert_eq!(s.comps[2].1, vec![1, 2, 3, 4]);
+        let mut other = comp("Transform", 0, Vec::new());
+        other.children[1] = UcfxNode::leaf(*b"schm", vec![5]);
+        let odd = layer_of(vec![other], &[]);
+        let e = LayerScaffold::read([layer().as_slice(), odd.as_slice()]).unwrap_err();
+        assert!(e.contains("Transform COMP different"), "{e}");
+        let only_name = layer_of(vec![comp("Name", 0, Vec::new())], &[]);
+        assert!(LayerScaffold::read([only_name.as_slice()]).unwrap_err().contains("no layer has a ModelName COMP"));
+    }
+
+    /// A layer without a `ModelName` COMP takes one, with no records, before `flgt`; its other
+    /// rows keep their bytes, and an entity then inserts into all three.
+    #[test]
+    fn a_layer_without_a_model_comp_takes_one_and_then_the_entity() {
+        let ai = comp("Ai", 1, 10u32.to_le_bytes().to_vec());
+        let mut names = 10u32.to_le_bytes().to_vec();
+        names.extend_from_slice(b"guard 0x0000000a\0\0");
+        let tf = transform_record(10, [1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 1.0]);
+        let shipped = layer_of(vec![ai.clone(), comp("Name", 1, names.clone()), comp("Transform", 1, tf.clone())], &[10]);
+        let out = with_comps(&shipped, &scaffold()).unwrap();
+        let roots = crate::ucfx::parse_ucfx_tree(&out).unwrap();
+        let tags: Vec<String> = roots
+            .iter()
+            .map(|n| match &n.tag {
+                b"COMP" => String::from_utf8_lossy(n.children[0].body.as_deref().unwrap().split(|&b| b == 0).next().unwrap()).into_owned(),
+                t => String::from_utf8_lossy(t).into_owned(),
+            })
+            .collect();
+        assert_eq!(tags, ["CHDR", "enum", "Ai", "Name", "Transform", "ModelName", "flgt", "flgs"]);
+        assert_eq!(roots[2], ai);
+        let model = &roots[5].children;
+        assert_eq!((model[0].body.as_deref(), model[2].body.as_deref()), (Some(scaffold().comps[1].0.as_slice()), Some(&[][..])));
+        // A layer that has all three is given back as it was.
+        assert_eq!(with_comps(&layer(), &scaffold()).unwrap(), layer());
+
+        let placed = insert_entity(&out, &entity(20), FLGS_MODEL_PLACEMENT).unwrap();
+        let r = read_layer_records(&placed).unwrap();
+        assert_eq!(r.models, [(20, 0xabcd)]);
+        assert_eq!(r.names.iter().map(|x| x.0).collect::<Vec<_>>(), [10, 20]);
+        assert_eq!(r.flags.iter().map(|x| x.0).collect::<Vec<_>>(), [10, 20]);
+        assert_eq!(r.flags[1].1, FLGS_MODEL_PLACEMENT);
+    }
+
+    /// A layer with no COMP at all (retail has nine) takes all three; one without `flgs` is
+    /// refused.
+    #[test]
+    fn an_empty_layer_takes_all_three_comps() {
+        let empty = layer_of(Vec::new(), &[]);
+        let out = insert_entity(&with_comps(&empty, &scaffold()).unwrap(), &entity(5), FLGS_MODEL_PLACEMENT).unwrap();
+        let r = read_layer_records(&out).unwrap();
+        assert_eq!((r.names.len(), r.models.len(), r.transforms.len(), r.flags.len()), (1, 1, 1, 1));
+        let no_flgs = write_ucfx_tree(&[UcfxNode::leaf(*b"CHDR", vec![0; 8]), UcfxNode::leaf(*b"flgt", vec![0; 4])]);
+        assert!(with_comps(&no_flgs, &scaffold()).unwrap_err().contains("no flgs"));
+    }
+
+    /// A new layer keeps the carrier's `CHDR`, `enum` and `flgt`, drops its COMPs and records, and
+    /// appended to a block is its last entry.
+    #[test]
+    fn an_empty_layer_is_built_on_the_carriers_shared_rows() {
+        let c = layer();
+        let fresh = empty_layer(&c, &scaffold()).unwrap();
+        let r = read_layer_records(&fresh).unwrap();
+        assert!(r.names.is_empty() && r.models.is_empty() && r.transforms.is_empty() && r.flags.is_empty());
+        let roots = crate::ucfx::parse_ucfx_tree(&fresh).unwrap();
+        let shipped = crate::ucfx::parse_ucfx_tree(&c).unwrap();
+        for tag in [b"CHDR", b"enum", b"flgt"] {
+            let body = |rs: &[UcfxNode]| rs.iter().find(|n| &n.tag == tag).and_then(|n| n.body.clone());
+            assert_eq!(body(&roots), body(&shipped));
+        }
+        let odd = write_ucfx_tree(&[UcfxNode::leaf(*b"CHDR", vec![0; 8]), UcfxNode::leaf(*b"UNIQ", vec![0; 4])]);
+        assert!(empty_layer(&odd, &scaffold()).unwrap_err().contains("\"UNIQ\" row"));
+
+        let mut block = 1u32.to_le_bytes().to_vec();
+        for w in [1u32, 0xE6B8_1A54, 7, c.len() as u32] {
+            block.extend_from_slice(&w.to_le_bytes());
+        }
+        block.extend_from_slice(&c);
+        let out = append_entry(&block, 2, 0xE6B8_1A54, &fresh).unwrap();
+        assert_eq!(find_entry(&out, 2, 0xE6B8_1A54).map(|(i, b)| (i, b.to_vec())), Some((1, fresh.clone())));
+        assert_eq!(find_entry(&out, 1, 0xE6B8_1A54).map(|(i, b)| (i, b.to_vec())), Some((0, c)));
+        assert!(append_entry(&out[..out.len() - 1], 3, 0xE6B8_1A54, &fresh).unwrap_err().contains("cover"));
     }
 }
