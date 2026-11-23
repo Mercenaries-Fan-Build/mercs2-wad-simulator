@@ -16289,6 +16289,33 @@
     ],
     "0xEB3AA5CC": [
       "PauseMenu.Base.Quit"
+    ],
+    "0x0B4C79B4": [
+      "village_att_pierlong"
+    ],
+    "0x19676216": [
+      "pr_veh_car_t300_m60"
+    ],
+    "0x42247B7F": [
+      "jungle_env_junglewallfoliage04"
+    ],
+    "0x5056E183": [
+      "global_bld_tentmarket02"
+    ],
+    "0x5817D22E": [
+      "jungle_env_junglewallfoliage01"
+    ],
+    "0x69204AC1": [
+      "angelfalls_env_waterfallbase_stream"
+    ],
+    "0xBA1F2839": [
+      "jungle_env_junglewallfoliage02"
+    ],
+    "0xE01D2574": [
+      "jungle_env_junglewallfoliage03"
+    ],
+    "0xE25098E4": [
+      "global_env_rocksmall01"
     ]
   }
 }
