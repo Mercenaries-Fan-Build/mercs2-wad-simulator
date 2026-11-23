@@ -161,12 +161,12 @@ fn write_wav(path: &std::path::Path, pcm: &[i16], channels: u16, rate: u32) -> s
 }
 
 /// `rainbow_table` from `.mercs2-local.toml`, the workshop crate's
-/// `data/aset_discovered_names.json`, the identifier-shaped `data/aset_block_strings.json` names
-/// under its `notes_docs_dir` (minus the workshop crate's `data/rejected_names.json`), then `extra`.
+/// `data/aset_discovered_names.json`, the identifier-shaped names of this repository's
+/// `docs/data/aset_block_strings.json` (minus the workshop crate's `data/rejected_names.json`), then `extra`.
 /// Every table must load.
 fn rainbow(extra: &[PathBuf]) -> Result<RainbowTable, String> {
     let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+    let notes = mercs2_formats::game_paths::repo_root().join("docs").join("data");
     let names = start.join("../mercs2_workshop/data");
     let first: Vec<PathBuf> = vec![
         mercs2_formats::game_paths::local_config_rainbow_table(start)?,
