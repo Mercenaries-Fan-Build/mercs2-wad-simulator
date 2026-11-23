@@ -1060,18 +1060,69 @@ pub fn game_problems(manifest: &crate::manifest::Manifest, game: &mut crate::gam
     out
 }
 
-/// Lower every `add_tiny_geometry` of a Shipment: each stand-in's model block, and one overlay of
-/// each layer block the stand-ins' placements go into, carrying all of them.
+/// A stand-in as the build makes it: its objects' GUIDs, their slots, the model, and the model's
+/// name and hash.
+#[derive(Debug, Clone)]
+pub struct BuiltStandIn {
+    pub guids: Vec<u32>,
+    pub plan: SlotPlan,
+    pub model: TinyModel,
+    pub name: String,
+    pub hash: u32,
+}
+
+/// Build stand-in `c` (of the Shipment at `root`) against `world`, the game's layers: resolve its
+/// objects and check each is placed in its cell, plan their slots, resolve its materials (each
+/// texture one `has_texture` holds: the game's, or an `add_texture` of the Shipment) and build the
+/// model. `Err` is the lowering's refusal.
+pub fn build_stand_in(c: &Contribution, root: &Path, world: &World, has_texture: &dyn Fn(u32) -> bool) -> Result<BuiltStandIn, String> {
+    let layer = crate::manifest::asset_hash(c.layer);
+    let source = read_source(&root.join(c.model))?;
+    let guids = c.objects.iter().map(|o| world.resolve(layer, o)).collect::<Result<Vec<u32>, String>>()?;
+    for &g in &guids {
+        world.in_cell(layer, g, c.row, c.col)?;
+    }
+    let plan = plan_slots(&guids, &|g| world.placed.contains_key(&g) || g == c.key)?;
+    let materials = resolve_materials(&source)?;
+    for (k, m) in materials.iter().enumerate() {
+        if !has_texture(m.texture) {
+            return Err(format!(
+                "material {k}'s texture 0x{:08X} is neither in the game nor an add_texture of this Shipment",
+                m.texture
+            ));
+        }
+    }
+    let model = build_model(&source, c.row, c.col, &plan, &materials)?;
+    let name = model_name(c.layer, c.row, c.col, c.key);
+    let hash = pandemic_hash_m2(&name);
+    Ok(BuiltStandIn { guids, plan, model, name, hash })
+}
+
+/// A stand-in's placement, as the build writes it into its layer ([`layer_with_placement`]): the
+/// contribution, the layer by name, the key, the cell and the model hash.
+#[derive(Debug, Clone)]
+pub struct StandInPlace {
+    pub index: usize,
+    pub layer: String,
+    pub key: u32,
+    pub row: u32,
+    pub col: u32,
+    pub hash: u32,
+}
+
+/// Lower every `add_tiny_geometry` of a Shipment: each stand-in's model block, and each stand-in's
+/// placement, which the build writes into its layer's block with the Shipment's other writes to
+/// that block (`build::lower_world`).
 pub fn lower_shipment(
     manifest: &crate::manifest::Manifest,
     root: &Path,
     game: &mut crate::game::GameStack,
     log: &mut Vec<String>,
-) -> Result<Vec<mercs2_formats::patch_wad::PatchBlock>, (usize, String)> {
+) -> Result<(Vec<mercs2_formats::patch_wad::PatchBlock>, Vec<StandInPlace>), (usize, String)> {
     use mercs2_formats::types::{TYPE_HASH_MODEL, TYPE_ID_MODEL, TYPE_ID_TEXTURE};
     let cs = contributions(manifest);
     if cs.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let first = cs[0].index;
     let layers = game.layer_containers().map_err(|e| (first, e))?;
@@ -1085,35 +1136,17 @@ pub fn lower_shipment(
         })
         .collect();
     let mut blocks = Vec::new();
-    // block path -> (inputs, [(entry, key, row, col, model hash)])
-    let mut edits: BTreeMap<String, (crate::game::LayerEditInputs, Vec<(usize, u32, u32, u32, u32)>)> = BTreeMap::new();
+    let mut places = Vec::new();
     for c in &cs {
         let fail = |m: String| (c.index, m);
-        let layer = crate::manifest::asset_hash(c.layer);
-        let source = read_source(&root.join(c.model)).map_err(fail)?;
-        let guids = c.objects.iter().map(|o| world.resolve(layer, o)).collect::<Result<Vec<u32>, String>>().map_err(fail)?;
-        for &g in &guids {
-            world.in_cell(layer, g, c.row, c.col).map_err(fail)?;
-        }
-        let plan = plan_slots(&guids, &|g| world.placed.contains_key(&g) || g == c.key).map_err(fail)?;
-        let materials = resolve_materials(&source).map_err(fail)?;
-        for (k, m) in materials.iter().enumerate() {
-            if !game.has_asset(m.texture, TYPE_ID_TEXTURE) && !added_textures.contains(&m.texture) {
-                return Err(fail(format!(
-                    "material {k}'s texture 0x{:08X} is neither in the game nor an add_texture of this Shipment",
-                    m.texture
-                )));
-            }
-        }
-        let model = build_model(&source, c.row, c.col, &plan, &materials).map_err(fail)?;
-        let name = model_name(c.layer, c.row, c.col, c.key);
-        let hash = pandemic_hash_m2(&name);
+        let has_texture = |t: u32| game.has_asset(t, TYPE_ID_TEXTURE) || added_textures.contains(&t);
+        let BuiltStandIn { guids, plan, model, name, hash } = build_stand_in(c, root, &world, &has_texture).map_err(fail)?;
         let container = model.encode();
         blocks.push(
             crate::build::opaque_container_block(hash, TYPE_HASH_MODEL, TYPE_ID_MODEL, &container, c.index, "add_tiny_geometry")
                 .map_err(|e| fail(e.to_string()))?,
         );
-        let (inputs, entry) = game
+        let (inputs, _) = game
             .layer_by_name(c.layer)
             .map_err(fail)?
             .ok_or_else(|| fail(format!("layer {:?} is not in the game", c.layer)))?;
@@ -1129,25 +1162,9 @@ pub fn lower_shipment(
             c.layer,
             inputs.path
         ));
-        edits
-            .entry(inputs.path.clone())
-            .or_insert_with(|| (inputs, Vec::new()))
-            .1
-            .push((entry, c.key, c.row, c.col, hash));
+        places.push(StandInPlace { index: c.index, layer: c.layer.to_string(), key: c.key, row: c.row, col: c.col, hash });
     }
-    for (path, (inputs, places)) in edits {
-        let mut block = inputs.block.clone();
-        for (entry, key, row, col, hash) in places {
-            let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&block);
-            let container = mercs2_formats::placement_build::find_entry(&block, entries[entry].name_hash, entries[entry].type_hash)
-                .map(|(_, c)| c.to_vec())
-                .ok_or_else(|| (first, format!("{path}: entry {entry} vanished")))?;
-            let edited = layer_with_placement(&container, key, row, col, hash).map_err(|e| (first, format!("{path}: {e}")))?;
-            block = mercs2_formats::placement_build::replace_entry(&block, entry, &edited).map_err(|e| (first, e))?;
-        }
-        blocks.push(crate::build::emit_edited_layer(&inputs, &block).map_err(|e| (first, e))?);
-    }
-    Ok(blocks)
+    Ok((blocks, places))
 }
 
 // ── decomposing a stand-in ──────────────────────────────────────────────────────────────────────
@@ -1308,7 +1325,7 @@ pub fn decompose(model: &TinyModel, row: u32, col: u32, texture_name: &dyn Fn(u3
 pub fn contribution_yaml(layer: &str, row: u32, col: u32, key: u32, objects: &[u32], model: &str) -> String {
     let objects = objects.iter().map(|g| format!("\"0x{g:08X}\"")).collect::<Vec<_>>().join(", ");
     format!(
-        "  - kind: add_tiny_geometry\n    layer: {layer}\n    cell: {{ row: {row}, col: {col} }}\n    key: {key}\n    \
+        "  - kind: add_tiny_geometry\n    layer: {layer}\n    cell: {{ row: {row}, col: {col} }}\n    key: \"0x{key:08X}\"\n    \
          objects: [{objects}]\n    model: {model}\n"
     )
 }
@@ -1499,7 +1516,7 @@ mod tests {
         assert_eq!(rebuilt.encode(), built.encode());
         assert_eq!(
             contribution_yaml("vz_l", 4, 5, 9, &d.objects, "src/m.glb"),
-            "  - kind: add_tiny_geometry\n    layer: vz_l\n    cell: { row: 4, col: 5 }\n    key: 9\n    \
+            "  - kind: add_tiny_geometry\n    layer: vz_l\n    cell: { row: 4, col: 5 }\n    key: \"0x00000009\"\n    \
              objects: [\"0x00000100\", \"0x00000200\"]\n    model: src/m.glb\n"
         );
     }
