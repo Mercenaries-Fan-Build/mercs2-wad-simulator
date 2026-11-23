@@ -31,6 +31,125 @@ pub const IMPORT_ASSETS2: u16 = 71;
 /// The codes [`decode`] reads.
 pub const TYPED: [u16; 8] = [SHOW_FRAME, PLACE_OBJECT2, REMOVE_OBJECT2, DEFINE_EDIT_TEXT, FRAME_LABEL, EXPORT_ASSETS, PLACE_OBJECT3, IMPORT_ASSETS2];
 
+/// `DefineShape`, `DefineShape2`, `DefineShape3`, `DefineShape4`.
+pub const DEFINE_SHAPES: [u16; 4] = [2, 22, 32, 83];
+/// `GFx_DefineExternalImage`.
+pub const DEFINE_EXTERNAL_IMAGE: u16 = 1001;
+
+/// A shape's bitmap fill: its fill type (`0x40`–`0x43`: tiled or clipped, smoothed or not), the image
+/// character it reads, and the matrix from the image's texels to the shape's twips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BitmapFill {
+    pub kind: u8,
+    pub image: u16,
+    pub matrix: MatrixBits,
+}
+
+/// A shape of one bitmap fill: its id, its bounds in twips (`[xmin, xmax, ymin, ymax]`), the fill, and
+/// the bytes of the tag its fill type, image id and matrix are written in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BitmapShape {
+    pub id: u16,
+    pub bounds: [i32; 4],
+    pub fill: BitmapFill,
+    pub at: std::ops::Range<usize>,
+}
+
+/// Shape tag `body` (a code of [`DEFINE_SHAPES`]) read up to its one fill style, which must be a
+/// bitmap.
+pub fn shape_bitmap_fill(code: u16, body: &[u8]) -> Result<BitmapShape, String> {
+    if !DEFINE_SHAPES.contains(&code) {
+        return Err(format!("tag {code} is not a shape"));
+    }
+    let mut cur = Cursor::new(body, 0);
+    let id = cur.u16()?;
+    let bounds = rect(&mut cur)?.values;
+    if code == 83 {
+        // The edge bounds and the flags byte.
+        rect(&mut cur)?;
+        cur.u8()?;
+    }
+    let mut count = usize::from(cur.u8()?);
+    if count == 0xFF && code != 2 {
+        count = usize::from(cur.u16()?);
+    }
+    if count != 1 {
+        return Err(format!("shape {id} has {count} fill styles, not one"));
+    }
+    let start = cur.pos;
+    let kind = cur.u8()?;
+    if !(0x40..=0x43).contains(&kind) {
+        return Err(format!("shape {id}'s fill is type 0x{kind:02x}, not a bitmap"));
+    }
+    let image = cur.u16()?;
+    let matrix = matrix(&mut cur)?;
+    Ok(BitmapShape { id, bounds, fill: BitmapFill { kind, image, matrix }, at: start..cur.pos })
+}
+
+/// Shape tag `body` as shape `id` with its bitmap fill `fill`, the fill's matrix in the widths retail's
+/// exporter gives; every other byte as it was.
+pub fn with_bitmap_fill(code: u16, body: &[u8], id: u16, fill: &BitmapFill) -> Result<Vec<u8>, String> {
+    let range = shape_bitmap_fill(code, body)?.at;
+    let m = &fill.matrix;
+    let m = MatrixBits::exported(m.scale.map(|b| b.values), m.rotate.map(|b| b.values), m.translate.values)?;
+    let mut w = BitWriter::default();
+    w.u8(fill.kind);
+    w.u16(fill.image);
+    write_matrix(&mut w, &m)?;
+    let mut out = Vec::with_capacity(body.len() + 8);
+    out.extend(id.to_le_bytes());
+    out.extend(&body[2..range.start]);
+    out.extend(w.out);
+    out.extend(&body[range.end..]);
+    Ok(out)
+}
+
+/// `GFx_DefineExternalImage`: an image the player loads by name, `{id, format, width, height, export
+/// name, file name}`, each name a byte-length-prefixed string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalImageTag {
+    pub id: u16,
+    pub format: u16,
+    pub width: u16,
+    pub height: u16,
+    pub export_name: Vec<u8>,
+    /// `None` where the tag stores the one name (`snatch_moment` and both fanfares).
+    pub file_name: Option<Vec<u8>>,
+}
+
+/// Tag `GFx_DefineExternalImage`'s `body`, read to its last byte.
+pub fn external_image(body: &[u8]) -> Result<ExternalImageTag, String> {
+    let mut cur = Cursor::new(body, 0);
+    let (id, format, width, height) = (cur.u16()?, cur.u16()?, cur.u16()?, cur.u16()?);
+    let name = |cur: &mut Cursor| -> Result<Vec<u8>, String> {
+        let n = usize::from(cur.u8()?);
+        let s = body.get(cur.pos..cur.pos + n).ok_or("an image name past the body")?.to_vec();
+        cur.pos += n;
+        Ok(s)
+    };
+    let export_name = name(&mut cur)?;
+    let file_name = if cur.pos < body.len() { Some(name(&mut cur)?) } else { None };
+    if cur.pos != body.len() {
+        return Err(format!("tag {DEFINE_EXTERNAL_IMAGE}: read {} of its {} bytes", cur.pos, body.len()));
+    }
+    Ok(ExternalImageTag { id, format, width, height, export_name, file_name })
+}
+
+impl ExternalImageTag {
+    /// The tag's body.
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        for v in [self.id, self.format, self.width, self.height] {
+            out.extend(v.to_le_bytes());
+        }
+        for name in std::iter::once(&self.export_name).chain(&self.file_name) {
+            out.push(u8::try_from(name.len()).map_err(|_| format!("an image name of {} bytes, past 255", name.len()))?);
+            out.extend(name);
+        }
+        Ok(out)
+    }
+}
+
 /// A signed bit-field value and the width it is written in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bits {
@@ -865,6 +984,54 @@ mod tests {
         let mut bytes = Vec::new();
         write_tags(&tags, &mut bytes);
         assert_eq!(parse_tags(&bytes).expect("parse").0, tags);
+    }
+
+    /// A `DefineShape3` of one clipped bitmap fill and one line style: the fill moves to another image
+    /// and texel, the rest of the shape is the same bytes.
+    #[test]
+    fn a_bitmap_fill_is_rewritten_in_place() {
+        let fill = BitmapFill {
+            kind: 0x41,
+            image: 8,
+            matrix: MatrixBits::exported(Some([20 << 16, 20 << 16]), None, [-5120, -2000]).expect("matrix"),
+        };
+        let mut w = BitWriter::default();
+        w.u16(405);
+        write_rect(&mut w, &RectBits::exported([-5120, 5120, -609, 409]).expect("rect")).expect("rect");
+        w.u8(1);
+        w.u8(fill.kind);
+        w.u16(fill.image);
+        write_matrix(&mut w, &fill.matrix).expect("matrix");
+        let tail = [0u8, 0x10, 0x15, 0x00];
+        let mut body = w.out;
+        body.extend(tail);
+        let read = shape_bitmap_fill(32, &body).expect("read");
+        assert_eq!((read.id, read.bounds, read.fill), (405, [-5120, 5120, -609, 409], fill));
+        assert_eq!(with_bitmap_fill(32, &body, 405, &fill).expect("write"), body, "the same fill writes the same bytes");
+        let moved = BitmapFill { image: 1200, matrix: MatrixBits::exported(Some([20 << 16, 20 << 16]), None, [-5120, -70000]).expect("matrix"), ..fill };
+        let out = with_bitmap_fill(32, &body, 1201, &moved).expect("write");
+        let read = shape_bitmap_fill(32, &out).expect("read");
+        assert_eq!((read.id, read.bounds, read.fill), (1201, [-5120, 5120, -609, 409], moved));
+        assert!(out.ends_with(&tail));
+        assert!(shape_bitmap_fill(46, &body).is_err(), "a morph is not a shape");
+    }
+
+    #[test]
+    fn an_external_image_writes_back() {
+        let mut body = Vec::new();
+        for v in [8u16, 13, 512, 512] {
+            body.extend(v.to_le_bytes());
+        }
+        for name in [&b"shell_MAINMENU_text"[..], b"shell_MAINMENU_text.tga"] {
+            body.push(name.len() as u8);
+            body.extend(name);
+        }
+        let t = external_image(&body).expect("read");
+        assert_eq!(t.file_name.as_deref(), Some(&b"shell_MAINMENU_text.tga"[..]));
+        assert_eq!(t.encode().expect("encode"), body);
+        let one = &body[..8 + 1 + 19];
+        assert_eq!(external_image(one).expect("read").file_name, None);
+        assert_eq!(external_image(one).expect("read").encode().expect("encode"), one);
     }
 
     #[test]
