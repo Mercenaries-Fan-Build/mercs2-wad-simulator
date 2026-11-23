@@ -4,7 +4,7 @@ Per the plan's §6 convention: everything that changes shipped behaviour is logg
 into the faithful pass. `[faithful-blocker: yes]` means the reimpl cannot be correct until it is closed;
 `[faithful-blocker: no]` means the *fix* would be the divergence.
 
-Oracle: `docs/reverse_engineer/player_code_map.md` (all 107 cfunc bodies read).
+Oracle: [`docs/reverse_engineer/player_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/player_code_map.md) (all 107 cfunc bodies read).
 
 ---
 
@@ -66,7 +66,7 @@ reintroduced by someone who remembers the old behaviour:
 - **`player+0x66`'s mode enum.** Only the comparison `== 4` is known. The live lead is the Xbox build's
   `PgPlayerPDAMapMode` / `PgPlayerBinocularsMode` / `PgPlayerHumanMode` / `PgPlayerEnterSeatMode` /
   `PgPlayerSeatedMode` classes (PPC strings 7507–7533); `PgPlayerPDAMapMode @825666a8` has a decompiled
-  body in `docs/mercs2-pdb-analysis/gui-hud.md:244`. Anything gating on a mode other than 4 is blocked.
+  body in [`docs/mercs2-pdb-analysis/gui-hud.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/gui-hud.md?plain=1#L244). Anything gating on a mode other than 4 is blocked.
   `[faithful-blocker: yes]`
 - **`GetVehicleDisguiseState`'s return type.** The map calls it an integer summed from two sub-queries
   off `player+0x3A8` (`FUN_006ABC30`/`FUN_006ABC50`), but those were not read, and the only shipped
