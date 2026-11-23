@@ -3148,7 +3148,7 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Vegetation census (foliage instancing, `docs/reverse_engineer/foliage_instancing_plan.md`). Classifies every named `layers_static`
+/// Vegetation census (foliage instancing, [`docs/reverse_engineer/foliage_instancing_plan.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/foliage_instancing_plan.md)). Classifies every named `layers_static`
 /// placement with `mercs2_formats::veg`, then reports: coverage %, per-class + per-species counts,
 /// name-hash resolution, and a coarse 500 m XZ density grid (the "treed areas" for the density
 /// stretch goal). Emits the `pandemic_hash_m2` tag-set JSON to `out_path`.
@@ -3279,7 +3279,7 @@ pub fn veg_census(wadpath: &str, out_path: &str) -> Result<(), String> {
 
 /// Tree census (foliage instancing, the CANOPY layer). The trees are NOT placement records —
 /// they are veg MODELS bundled in the c3 quad-tree streaming cells, positioned by their cell's grid
-/// ID (see `docs/reverse_engineer/foliage_instancing_plan.md` §4.0.1). This walks the `WorldIndex`
+/// ID (see [`docs/reverse_engineer/foliage_instancing_plan.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/foliage_instancing_plan.md) §4.0.1). This walks the `WorldIndex`
 /// c3 cells, resolves each cell's model hashes to names (rainbow table), keeps the vegetation ones
 /// (`mercs2_formats::veg`), and reports the real tree count by species/region — counting instances at
 /// the near (P000) tier only so LOD variants aren't double-counted — plus how many cells also carry
