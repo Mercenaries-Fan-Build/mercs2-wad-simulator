@@ -43,7 +43,7 @@ cfuncs) Lua surface.
 
 ## Where it comes from
 
-Derived from `docs/reverse_engineer/audio_code_map.md` (+ `docs/data/audio_code_map.json`) and the
+Derived from [`docs/reverse_engineer/audio_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/audio_code_map.md) (+ [`docs/data/audio_code_map.json`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/data/audio_code_map.json)) and the
 decompiled Lua corpus (`08_audio_presentation`). The original stack is two cooperating layers: **Pal**
 (Pandemic Audio Library, the low-level engine) and **Pangea** (`Pg*`, the high-level message bus /
 sound DB / music machine / banks). Anchors the source itself cites:
