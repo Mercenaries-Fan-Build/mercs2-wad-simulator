@@ -1,7 +1,7 @@
 //! Population / spawner reflection component families — the ECS components a population zone,
 //! spawner, or living-world NPC carries.
 //!
-//! Code map §9 + `docs/mercs2-ecs/02_ai_perception_population.md`: every static-schema population
+//! Code map §9 + `crates/mercs2_workshop/data/mercs2-ecs/02_ai_perception_population.md`: every static-schema population
 //! component registers via the Keystone-A descriptor/field-template pattern; the census gives the m2
 //! hash, stride (`desc+0x24`), pool budget (`cdbsizes.ini`), and recovered field defaults. These are
 //! the faithful engine-side component structs with those constants verbatim; the ambient/spawner
