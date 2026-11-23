@@ -44,8 +44,8 @@ through `mercs2_engine::…`, which owns and re-exports them.
 * **Shell menu** (`menu.rs`) — the retail Lua shell state machine driving `shell.gfx`
   (`ChangeShellState("newGame"|…)`), reimplemented natively with the same option identity set
   (`autoContinue` / `newGame` / load / `quitGame`); save enumeration mirrors the retail profile
-  manager (`getListProfiles` / `addSaveGame`). Docs: `docs/ui/main_menu_structure.md`,
-  `docs/ui/shell_menu_lua_anatomy.md`.
+  manager (`getListProfiles` / `addSaveGame`). Docs: [`docs/ui/main_menu_structure.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/ui/main_menu_structure.md),
+  [`docs/ui/shell_menu_lua_anatomy.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/ui/shell_menu_lua_anatomy.md).
 * **PMC interior** (`pmc.rs`) — actor origin from `mrxhq.lua`; the renderable interior is placed
   instances in the `vz_state` overlay blocks 667/711/461/703 (the `pmc_interior_P000_Q3.block` = 3490
   asset block is FaceFX/Scaleform only, no geometry).
