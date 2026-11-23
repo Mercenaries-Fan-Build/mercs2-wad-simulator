@@ -8,12 +8,17 @@
 //!
 //! Soft/depth-buffered particles, ribbons/tracers (`Ribbon` 0x059b95b9) and GPU sim are out of scope
 //! here (see the gap doc).
+//!
+//! Everything the pass draws belongs to a world ([`WorldScope`]), as the scene's models and entities
+//! do: each world has its own atlas, effects, emitters and glow cards, and a frame of one world steps
+//! and draws that world's alone.
 
 use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3, Vec4};
 
 use crate::fx_sim::{EffectSim, Starter};
+use crate::scene::WorldScope;
 use mercs2_formats::fxdict::{EffectContainer, FxRect};
 
 pub use mercs2_formats::fxdict::Colr;
@@ -38,6 +43,17 @@ struct SpriteRaw {
     sin_cos: [f32; 2],
     intensity: f32,
     pad: f32,
+}
+
+/// The camera a frame's particles face and sort by ([`ParticleSystem::prepare`]).
+#[derive(Debug, Clone, Copy)]
+pub struct FxCamera {
+    /// The matrix the scene draws its geometry with.
+    pub view_proj: Mat4,
+    pub right: Vec3,
+    pub up: Vec3,
+    pub forward: Vec3,
+    pub eye: Vec3,
 }
 
 /// A started effect.
@@ -345,6 +361,22 @@ impl ActiveEmitter {
     }
 }
 
+/// What one world draws in the pass, and what its effects draw from.
+#[derive(Default)]
+struct ScopeFx {
+    /// The `vfx` atlas bound with the camera, set by [`ParticleSystem::set_atlas`].
+    bind: Option<wgpu::BindGroup>,
+    /// The `fxdict`, by frame key, set with the atlas.
+    rects: HashMap<u32, FxRect>,
+    effects: Vec<ActiveEffect>,
+    emitters: Vec<ActiveEmitter>,
+    /// Static additive glow cards (e.g. the PMC hall god-ray light shafts). Persistent; drawn every
+    /// frame into the additive bucket, no simulation.
+    glow_cards: Vec<GlowCard>,
+    /// This world's last `dt`: retail steps by the mean of the last two (`FUN_0048e550`).
+    last_dt: f32,
+}
+
 /// GPU + CPU state for the particle pass.
 pub struct ParticleSystem {
     pipeline_add: wgpu::RenderPipeline,
@@ -360,20 +392,14 @@ pub struct ParticleSystem {
     alpha_count: u32,
     /// Named effect templates (key = effect name hash, as Lua's `StartEmitter` names them).
     templates: HashMap<u32, EmitterDesc>,
-    emitters: Vec<ActiveEmitter>,
     next_id: u64,
-    /// Static additive glow cards (e.g. the PMC hall god-ray light shafts). Persistent; drawn every
-    /// frame into the additive bucket, no simulation.
-    glow_cards: Vec<GlowCard>,
-    effects: Vec<ActiveEffect>,
-    /// The `fxdict`, by frame key, set with the atlas.
-    rects: HashMap<u32, FxRect>,
-    /// Last frame's `dt`: retail steps by the mean of the last two (`FUN_0048e550`).
-    last_dt: f32,
+    /// Each world's atlas, effects, emitters and glow cards.
+    scopes: HashMap<WorldScope, ScopeFx>,
+    /// The world [`Self::prepare`] last filled the buffers for.
+    prepared: Option<WorldScope>,
     fx_pipeline: wgpu::RenderPipeline,
     fx_layout: wgpu::BindGroupLayout,
     fx_sampler: wgpu::Sampler,
-    fx_bind: Option<wgpu::BindGroup>,
     fx_buf: wgpu::Buffer,
     fx_cap: usize,
     fx_count: u32,
@@ -607,16 +633,12 @@ impl ParticleSystem {
             alpha_cap: 256,
             alpha_count: 0,
             templates: HashMap::new(),
-            emitters: Vec::new(),
             next_id: 1,
-            glow_cards: Vec::new(),
-            effects: Vec::new(),
-            rects: HashMap::new(),
-            last_dt: 0.0,
+            scopes: HashMap::new(),
+            prepared: None,
             fx_pipeline,
             fx_layout,
             fx_sampler,
-            fx_bind: None,
             fx_buf: make_vertex_buffer(device, 256 * SPRITE_SIZE),
             fx_cap: 256,
             fx_count: 0,
@@ -624,10 +646,9 @@ impl ParticleSystem {
         }
     }
 
-    /// Set what effects draw from: the `vfx` atlas and the `fxdict`'s rectangles.
-    pub fn set_atlas(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, rects: &[FxRect]) {
-        self.rects = rects.iter().map(|r| (r.key, *r)).collect();
-        self.fx_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+    /// Set what world `scope`'s effects draw from: the `vfx` atlas and the `fxdict`'s rectangles.
+    pub fn set_atlas(&mut self, device: &wgpu::Device, scope: WorldScope, view: &wgpu::TextureView, rects: &[FxRect]) {
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("effect sprite bind"),
             layout: &self.fx_layout,
             entries: &[
@@ -635,45 +656,59 @@ impl ParticleSystem {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.fx_sampler) },
             ],
-        }));
+        });
+        let s = self.scopes.entry(scope).or_default();
+        s.rects = rects.iter().map(|r| (r.key, *r)).collect();
+        s.bind = Some(bind);
     }
 
-    /// Whether [`Self::set_atlas`] has run.
-    pub fn has_atlas(&self) -> bool {
-        self.fx_bind.is_some()
+    /// Whether [`Self::set_atlas`] has run for world `scope`.
+    pub fn has_atlas(&self, scope: WorldScope) -> bool {
+        self.scopes.get(&scope).is_some_and(|s| s.bind.is_some())
     }
 
-    /// Start `effect` at a world position and rotation. An error when the atlas is not set or the
-    /// effect cannot run.
-    pub fn start_effect(&mut self, effect: &EffectContainer, starter: Starter, pos: Vec3, rot: Quat, repeat: bool) -> Result<EmitterId, String> {
-        if !self.has_atlas() {
-            return Err("an effect started before the vfx atlas was set".to_string());
-        }
+    /// Start `effect` in world `scope` at a position and rotation. An error when the world's atlas
+    /// is not set or the effect cannot run.
+    pub fn start_effect(&mut self, scope: WorldScope, effect: &EffectContainer, starter: Starter, pos: Vec3, rot: Quat, repeat: bool) -> Result<EmitterId, String> {
         let id = EmitterId(self.next_id);
+        let s = self.scopes.get_mut(&scope).filter(|s| s.bind.is_some()).ok_or("an effect started before its world's vfx atlas was set")?;
+        let sim = EffectSim::new(effect, &s.rects, starter, pos, rot, (id.0 as u32).wrapping_mul(2654435761))?;
+        s.effects.push(ActiveEffect { id, sim, repeat, paused: false, speed: 1.0 });
         self.next_id += 1;
-        let sim = EffectSim::new(effect, &self.rects, starter, pos, rot, (id.0 as u32).wrapping_mul(2654435761))?;
-        self.effects.push(ActiveEffect { id, sim, repeat, paused: false, speed: 1.0 });
         Ok(id)
     }
 
     pub fn effect_mut(&mut self, id: EmitterId) -> Option<&mut ActiveEffect> {
-        self.effects.iter_mut().find(|e| e.id == id)
+        self.scopes.values_mut().find_map(|s| s.effects.iter_mut().find(|e| e.id == id))
     }
 
     /// Take a started effect away at once, particles and all.
     pub fn remove_effect(&mut self, id: EmitterId) {
-        self.effects.retain(|e| e.id != id);
+        for s in self.scopes.values_mut() {
+            s.effects.retain(|e| e.id != id);
+        }
     }
 
-    /// Replace the set of static additive glow cards (persistent environmental FX like the PMC hall
-    /// god-ray light shafts). An empty slice clears them.
-    pub fn set_glow_cards(&mut self, cards: &[GlowCard]) {
-        self.glow_cards = cards.to_vec();
+    /// Replace world `scope`'s static additive glow cards (persistent environmental FX like the PMC
+    /// hall god-ray light shafts). An empty slice clears them.
+    pub fn set_glow_cards(&mut self, scope: WorldScope, cards: &[GlowCard]) {
+        self.scopes.entry(scope).or_default().glow_cards = cards.to_vec();
     }
 
-    /// Number of active glow cards (diagnostic / transparent-pass gate).
-    pub fn glow_card_count(&self) -> usize {
-        self.glow_cards.len()
+    /// Number of world `scope`'s glow cards (diagnostic).
+    pub fn glow_card_count(&self, scope: WorldScope) -> usize {
+        self.scopes.get(&scope).map_or(0, |s| s.glow_cards.len())
+    }
+
+    /// Drop everything world `scope` started and set: its atlas, effects, emitters and glow cards.
+    pub fn forget_scope(&mut self, scope: WorldScope) {
+        self.scopes.remove(&scope);
+        if self.prepared == Some(scope) {
+            self.prepared = None;
+            self.add_count = 0;
+            self.alpha_count = 0;
+            self.fx_count = 0;
+        }
     }
 
     /// Register a named effect template (key = the effect name hash Lua's `StartEmitter` uses).
@@ -681,15 +716,15 @@ impl ParticleSystem {
         self.templates.insert(name_hash, desc);
     }
 
-    /// Start a registered effect at a world position (the analogue of `ObjectState.StartEmitter`).
-    /// Returns `None` if no template with that hash is registered.
-    pub fn start_emitter(&mut self, name_hash: u32, origin: Vec3) -> Option<EmitterId> {
+    /// Start a registered effect in world `scope` at a position (the analogue of
+    /// `ObjectState.StartEmitter`). Returns `None` if no template with that hash is registered.
+    pub fn start_emitter(&mut self, scope: WorldScope, name_hash: u32, origin: Vec3) -> Option<EmitterId> {
         let desc = self.templates.get(&name_hash)?.clone();
-        Some(self.start_emitter_desc(desc, origin))
+        Some(self.start_emitter_desc(scope, desc, origin))
     }
 
-    /// Start an ad-hoc effect from an explicit descriptor at a world position.
-    pub fn start_emitter_desc(&mut self, desc: EmitterDesc, origin: Vec3) -> EmitterId {
+    /// Start an ad-hoc effect from an explicit descriptor in world `scope` at a position.
+    pub fn start_emitter_desc(&mut self, scope: WorldScope, desc: EmitterDesc, origin: Vec3) -> EmitterId {
         let id = EmitterId(self.next_id);
         self.next_id += 1;
         let burst = desc.burst;
@@ -705,62 +740,67 @@ impl ParticleSystem {
         for _ in 0..burst {
             e.spawn_one();
         }
-        self.emitters.push(e);
+        self.scopes.entry(scope).or_default().emitters.push(e);
         id
     }
 
     /// Stop an emitter: it ceases spawning; existing particles finish their lives and the emitter is
     /// reaped once empty. (Mirrors `ObjectState.StopEmitter`.)
     pub fn stop_emitter(&mut self, id: EmitterId) {
-        if let Some(e) = self.emitters.iter_mut().find(|e| e.id == id) {
+        if let Some(e) = self.scopes.values_mut().find_map(|s| s.emitters.iter_mut().find(|e| e.id == id)) {
             e.spawning = false;
         }
     }
 
-    /// Number of currently-live emitters (started, not yet reaped).
+    /// Number of currently-live emitters (started, not yet reaped) across every world.
     pub fn active_emitter_count(&self) -> usize {
-        self.emitters.len() + self.effects.len()
+        self.scopes.values().map(|s| s.emitters.len() + s.effects.len()).sum()
     }
 
-    /// Total live particle count across all emitters (test/diagnostic).
+    /// Total live particle count across all emitters of every world (test/diagnostic).
     pub fn live_particle_count(&self) -> usize {
-        self.emitters.iter().map(|e| e.particles.len()).sum::<usize>() + self.effects.iter().map(|e| e.sim.live_particles()).sum::<usize>()
+        self.scopes
+            .values()
+            .map(|s| s.emitters.iter().map(|e| e.particles.len()).sum::<usize>() + s.effects.iter().map(|e| e.sim.live_particles()).sum::<usize>())
+            .sum()
     }
 
-    /// Advance the simulation by `dt` seconds and reap finished emitters.
-    pub fn update(&mut self, dt: f32) {
+    /// Advance world `scope`'s simulation by `dt` seconds and reap its finished emitters. Other
+    /// worlds hold still.
+    pub fn update(&mut self, scope: WorldScope, dt: f32) {
         if dt <= 0.0 {
             return;
         }
-        for e in &mut self.emitters {
+        let Some(s) = self.scopes.get_mut(&scope) else { return };
+        for e in &mut s.emitters {
             e.update(dt);
         }
-        self.emitters.retain(|e| !e.is_dead());
-        let step = (self.last_dt + dt) * 0.5;
-        self.last_dt = dt;
-        for e in self.effects.iter_mut().filter(|e| !e.paused) {
+        s.emitters.retain(|e| !e.is_dead());
+        let step = (s.last_dt + dt) * 0.5;
+        s.last_dt = dt;
+        for e in s.effects.iter_mut().filter(|e| !e.paused) {
             e.sim.step(step * e.speed);
             if e.repeat && e.sim.is_finished() {
                 e.sim.restart();
             }
         }
-        self.effects.retain(|e| !e.sim.is_finished());
+        s.effects.retain(|e| !e.sim.is_finished());
     }
 
-    /// Upload the camera uniform + rebuild/upload the instance buffers. Call once per frame BEFORE
-    /// beginning the render pass. `view_proj` must be the SAME matrix the scene draws geometry with
-    /// (so particles register with the world); `eye` drives back-to-front sorting of alpha
-    /// particles.
-    pub fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        view_proj: Mat4,
-        cam_right: Vec3,
-        cam_up: Vec3,
-        cam_forward: Vec3,
-        eye: Vec3,
-    ) {
+    /// Whether the last [`Self::prepare`] filled anything to draw.
+    pub fn has_draws(&self) -> bool {
+        self.add_count > 0 || self.alpha_count > 0 || self.fx_count > 0
+    }
+
+    /// Upload the camera uniform + rebuild/upload the instance buffers from world `scope`'s effects,
+    /// emitters and glow cards. Call once per frame BEFORE beginning the render pass. The camera's
+    /// `view_proj` must be the SAME matrix the scene draws geometry with (so particles register with
+    /// the world); its `eye` drives back-to-front sorting of alpha particles.
+    pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scope: WorldScope, cam: &FxCamera) {
+        let FxCamera { view_proj, right: cam_right, up: cam_up, forward: cam_forward, eye } = *cam;
+        self.prepared = Some(scope);
+        let empty = ScopeFx::default();
+        let s = self.scopes.get(&scope).unwrap_or(&empty);
         let mut uni = [0f32; 28];
         uni[..16].copy_from_slice(&view_proj.to_cols_array());
         uni[16..19].copy_from_slice(&cam_right.to_array());
@@ -770,7 +810,7 @@ impl ParticleSystem {
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&uni));
 
         let mut sprites: Vec<SpriteRaw> = Vec::new();
-        for e in &self.effects {
+        for e in &s.effects {
             e.sim.sprites(cam_right, cam_up, cam_forward, |s| {
                 sprites.push(SpriteRaw {
                     center: s.pos,
@@ -783,6 +823,18 @@ impl ParticleSystem {
                 })
             });
         }
+        let mut add_inst: Vec<InstanceRaw> = Vec::new();
+        let mut alpha_inst: Vec<InstanceRaw> = Vec::new();
+        for e in &s.emitters {
+            match e.desc.blend {
+                BlendMode::Additive => e.emit_instances(&mut add_inst),
+                BlendMode::Alpha => e.emit_instances(&mut alpha_inst),
+            }
+        }
+        // Static glow cards are additive, persistent billboards (no sim).
+        for g in &s.glow_cards {
+            add_inst.push(InstanceRaw { center: g.pos, size: g.size, color: g.color });
+        }
         if sprites.len() > self.fx_cap {
             self.fx_cap = sprites.len().next_power_of_two();
             self.fx_buf = make_vertex_buffer(device, self.fx_cap * SPRITE_SIZE);
@@ -791,19 +843,6 @@ impl ParticleSystem {
             queue.write_buffer(&self.fx_buf, 0, bytemuck::cast_slice(&sprites));
         }
         self.fx_count = sprites.len() as u32;
-
-        let mut add_inst: Vec<InstanceRaw> = Vec::new();
-        let mut alpha_inst: Vec<InstanceRaw> = Vec::new();
-        for e in &self.emitters {
-            match e.desc.blend {
-                BlendMode::Additive => e.emit_instances(&mut add_inst),
-                BlendMode::Alpha => e.emit_instances(&mut alpha_inst),
-            }
-        }
-        // Static glow cards are additive, persistent billboards (no sim).
-        for g in &self.glow_cards {
-            add_inst.push(InstanceRaw { center: g.pos, size: g.size, color: g.color });
-        }
         // Sort alpha particles back-to-front for correct over-blending (additive is order-free).
         alpha_inst.sort_by(|a, b| {
             let da = (Vec3::from(a.center) - eye).length_squared();
@@ -848,12 +887,113 @@ impl ParticleSystem {
             pass.set_vertex_buffer(0, self.add_buf.slice(..));
             pass.draw(0..6, 0..self.add_count);
         }
-        if let (Some(bind), true) = (&self.fx_bind, self.fx_count > 0) {
+        let bind = self.prepared.and_then(|scope| self.scopes.get(&scope)).and_then(|s| s.bind.as_ref());
+        if let (Some(bind), true) = (bind, self.fx_count > 0) {
             pass.set_bind_group(0, bind, &[]);
             pass.set_pipeline(&self.fx_pipeline);
             pass.set_vertex_buffer(0, self.fx_buf.slice(..));
             pass.draw(0..6, 0..self.fx_count);
         }
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use mercs2_formats::fxdict::{
+        AttrDef, Atrb, AtrbValue, Emitter, EmitterGeom, EmitterShape, ParticleType, Text, ValueKind, PTYP_ATTRIBUTES_AFTER_COLR,
+        PTYP_ATTRIBUTES_BEFORE_COLR, TRFM_CHANNELS,
+    };
+
+    fn zero(d: &AttrDef) -> Atrb {
+        match d.kind {
+            ValueKind::F32 => Atrb::f32(d.hash, 0.0),
+            ValueKind::U32 => Atrb::u32(d.hash, 0),
+        }
+    }
+
+    /// A one-emitter effect that keeps spawning: 50 a second, each living 1 s.
+    fn effect() -> EffectContainer {
+        let mut attributes: Vec<Atrb> = PTYP_ATTRIBUTES_BEFORE_COLR.iter().chain(PTYP_ATTRIBUTES_AFTER_COLR.iter()).map(zero).collect();
+        for (name, v) in [("rate", 50.0), ("life", 1.0), ("size", 1.0), ("mass", 1.0), ("speed", 2.0)] {
+            let h = mercs2_formats::hash::pandemic_hash_m2(name);
+            attributes.iter_mut().find(|a| a.hash == h).expect("an attribute").value = AtrbValue::F32(v);
+        }
+        let mut record = [0.0; 13];
+        record[2] = 1.0;
+        let scl: [u32; 3] = [0xC557_4C5F, 0xE355_3D02, 0x655C_C56D];
+        EffectContainer {
+            shapes: vec![EmitterShape { records: vec![record] }],
+            emitters: vec![Emitter {
+                transform: [[0.0; 4]; 4],
+                channels: TRFM_CHANNELS.iter().map(|d| if scl.contains(&d.hash) { Atrb::f32(d.hash, 1.0) } else { zero(d) }).collect(),
+                geom: Some(EmitterGeom { shape_index: 0, word_00: 1 }),
+                particle: ParticleType { flags: 0, attributes, colr: Colr::uniform([255; 4], 0x3C00), text: Text { frames: vec![1] } },
+            }],
+            forces: vec![],
+        }
+    }
+
+    fn device() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .unwrap_or_else(|e| panic!("no adapter: {e}"));
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("particle scope test"), ..Default::default() }))
+            .unwrap_or_else(|e| panic!("no device: {e}"))
+    }
+
+    fn camera() -> FxCamera {
+        FxCamera { view_proj: Mat4::IDENTITY, right: Vec3::X, up: Vec3::Y, forward: Vec3::Z, eye: Vec3::new(0.0, 0.0, -5.0) }
+    }
+
+    /// Each world draws its own: an effect, emitter and glow card started in one world fill none of
+    /// another's buffers, a world that is not drawn holds still, and a forgotten world draws nothing.
+    #[test]
+    fn a_world_draws_only_what_it_started() {
+        let (device, queue) = device();
+        let mut p = ParticleSystem::new(&device, wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Depth32Float);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (a, b, c) = (WorldScope::new(), WorldScope::new(), WorldScope::new());
+        assert!(p.start_effect(a, &effect(), Starter::default(), Vec3::ZERO, Quat::IDENTITY, true).is_err(), "no atlas in world a yet");
+        p.set_atlas(&device, a, &view, &[]);
+        assert!(p.has_atlas(a) && !p.has_atlas(b));
+        p.start_effect(a, &effect(), Starter::default(), Vec3::ZERO, Quat::IDENTITY, true).unwrap_or_else(|e| panic!("{e}"));
+        p.set_glow_cards(b, &[GlowCard { pos: [0.0; 3], size: 1.0, color: [1.0; 4] }]);
+        for _ in 0..30 {
+            p.update(a, 1.0 / 60.0);
+        }
+
+        p.prepare(&device, &queue, a, &camera());
+        assert!(p.fx_count > 0 && p.add_count == 0, "world a draws its effect and not b's card: {} sprites, {} cards", p.fx_count, p.add_count);
+        p.prepare(&device, &queue, b, &camera());
+        assert_eq!((p.fx_count, p.add_count), (0, 1), "world b draws its card and none of a's sprites");
+        p.prepare(&device, &queue, c, &camera());
+        assert!(!p.has_draws(), "world c started nothing");
+
+        let time = |p: &ParticleSystem| p.scopes[&a].effects[0].sim.time();
+        let before = time(&p);
+        p.update(b, 1.0 / 60.0);
+        assert_eq!(time(&p), before, "a frame of b leaves a's effect where it was");
+
+        p.forget_scope(a);
+        assert!(!p.has_atlas(a));
+        p.prepare(&device, &queue, a, &camera());
+        assert!(!p.has_draws(), "a forgotten world draws nothing");
     }
 }
 
