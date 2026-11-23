@@ -1335,6 +1335,48 @@ fn disjoint_stringdb_edits_both_survive_link() {
     assert_eq!(merged_text(&reverse, only_b), "QM B ONLY");
 }
 
+/// A string write reaches the front end as well as gameplay: the link merges it into each copy of its
+/// table — vz.wad's into the link WAD, shell.wad's into the link's shell patch, both at the table's one
+/// path — and a table only shell.wad has (`french`) links into the shell patch alone.
+#[test]
+fn a_string_write_reaches_the_front_end_s_table() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let french = mercs2_formats::hash::pandemic_hash_m2("french");
+    let added = mercs2_formats::stringdb::key_hash("[QmFrontEndTest.Added]");
+    let root = scratch("front_end_strings");
+    let a = english_editor(&root.join("a"), "strings-fe", &[], &["[QmFrontEndTest.Added] = QM ENGLISH".to_string()]);
+    let dir = root.join("b");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/french.txt"), "[QmFrontEndTest.Added] = QM FRANCAIS\n").unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: strings-fr, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: add_stringdb_keys\n    target: french\n    strings: src/french.txt\n",
+    )
+    .unwrap();
+    let b = discover::open(&dir).expect("open");
+
+    let out = root.join("out");
+    let report = build::link_installed(&request(&[&a, &b], &arg_ids(2)), &mut game, &corpus, &out, None).expect("link");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    for table in [english, french] {
+        assert!(report.plan.link_block_paths.contains(&build::stringdb_block_path(table)));
+    }
+    let text = |wad: &str, table: u32| -> Option<String> {
+        let bytes = std::fs::read(out.join(wad)).expect(wad);
+        let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+        let block = contents.blocks.iter().find(|b| b.path_string == build::stringdb_block_path(table))?;
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        string_entries(&dec[20..]).into_iter().find(|(k, _)| *k == added).map(|(_, t)| t)
+    };
+    assert_eq!(text(build::LINK_WAD_NAME, english).as_deref(), Some("QM ENGLISH"), "gameplay's english table");
+    assert_eq!(text(build::LINK_SHELL_PATCH_NAME, english).as_deref(), Some("QM ENGLISH"), "the front end's english table");
+    assert_eq!(text(build::LINK_SHELL_PATCH_NAME, french).as_deref(), Some("QM FRANCAIS"), "the front end's french table");
+    assert_eq!(text(build::LINK_WAD_NAME, french), None, "vz.wad has no french table");
+}
+
 /// `replace_stringdb_text` in the merge: a text replacement resolves
 /// against the table AS MERGED SO FAR in load order, and one that matches nothing is an error.
 /// Shipment `setter` sets a key's text to a free-text marker; `replacer` replaces that text. Setter
@@ -3813,7 +3855,165 @@ mod sound {
         let mut game = stack_for(&[&s, &m]);
         let ids = super::arg_ids(2);
         let e = build::link_installed(&super::request(&[&s, &m], &ids), &mut game, &corpus(), &dir.join("_link2"), None).unwrap_err().to_string();
-        assert!(e.contains("shellmod: replaces SHELL, and qm edits SHELL itself when the set has a level (the Extras page lists qmlevel)"), "{e}");
+        assert!(
+            e.contains("shellmod: replaces SHELL, and qm edits SHELL itself when the set has a level or a menu item (the Extras page lists qmlevel; menu items: none)"),
+            "{e}"
+        );
+    }
+
+    /// A Shipment adding a main-menu item: a front-end library, its label and help in every installed
+    /// language, and an `add_menu_item`. Its strings, written as `add_stringdb_keys`, with the languages
+    /// it writes (`langs`, `(table, label text)`).
+    fn menu_shipment(dir: &Path, name: &str, langs: &[(&str, &str)], action: &str) -> LoadedShipment {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/modsmenu.lua"), "function Open()\n  print(\"[mods] open\")\nend\n").unwrap();
+        let mut contributions = String::from(
+            "  - kind: add_script\n    name: modsmenu\n    source: src/modsmenu.lua\n    load: { when: shell.boot, in: [front_end] }\n",
+        );
+        for (table, text) in langs {
+            std::fs::write(dir.join(format!("src/{table}.txt")), format!("[QmTest.Menu.Mods] = {text}\n[QmTest.Menu.ModsHelp] = {text}: the installed mods.\n")).unwrap();
+            contributions.push_str(&format!("  - kind: add_stringdb_keys\n    target: {table}\n    strings: src/{table}.txt\n"));
+        }
+        contributions.push_str(&format!(
+            "  - kind: add_menu_item\n    menu: shell.main\n    label: QmTest.Menu.Mods\n    after: SHELL.MainMenu.Options\n    help: QmTest.Menu.ModsHelp\n    action: {action}\n"
+        ));
+        named_shipment(dir, name, &contributions)
+    }
+
+    /// The languages the retail install has a WAD for, which is what the link sets labels in.
+    const INSTALLED: [(&str, &str); 5] = [("english", "MODS"), ("french", "MODULES"), ("german", "MODS"), ("italian", "MOD"), ("spanish", "MODS")];
+
+    /// ★ A main-menu item, linked: qm's edit of SHELL (retail's, with the item after OPTIONS, its Enter
+    /// sending `qmMenuItem` and its text clips reading `shell_MAINMENU_qm_text`) in the shell patch, the
+    /// promised block; the label texture in each installed language's patch; and the dispatcher, naming
+    /// the item and its action, in `qm_shell_modloader`. A label missing from an installed language, and
+    /// an action whose module the set does not load in the front end, are refused, naming them.
+    #[test]
+    fn a_menu_item_puts_qm_s_shell_edit_its_labels_and_its_dispatcher_in_the_patches() {
+        let dir = scratch("menu_item");
+        let s = menu_shipment(&dir.join("mods"), "menu-mods", &INSTALLED, "modsmenu.Open");
+        let mut game = stack_for(&[&s]);
+        let ids = super::arg_ids(1);
+        let out = dir.join("_link");
+        let report = build::link_installed(&super::request(&[&s], &ids), &mut game, &corpus(), &out, None).expect("links");
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        let blocks = blocks_of(&out, shell);
+        let path = build::movie_block_path(m2(mercs2_quartermaster::shell_extras::SHELL));
+        assert!(report.plan.link_block_paths.contains(&path), "the plan promises {path}");
+        let movie_block = blocks.iter().find(|b| b.path_string == path).unwrap_or_else(|| panic!("no {path} in the shell patch"));
+        let dec = mercs2_formats::sges::decompress_sges(&movie_block.compressed_data).unwrap();
+        let parsed = mercs2_formats::ucfx::walk_decompressed_block(&dec, "SHELL").0;
+        let container = mercs2_formats::ucfx::get_container_by_type_hash(&parsed, mercs2_formats::types::TYPE_HASH_CFX_PACK, Some(m2("SHELL")))
+            .expect("the block carries SHELL's cfx_pack");
+        let movie = mercs2_formats::gfx::cfx_pack_movie(&container, "SHELL").unwrap();
+        mercs2_formats::gfx_actions::check_decodes(&movie).expect("the edited SHELL decodes");
+        let inflated = mercs2_formats::gfx_stream::inflate(&movie).expect("the edited SHELL inflates");
+        for needle in ["FSCommand:qmMenuItem", "QmTest.Menu.Mods", "shell_MAINMENU_qm_text", "qm_item7_btn"] {
+            assert!(has(&inflated, needle), "the edited SHELL carries {needle}");
+        }
+        let loader = chunk(&shell_scripts(&blocks), "qm_shell_modloader");
+        for needle in ["qmMenuItem", "QmTest.Menu.Mods", "modsmenu.Open", "menu-mods"] {
+            assert!(has(&loader, needle), "the loader carries {needle}");
+        }
+        let texture = m2("shell_MAINMENU_qm_text");
+        let mut languages = Vec::new();
+        for p in &report.placements {
+            if let Destination::LanguagePatch { language, .. } = &p.destination {
+                let lblocks = blocks_of(&out, p);
+                let b = block_at(&lblocks, texture);
+                assert!(entries_of(b).iter().any(|(n, t, _)| *n == texture && *t == mercs2_formats::types::TYPE_HASH_TEXTURE), "{language}");
+                languages.push(language.clone());
+            }
+        }
+        languages.sort();
+        assert_eq!(languages, ["english", "french", "german", "italian", "spanish"]);
+
+        let english_only = menu_shipment(&dir.join("en"), "menu-en", &INSTALLED[..1], "modsmenu.Open");
+        let mut game = stack_for(&[&english_only]);
+        let e = build::link_installed(&super::request(&[&english_only], &ids), &mut game, &corpus(), &dir.join("_link_en"), None)
+            .unwrap_err()
+            .to_string();
+        for language in ["french", "german", "italian", "spanish"] {
+            assert!(e.contains(&format!("QmTest.Menu.Mods in {language}")) && e.contains(&format!("QmTest.Menu.ModsHelp in {language}")), "{e}");
+        }
+        assert!(!e.contains("in english"), "{e}");
+
+        let elsewhere = menu_shipment(&dir.join("elsewhere"), "menu-elsewhere", &INSTALLED, "othermenu.Open");
+        let mut game = stack_for(&[&elsewhere]);
+        let e = build::link_installed(&super::request(&[&elsewhere], &ids), &mut game, &corpus(), &dir.join("_link_elsewhere"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("menu-elsewhere: menu item QmTest.Menu.Mods: action \"othermenu.Open\": no add_script of the installed set named othermenu loads in the front end"), "{e}");
+    }
+
+    /// The SHELL movie the link ships, from its shell patch.
+    fn linked_shell_movie(out: &Path, report: &build::LinkReport) -> Vec<u8> {
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        let blocks = blocks_of(out, shell);
+        let path = build::movie_block_path(m2(mercs2_quartermaster::shell_extras::SHELL));
+        let movie_block = blocks.iter().find(|b| b.path_string == path).unwrap_or_else(|| panic!("no {path} in the shell patch"));
+        let dec = mercs2_formats::sges::decompress_sges(&movie_block.compressed_data).unwrap();
+        let parsed = mercs2_formats::ucfx::walk_decompressed_block(&dec, "SHELL").0;
+        let container = mercs2_formats::ucfx::get_container_by_type_hash(&parsed, mercs2_formats::types::TYPE_HASH_CFX_PACK, Some(m2("SHELL")))
+            .expect("the block carries SHELL's cfx_pack");
+        mercs2_formats::gfx::cfx_pack_movie(&container, "SHELL").unwrap()
+    }
+
+    /// ★ A level and a menu item in one set: SHELL carries qm's Extras edit and the item (both pages'
+    /// strings, and the item reachable from the key handler), and the loader carries both pages. A
+    /// Shipment that rewrites a retail caption (`SHELL.MainMenu.Options` in french) beside them changes
+    /// nothing about how the labels are set: retail's art is split by the text it was drawn from.
+    #[test]
+    fn a_level_and_a_menu_item_share_qm_s_shell_edit() {
+        let dir = scratch("menu_and_level");
+        let lvl = level_shipment(&dir.join("level"), "mrxtask", true);
+        let item = menu_shipment(&dir.join("mods"), "menu-mods", &INSTALLED, "modsmenu.Open");
+        std::fs::create_dir_all(dir.join("fr/src")).unwrap();
+        std::fs::write(dir.join("fr/src/french.txt"), "[SHELL.MainMenu.Options] = PARAMETRES DU JEU\n").unwrap();
+        let fr = named_shipment(&dir.join("fr"), "fr-captions", "  - kind: edit_stringdb\n    target: french\n    strings: src/french.txt\n");
+        let mut game = stack_for(&[&lvl, &item, &fr]);
+        let ids = super::arg_ids(3);
+        let out = dir.join("_link");
+        let report = build::link_installed(&super::request(&[&lvl, &item, &fr], &ids), &mut game, &corpus(), &out, None).expect("links");
+        let movie = linked_shell_movie(&out, &report);
+        mercs2_formats::gfx_actions::check_decodes(&movie).expect("the edited SHELL decodes");
+        let inflated = mercs2_formats::gfx_stream::inflate(&movie).expect("inflates");
+        for needle in ["FSCommand:qmMenuItem", "QmTest.Menu.Mods", "qm_item7_btn", "onlineListDLCMaps"] {
+            assert!(has(&inflated, needle), "the edited SHELL carries {needle}");
+        }
+        assert_ne!(build::sha256_hex(&movie), mercs2_quartermaster::shell_extras::EDITED_SHELL_SHA256, "the items are added over the Extras edit");
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        let loader = chunk(&shell_scripts(&blocks_of(&out, shell)), "qm_shell_modloader");
+        for needle in ["onlineSelectDLC", "qmMenuItem", "modsmenu.Open", "qmlevel"] {
+            assert!(has(&loader, needle), "the loader carries {needle}");
+        }
+    }
+
+    /// A page takes as many added items as it has spare bullets (two on the main menu), across the set: a
+    /// third fails the link, naming every item and its Shipment.
+    #[test]
+    fn a_page_refuses_more_items_than_it_has_room_for() {
+        let dir = scratch("menu_full");
+        let shipment = |tag: &str, label: &str| {
+            let d = dir.join(tag);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/m.lua"), "function Open() end\n").unwrap();
+            let mut c = format!("  - kind: add_script\n    name: {tag}menu\n    source: src/m.lua\n    load: {{ when: shell.boot, in: [front_end] }}\n");
+            for (table, _) in INSTALLED {
+                std::fs::write(d.join(format!("src/{table}.txt")), format!("[{label}] = MODS\n")).unwrap();
+                c.push_str(&format!("  - kind: add_stringdb_keys\n    target: {table}\n    strings: src/{table}.txt\n"));
+            }
+            c.push_str(&format!("  - kind: add_menu_item\n    menu: shell.main\n    label: {label}\n    after: SHELL.MainMenu.Options\n    action: {tag}menu.Open\n"));
+            named_shipment(&d, &format!("menu-{tag}"), &c)
+        };
+        let (a, b, c) = (shipment("a", "QmTest.A"), shipment("b", "QmTest.B"), shipment("c", "QmTest.C"));
+        let mut game = stack_for(&[&a, &b, &c]);
+        let ids = super::arg_ids(3);
+        let e = build::link_installed(&super::request(&[&a, &b, &c], &ids), &mut game, &corpus(), &dir.join("_link"), None).unwrap_err().to_string();
+        assert!(
+            e.contains("menu page shell.main takes 2 added item(s), and the installed set adds 3: QmTest.A (menu-a), QmTest.B (menu-b), QmTest.C (menu-c)"),
+            "{e}"
+        );
     }
 
     /// An import neither the level nor the game holds fails the build, naming it and its importer.
