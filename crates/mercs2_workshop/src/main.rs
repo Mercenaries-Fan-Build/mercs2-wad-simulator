@@ -18,7 +18,9 @@
 //!
 //! Headless modes (each runs and exits). `<name|0xH>` takes a raw m2 hash or a name to hash:
 //! - `--list [filter]`                     — catalog dump (models + textures), substring-filtered
-//! - `--inventory [class]`                 — models grouped by vehicle class (heli, tank, car, …)
+//! - `--inventory [class]`                 — models grouped by vehicle class (heli, tank, car, …):
+//!                                           the class of the templates that name the model, then
+//!                                           of its name (`index::AssetRow::vehicle_class`)
 //! - `--check <name|0xH>`                  — load a model end-to-end: geometry, textures, clips,
 //!                                           bones, LOD tiers, destruction SM, ActionTable coverage
 //! - `--states <name|0xH>`                 — dump the destruction state machine, names resolved
@@ -352,14 +354,24 @@ fn main() {
     // tank, car, boat, …). `--inventory [class]` filters to one class.
     if let Some(i) = args.iter().position(|a| a == "--inventory") {
         let want = args.get(i + 1).filter(|s| !s.starts_with("--")).map(|s| s.to_ascii_lowercase());
-        let stack = match app::WadStack::open(&wadpath, &overlays) {
+        let mut stack = match app::WadStack::open(&wadpath, &overlays) {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
+        let mut idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
+        // The world's templates: a model a vehicle template names is a vehicle, named or not.
+        match app::load_kit_templates(&mut stack) {
+            Ok(t) => {
+                idx.add_kit_templates(&t);
+            }
+            Err(e) => {
+                eprintln!("--inventory: cannot read the world's templates (worldentity): {e}");
+                std::process::exit(1);
+            }
+        }
         let mut by_class: std::collections::BTreeMap<&'static str, Vec<&index::AssetRow>> =
             std::collections::BTreeMap::new();
-        for r in idx.models() {
+        for r in idx.models().iter().filter(|r| r.template.is_none()) {
             if let Some(c) = r.vehicle_class() {
                 if want.as_deref().is_none_or(|w| w == c) {
                     by_class.entry(c).or_default().push(r);
@@ -370,7 +382,15 @@ fn main() {
             rows.sort_by(|a, b| a.label().cmp(&b.label()));
             println!("\n== {class} ({}) ==", rows.len());
             for r in rows {
-                println!("  0x{:08X}{}  {}", r.hash, stack.tag(r.src), r.label());
+                // A model with no name is told apart by the templates that name it.
+                let templates = match r.name {
+                    Some(_) => String::new(),
+                    None => {
+                        let of: Vec<String> = idx.world_templates.iter().filter(|t| t.model == r.hash).map(|t| t.label()).collect();
+                        format!("  ({})", of.join("; "))
+                    }
+                };
+                println!("  0x{:08X}{}  {}{templates}", r.hash, stack.tag(r.src), r.label());
             }
         }
         return;
