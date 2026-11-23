@@ -2,7 +2,7 @@
 //!
 //! # Provenance & honesty boundary
 //! WILDSTAR-sourced shape (`WSWater::CalcWaveOffsets`, recovered from the Saboteur Xbox360 devkit —
-//! `docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`): the exe drives its surface from
+//! [`docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/saboteur_mercs2_crossval_render_physics.md)): the exe drives its surface from
 //! **two summed time-animated sinusoids** — `cos/sin((time + phase) · freq) · amp` plus a second
 //! `cos/sin(time · freq) · amp2` component — i.e. a 2-component sinusoidal wave field, not an FFT ocean.
 //! That structure (2 components, phase advancing with time) is what this models.
