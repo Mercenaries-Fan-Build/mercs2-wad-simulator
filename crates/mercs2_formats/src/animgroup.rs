@@ -319,16 +319,8 @@ fn read_trnm(container: &[u8]) -> Option<Vec<u32>> {
         // every track resolved to no bone and the clip drove nothing. Two independent facts pin the
         // low half as the count: the `size == 8 + 4*count` identity (208 == 8 + 4*50), and the Havok
         // header's own `numTransformTracks` (50). The high half is a flag we do not need to read.
-        let count = (read_u32_le(t, 0) & 0xFFFF) as usize;
         // A valid trnm is exactly `[u32 count/flags][u32 leading][count x u32 hash]`.
-        if size != 8 + count * 4 {
-            return None;
-        }
-        let mut v = Vec::with_capacity(count);
-        for k in 0..count {
-            v.push(read_u32_le(t, 8 + k * 4));
-        }
-        return Some(v);
+        return crate::anim_container::trnm_bone_hashes(t).ok();
     }
     None
 }
