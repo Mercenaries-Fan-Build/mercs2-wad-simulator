@@ -1,0 +1,97 @@
+# The retail menu pages `add_menu_item` adds to (crate::menu_items), read from retail SHELL (sha256
+# ca06957d6184d6f460b9549844fed999779f53d1ca825d86c13436269015c851). Every name, depth, frame and index
+# below is the movie's own; crate::menu_items checks each against the movie before it edits.
+#
+# A page's items are listed in the order Up and Down walk them. `key` is the item's label stringdb key: a
+# name when pandemic_hash_m2 of it is the hash the movie pushes, else that hash as 0x… (no name known).
+# `help` is the item's ShellTextArray index, whose second entry the help bar shows; `button` the instance
+# in `container`; `rollover` the root hit clip in `rollover_frame`; `bullet` the depth of the clip in
+# `container` the button follows (sprite 424's onEnterFrame copies its _x/_y).
+
+[[page]]
+id = "shell.main"
+movie = "SHELL"
+index = "main_btnSelect"
+container = 424
+# New buttons are copies of this button sprite; its `label_frame` script reads
+# ShellTextArray[`template_label`][0] into its text.
+button_template = 410
+label_frame = 9
+template_label = 23
+labels = "ShellTextArray"
+# The ShellTextArray index of the first item qm adds; retail fills 0-404.
+first_label = 1000
+# Retail's labels are art: each button's text clips show a window of `shell_MAINMENU_text`. The added
+# items' labels are set in the lettering (crate::label_art) into this texture, which the copies of the
+# template's text clips read.
+label_art = "shell_MAINMENU_qm_text"
+# The depth in `container` of the first added button, and the step to the next.
+button_depths = [50, 4]
+rollover_frame = 179
+# The root depth of the first added hit clip, and the step to the next.
+rollover_depths = [1068, 2]
+# The unnamed bullets below the last item, nearest first: the items below an added one move down onto them.
+spare_bullets = [3, 1]
+
+[page.scripts]
+# onKeyDown's switch on `index`, each case a switch on keyCode (38/87 Up, 40/83 Down, 13 Enter).
+keys = { frame = 179, block = 0 }
+# doButton, findNewButton, prevButton, the hit clips' handlers, and the frame's highlight switch.
+mouse = { frame = 179, block = 3 }
+# The switch that plays the selected button's _out when the page is left, and updateTextStrings.
+leave = { frame = 0, block = 0 }
+labels = { frame = 0, block = 0 }
+# The onEnterFrame that binds each button to its bullet.
+bind = { sprite = 424, frame = 0, block = 0 }
+# Every button's _off when the bullets go.
+off = [{ sprite = 424, frame = 49, block = 0 }, { sprite = 424, frame = 149, block = 0 }]
+# The switches that play the selected button's _over when the bullets come back.
+highlight = [{ sprite = 424, frame = 89, block = 0 }, { sprite = 424, frame = 190, block = 0 }]
+
+[[page.item]]
+key = "SHELL.MainMenu.Continue"
+index = 1
+button = "continue_btn"
+help = 20
+rollover = "continue_rollover"
+bullet = 15
+
+[[page.item]]
+key = "SHELL.MainMenu.NewGame"
+index = 2
+button = "newgame_btn"
+help = 21
+rollover = "newgame_rollover"
+bullet = 13
+
+[[page.item]]
+key = "SHELL.MainMenu.JoinGame"
+index = 3
+button = "joingame_btn"
+help = 22
+rollover = "joingame_rollover"
+bullet = 11
+
+[[page.item]]
+key = "SHELL.MainMenu.Options"
+index = 4
+button = "settings_btn"
+help = 23
+rollover = "settings_rollover"
+bullet = 9
+
+[[page.item]]
+key = "0xaba15838"
+index = 5
+button = "profiles_btn"
+help = 30
+rollover = "profiles_rollover"
+bullet = 7
+
+[[page.item]]
+key = "0xb618aecb"
+index = 6
+button = "LTI_exit_btn"
+help = 221
+rollover = "exit_rollover"
+bullet = 5
