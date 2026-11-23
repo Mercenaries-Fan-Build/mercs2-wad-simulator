@@ -2,10 +2,10 @@
 //!
 //! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
-//! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
+//! `corpus_calls` = call sites observed in `corpus/mercs2-luacd/src`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
-//! `_SYS` is the engine's low-level module-system bootstrap surface (`docs/lua_engine_bindings_audit.md`
+//! `_SYS` is the engine's low-level module-system bootstrap surface ([`docs/lua_engine_bindings_audit.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/lua_engine_bindings_audit.md)
 //! §_SYS): `_IMPORT(env, name)` / `_INHERIT(env, name)` / `_DYNAMIC_IMPORT` / `_DYNAMIC_REMOVE` /
 //! `_MODULEINDEX` / `_GETFENV(level)`. In this reimpl the authentic module system is implemented
 //! **natively in Rust** (`crate::ModuleSystem::import`/`inherit`, wired via the compat prelude), so
