@@ -37,7 +37,7 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | Flag | Args | Repeatable | Effect |
 |------|------|------------|--------|
 | `--list [filter]` | optional substring | No | Dumps the whole catalog — every model then every texture — as `KIND<tag>\t0xHASH\tlabel`. Optional `filter` keeps only rows whose label contains it (case-insensitive). Overlay-aware. |
-| `--inventory [class]` | optional class | No | Lists models grouped by inferred vehicle class (helicopter, tank, car, boat, …), derived from the `_veh_<token>_` name segment. Optional `class` filters to one class. Overlay-aware. |
+| `--inventory [class]` | optional class | No | Lists models grouped by vehicle class (helicopter, tank, car, boat, …). A model a `worldentity` template with vehicle physics names (`_CarPhysicsV2`, `_TankPhysics`, `_BoatPhysics`, `_HelicopterPhysics`, `_JetPhysics`) is a vehicle whatever its name is, and is listed with its templates when it has no name; the `_veh_<token>_` name segment refines the class when that physics simulates it (truck, semi, APC, …). A model no such template names is classed by the name segment alone. Optional `class` filters to one class. Overlay-aware. Exits 1 when the `worldentity` cannot be read. |
 | `--check <name\|0xHASH>` | one asset | No | Loads a model end-to-end through the full LOD-block chain — geometry, textures, bones, clip count, LOD tiers, bbox, destruction state machine, and (when the name maps a character) the AnimationLookup/ActionTable coverage. Also prints asset-layer residency stats. Overlay-aware. |
 | `--states <name\|0xHASH>` | one asset | No | Dumps the model's destruction state machine (NODE/STAT family) with names resolved, plus HIER node count and SEGM state tiers. Prints `no state machine` when absent. Overlay-aware. |
 | `--audio-export <bank\|query> <dir>` | 2 positional | No | Exports voice-over clips as the Audio page does: the bank of that name as the page lists it (routed from `English.wad` beside the base WAD), or else every clip whose bank, speaker, caption or file name holds every word of the query — each as a 16-bit PCM WAV under its shipped file name, plus `captions.csv` (`file,wave,bank,speaker,caption,length_s`), into `<dir>/<bank or search_query>/`. Reads the samples from `Audios/vo_stream.english.pws`. Exit 0; 2 with the reason when the arguments are missing, nothing matches, or a file cannot be read or written. |
@@ -135,7 +135,7 @@ Your `<name|0xHASH>` argument is hashed independently with the built-in m2 hash,
 resolves the same whether or not the bundle knows it — only how results are *displayed* changes.
 
 **`class:` in `--export-bundle` fans out.** `--export-bundle class:tank` selects every model whose
-inferred vehicle class matches and bundles each; a plain name/hash bundles exactly one. An empty
+vehicle class matches and bundles each; a plain name/hash bundles exactly one. An empty
 match set is a failure (see below). The class taxonomy is the same one `--inventory` prints.
 
 ## Examples
