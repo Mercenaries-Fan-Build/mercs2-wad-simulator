@@ -62,7 +62,19 @@ impl RainbowTable {
     /// every `(hash, name)` pair listed in `rejected` (`crates/mercs2_workshop/data/rejected_names.json`).
     /// A rejected entry whose name does not hash to its key is an error.
     pub fn load_harvested(path: &Path, rejected: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let rejected = Self::load(rejected).map_err(|e| format!("{}: {e}", rejected.display()))?;
+        let rejected = Self::load_rejected(rejected)?;
+        let mut t = Self::load(path).map_err(|e| format!("{}: {e}", path.display()))?.without(&rejected);
+        t.m2.retain(|_, names| {
+            names.retain(|n| mercs2_formats::hash::is_identifier_shaped(n));
+            !names.is_empty()
+        });
+        Ok(t)
+    }
+
+    /// Load the reject list (`crates/mercs2_workshop/data/rejected_names.json`): the `(hash, name)`
+    /// pairs that are collision debris. An entry whose name does not hash to its key is an error.
+    pub fn load_rejected(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let rejected = Self::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
         for (hash, names) in &rejected.m2 {
             for n in names {
                 if mercs2_formats::hash::pandemic_hash_m2(n) != *hash {
@@ -70,13 +82,18 @@ impl RainbowTable {
                 }
             }
         }
-        let mut t = Self::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        t.m2.retain(|hash, names| {
+        Ok(rejected)
+    }
+
+    /// This table with every `(hash, name)` pair of `rejected` dropped. A hash left with no name is
+    /// dropped too, so a later table's name for it is taken in a merge.
+    pub fn without(mut self, rejected: &RainbowTable) -> Self {
+        self.m2.retain(|hash, names| {
             let bad = rejected.candidates(*hash);
-            names.retain(|n| mercs2_formats::hash::is_identifier_shaped(n) && !bad.contains(n));
+            names.retain(|n| !bad.contains(n));
             !names.is_empty()
         });
-        Ok(t)
+        self
     }
 
     /// Add `other`'s names for the hashes this table does not have yet (existing entries win, as in
@@ -113,5 +130,37 @@ impl RainbowTable {
 
     pub fn is_empty(&self) -> bool {
         self.m2.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RainbowTable;
+    use mercs2_formats::hash::pandemic_hash_m2;
+
+    fn table(pairs: &[(u32, &[&str])]) -> RainbowTable {
+        RainbowTable { m2: pairs.iter().map(|(h, n)| (*h, n.iter().map(|s| s.to_string()).collect())).collect() }
+    }
+
+    /// Retail model 0xE25098E4: the rainbow table's only name for it is the debris `Y8n\`, and the
+    /// fragment merged after it holds the name the model's own template spells. With the reject
+    /// list applied the debris no longer keeps the real name out of the merge.
+    #[test]
+    fn a_rejected_name_leaves_the_hash_to_a_later_table() {
+        let rock = pandemic_hash_m2("global_env_rocksmall01");
+        assert_eq!(rock, 0xE250_98E4);
+        assert_eq!(rock, pandemic_hash_m2("Y8n\\"));
+        let rejected = table(&[(rock, &["Y8n\\"])]);
+        let rainbow = || table(&[(rock, &["Y8n\\"]), (7, &["kept", "also_kept"])]);
+        let fragment = || table(&[(rock, &["global_env_rocksmall01"])]);
+
+        let mut unfiltered = rainbow();
+        unfiltered.merge(fragment());
+        assert_eq!(unfiltered.resolve(rock), Some("Y8n\\"));
+
+        let mut filtered = rainbow().without(&rejected);
+        filtered.merge(fragment().without(&rejected));
+        assert_eq!(filtered.resolve(rock), Some("global_env_rocksmall01"));
+        assert_eq!(filtered.candidates(7), ["kept", "also_kept"]);
     }
 }
