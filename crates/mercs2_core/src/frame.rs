@@ -1,7 +1,7 @@
 //! Keystone C — the master frame spine.
 //!
 //! The modern analog of the shipped engine's per-frame driver, recovered in
-//! `docs/reverse_engineer/scheduler_tick_code_map.md`:
+//! [`docs/reverse_engineer/scheduler_tick_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/scheduler_tick_code_map.md):
 //!
 //! * **RunFrame `FUN_00630ef0`** — the 9-stage per-frame order (QPC dt → device-reinit gate →
 //!   timestep compute → fixed accumulator drain → master update → render → frame-time end →
