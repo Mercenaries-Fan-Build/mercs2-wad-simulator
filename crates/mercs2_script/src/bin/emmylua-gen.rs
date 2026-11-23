@@ -1,11 +1,11 @@
 //! `emmylua-gen` — write both artifacts for the Mercenaries 2 Lua binding surface.
 //!
 //! - **EmmyLua stubs** (`<stubs-out>/<Global>.lua`) — lua-language-server input for IDE
-//!   autocomplete. Default: `tools/wad_simulator/output/emmylua/mercs2/`. Override with
+//!   autocomplete. Default: `output/emmylua/mercs2/` in this repository. Override with
 //!   `--stubs-out <dir>` (or `--out <dir>`, legacy alias).
 //! - **Markdown docs pages** (`<docs-out>/<Global>.md` + `index.md`) — one browsable reference
-//!   page per Lua global, rendered by GitHub. Default: `docs/modding/bindings/` in the parent
-//!   repo. Override with `--docs-out <dir>`.
+//!   page per Lua global, rendered by GitHub. Default: `docs/modding/bindings/` in this
+//!   repository. Override with `--docs-out <dir>`.
 //!
 //! Pass `--stubs-only` or `--docs-only` to emit just one set.
 
@@ -134,17 +134,12 @@ fn default_stubs_out() -> PathBuf {
     p
 }
 
-/// Default docs output: `<parent-repo-root>/docs/modding/bindings/`.
-///
-/// `tools/wad_simulator/` is a nested git repo inside `notes-on-the-released-game/`, so two
-/// more pops from the wad_simulator root land us at the parent repo, whose `docs/` tree serves
-/// the modder-facing markdown that GitHub renders.
+/// Default docs output: this repository's `docs/modding/bindings/`, the modder-facing markdown GitHub
+/// renders beside the rest of the modding docs.
 fn default_docs_out() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // mercs2_script
-    p.pop(); // crates
-    p.pop(); // wad_simulator
-    p.pop(); // tools → parent repo root
+    p.pop(); // crates → repository root
     p.push("docs");
     p.push("modding");
     p.push("bindings");
