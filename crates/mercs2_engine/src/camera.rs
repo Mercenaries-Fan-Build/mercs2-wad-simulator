@@ -8,7 +8,7 @@
 //! plus the boom-collision math that is pure engine mechanism.
 //!
 //! ## Every preset value is reverse-engineered, not invented
-//! (see `docs/reverse_engineer/camera_code_map.md` + memory `camera-live-capture-and-mode-system`)
+//! (see [`docs/reverse_engineer/camera_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/camera_code_map.md) + memory `camera-live-capture-and-mode-system`)
 //!  - **On-foot offset + rest pitch:** live x32dbg capture of the *paused* PMC-interior on-foot camera —
 //!    eye ≈ up +2.1, back −2.2, ~0 side; rest pitch ≈ −7.5° (from the owner-record quat @+0x54).
 //!  - **near / far:** the game's own Lua — `Graphics.Camera.SetNearFar(0, 0.3, 500, 0)`
