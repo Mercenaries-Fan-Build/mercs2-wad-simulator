@@ -2,7 +2,7 @@
 //!
 //! `REQUIRED` is the full cfunc surface this namespace must eventually back with
 //! real bodies (source: the live Surface-B trace `mods/lua_trace_asi/reference/binding_map.json`;
-//! `corpus_calls` = call sites observed in `docs/mercs2-luacd`). The exe is the oracle — do not trim
+//! `corpus_calls` = call sites observed in `corpus/mercs2-luacd/src`). The exe is the oracle — do not trim
 //! this list; a name leaves the "stubs remaining" tally only when [`install`] gives it a real body.
 //!
 //! To back this namespace: add real bindings inside [`install`] via `b.real(..)` (or
@@ -418,7 +418,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // A widget location is a RECT `[x1, y1, x2, y2]`, and `Widget:GetLocation()` destructures four
     // values back out (`mrxguibase.lua:759`).
     //
-    // `FUN_005B4FA0` (`docs/reverse_engineer/hud_widget_code_map.md` §3.2) reads the current rect, then
+    // `FUN_005B4FA0` (`https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hud_widget_code_map.md` §3.2) reads the current rect, then
     // each of the four coordinates through `FUN_0059F780` (`lua_isnumber`, then `lua_tonumber`): one
     // that is not a number keeps the current value. Given `x1` and `y1` and neither far corner, it
     // moves the widget (vtbl `+0x14`, `0x00627270`: the offset is added to all four, so the size is
