@@ -114,7 +114,7 @@ pub use frame::{LayerStack, LayerTransition, LAYER_COUNT, LAYER_GAME};
 /// Fixed-timestep simulation clock. Real frame deltas are accumulated and drained in `fixed_dt`
 /// chunks so the sim advances deterministically regardless of render framerate — the way the
 /// original engine ticks its update (**decoupled fixed-sim + variable-render**, RunFrame stages 3–4,
-/// `docs/reverse_engineer/scheduler_tick_code_map.md` §6). `dt` equals `fixed_dt` during a step;
+/// [`docs/reverse_engineer/scheduler_tick_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/scheduler_tick_code_map.md) §6). `dt` equals `fixed_dt` during a step;
 /// `elapsed`/`tick` count simulated time and steps.
 #[derive(Clone, Copy, Debug)]
 pub struct Time {
