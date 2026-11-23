@@ -55,6 +55,8 @@ mercs2_core = { workspace = true }
 mercs2_formats = { workspace = true }
 # The Shipment format, linter and builder — the Quartermaster dock is its UI front end.
 mercs2_quartermaster = { workspace = true }
+# A Depot item's `item.yaml`: the same maintained serde-yaml fork qm reads manifests with.
+serde_norway = "0.9"
 mercs2_bridge = { workspace = true }
 mercs2_destruction = { workspace = true }
 # The Live page reads pmc_blackbox.log with loadprobe's own parser and ladder.
