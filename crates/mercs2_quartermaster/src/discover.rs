@@ -374,6 +374,8 @@ impl Contribution {
             Contribution::LevelAsset { rungs, .. } => out.extend(rungs.iter().map(|r| ("rungs", r.file.as_path()))),
             // Downloaded at build into qm's cache, never a `src/` file.
             Contribution::FetchPackage { .. } => {}
+            // String keys, a page id and a function name: no file.
+            Contribution::AddMenuItem { .. } => {}
             Contribution::NativeHook { plugin, .. } => {
                 if let Some(p) = plugin {
                     out.push(("plugin", p.as_path()));
