@@ -289,7 +289,7 @@ fn chatter_sites_resolve_in_every_reference_build() {
         let s = resolve_chatter(&Image::from_file(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap_or_else(|e| panic!("{id}: {e}"));
         // Read with Ghidra: the ChatterSet registrar's container (FUN_00641020 v1.1 / FUN_00641120 v1.0), the
         // field writer (FUN_0065BD30 v1.1; v1.0 FUN_0065BDC0 is the ChatterSet template of
-        // docs/mercs2-ecs/02_ai_perception_population.md), the lookup, the add, the mask setter and its flag byte.
+        // crates/mercs2_workshop/data/mercs2-ecs/02_ai_perception_population.md), the lookup, the add, the mask setter and its flag byte.
         let (container, writer, lookup, add, mask, flag) = if v11 {
             (0x17bc498, 0x65bd30, 0x587d80, 0x64a570, 0x665500, 0xcfa58a)
         } else {
