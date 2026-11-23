@@ -1,5 +1,5 @@
 //! The billboard-tree render loops' sites, found in the game image without per-build addresses, for the
-//! BUG-014 fix (`docs/fixpack/bug_register.md`): the tree Z-prepass loop never pushes a world matrix, so its
+//! BUG-014 fix ([`docs/fixpack/bug_register.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/fixpack/bug_register.md)): the tree Z-prepass loop never pushes a world matrix, so its
 //! packets draw with whatever matrix the previous draw pushed. The shadow tree loop pushes the identity
 //! first; the fix detours the Z-prepass loop and does the same before it runs. Byte signatures over `.text`
 //! in the form of [`crate::lua_sites::Pattern`], cross-checked against the frame stores
