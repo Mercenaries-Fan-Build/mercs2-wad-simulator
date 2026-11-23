@@ -4,7 +4,7 @@
 //! (ragdoll) depend on, so those leaf crates compile against the *contract*, never against
 //! `mercs2_physics` directly (no leaf→leaf edge; the carve rule in
 //! `reimplementation_parallelization_plan.md` §4). The physics system (row 22,
-//! `docs/reverse_engineer/physics_code_map.md`) implements it; an early impl can be backed by the
+//! [`docs/reverse_engineer/physics_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/physics_code_map.md)) implements it; an early impl can be backed by the
 //! existing terrain-heightmap + `collision_tris` raycast we already have and later swapped for the
 //! full Havok `hkpCharacterProxy` path.
 //!
