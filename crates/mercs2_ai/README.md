@@ -43,10 +43,10 @@ Provenance as the crate's own sources state it:
 | Action bus | AI code map §2.2 — the local-enqueue primitive `FUN_00423d10` (`EnterCriticalSection(&DAT_0124aef8)`; `if (DAT_012476a8 < 0x400)`; 0xc-byte `{guid,hash,0}` entry at `&DAT_012476f0 + count*0xc`), posted by `DirectAction` `FUN_0056aa70`. The famous **"Ai 1024" is this ring**, not a per-entity component pool (an explicit §2.2 correction). MP replication to clients (`FUN_006bb960`) is the host-gated next stage and is not implemented here. |
 | Perception update | AI code map §2.4 — the per-entity perception-record maintenance (`perception.rs` cites `FUN_00600240`; the 0x64-byte record layout with TotalObservers `[0x13]`, TotalAware `+0x4e`, HostileObservers `[0x14]`, HostileAware `+0x52`, Attackers `[0x15]` is cited in `components.rs` against `FUN_0058d520`). |
 | Components + defaults | AI code map §3/§4 — the component census (m2 hash, stride, pool) and its "Headline tunables": AiSkill 10, Perception range 120, Stimulus strength/radius 100 + falloff 40, Target default True, Squad max 50, all `AiBehavior` restriction toggles default false. |
-| Relation matrix | AI code map §5 + `docs/reverse_engineer/faction_reputation_code_map.md` — the directed `[-100,100]` attitude matrix the combat→faction loop reads for price scaling / pursuit / HUD colour. |
-| Vehicle-AI actuation | `docs/reverse_engineer/road_graph_ai_driving_code_map.md` (referenced by the crate; the actuation itself is not in this crate). |
+| Relation matrix | AI code map §5 + [`docs/reverse_engineer/faction_reputation_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/faction_reputation_code_map.md) — the directed `[-100,100]` attitude matrix the combat→faction loop reads for price scaling / pursuit / HUD colour. |
+| Vehicle-AI actuation | [`docs/reverse_engineer/road_graph_ai_driving_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/road_graph_ai_driving_code_map.md) (referenced by the crate; the actuation itself is not in this crate). |
 
-Code map: `docs/reverse_engineer/ai_code_map.md`. Owned Lua namespace: `Ai`.
+Code map: [`docs/reverse_engineer/ai_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/ai_code_map.md). Owned Lua namespace: `Ai`.
 
 ## Usage
 
