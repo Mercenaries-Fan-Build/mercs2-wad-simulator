@@ -30,7 +30,7 @@ use mercs2_quartermaster::build::{self, BuildError, BuildReport};
 use mercs2_quartermaster::discover::{self, LoadedShipment};
 use mercs2_quartermaster::lint::{Diagnostic, Severity};
 use mercs2_quartermaster::manifest::{
-    wearer_table_key, CapabilityReq, ConflictDecl, Contribution, Requirement, ShipmentReq, SoundCue, Touch, Wearer,
+    wearer_table_key, CapabilityReq, ConflictDecl, Contribution, Requirement, ShipmentReq, SoundCue, Touch,
 };
 use mercs2_quartermaster::names::NameTable;
 
@@ -116,8 +116,6 @@ pub enum Act {
     /// commit could only ever append a new contribution, and there was no way back to the one you
     /// came from.
     Craft(Craft, usize),
-    /// Pick or unpick a hero whose wardrobe an outfit joins.
-    ToggleWearer(usize, &'static str),
     /// Replace contribution `.0` with an edited copy.
     ///
     /// The form edits a CLONE and emits this when a field commits, rather than mutating the
@@ -176,7 +174,7 @@ impl GlbFacts {
 
 /// Read a source GLB's shape without decoding its payload. `None` when it is not a readable glTF (an
 /// OBJ, or an unreadable file) — the caller simply shows nothing.
-fn probe_glb(abs: &Path) -> Option<GlbFacts> {
+pub(crate) fn probe_glb(abs: &Path) -> Option<GlbFacts> {
     let g = gltf::Gltf::open(abs).ok()?;
     let mut names: Vec<String> = Vec::new();
     for skin in g.skins() {
@@ -210,7 +208,7 @@ fn probe_glb(abs: &Path) -> Option<GlbFacts> {
 }
 
 /// The source model an outfit/model contribution imports, if it has one.
-fn model_source(c: &Contribution) -> Option<&Path> {
+pub(crate) fn model_source(c: &Contribution) -> Option<&Path> {
     match c {
         // An existing-model outfit carries no source file, so it has no model to import.
         Contribution::AddOutfit { model, .. } => model.as_deref(),
@@ -260,6 +258,9 @@ fn glb_facts_note(ui: &mut egui::Ui, facts: Option<&GlbFacts>, advice: GlbAdvice
 #[derive(Default)]
 pub struct Panel {
     shipment: Option<LoadedShipment>,
+    /// The manifest text [`Self::shipment`] was read from: an edit is refused once the file on
+    /// disk is no longer this text ([`Panel::mutate`]).
+    manifest_text: Option<String>,
     diagnostics: Vec<Diagnostic>,
     report: Option<BuildReport>,
     /// Set when opening or building failed outright, as opposed to producing findings.
@@ -421,8 +422,10 @@ impl Panel {
     pub fn open_shipment(&mut self, root: &Path, names: Option<&NameTable>) {
         self.report = None;
         self.selected = None;
+        self.manifest_text = None;
         match discover::open(root) {
             Ok(s) => {
+                self.manifest_text = std::fs::read_to_string(&s.manifest_path).ok();
                 self.diagnostics =
                     mercs2_quartermaster::lint::lint(&s.manifest, Some(&s.root), names);
                 self.status = format!(
@@ -445,9 +448,9 @@ impl Panel {
 
     /// Edit the manifest, write it back, and re-check.
     ///
-    /// Writes YAML whatever the file was read as, so a Shipment authored in TOML or JSON is
-    /// refused rather than silently re-emitted in another format under the same filename.
-    /// `to_yaml` is documented as "the one format the Quartermaster WRITES".
+    /// Writes the manifest in the format it was read as, rewriting only what the edit changed, so
+    /// the rest of the author's text stays ([`mercs2_quartermaster::lossless`]). Refused, leaving the
+    /// file as it is, once the manifest on disk is no longer the text the page read.
     pub(crate) fn mutate(
         &mut self,
         names: Option<&NameTable>,
@@ -456,16 +459,21 @@ impl Panel {
         let Some(sh) = &self.shipment else {
             return Err("no shipment open".into());
         };
-        if sh.format != mercs2_quartermaster::Format::Yaml {
-            return Err(format!(
-                "this Shipment is {:?}; editing writes YAML, so it is read-only here",
-                sh.format
-            ));
+        let (path, root, format) = (sh.manifest_path.clone(), sh.root.clone(), sh.format);
+        let now = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if self.manifest_text.as_deref() != Some(now.as_str()) {
+            return Err(format!("{} changed on disk since it was read; it is left as it is. Reopen the Shipment", path.display()));
         }
-        let (path, root) = (sh.manifest_path.clone(), sh.root.clone());
         let mut m = sh.manifest.clone();
         edit(&mut m);
-        let text = mercs2_quartermaster::to_yaml(&m)?;
+        let text = mercs2_quartermaster::lossless::rewrite(
+            &now,
+            format,
+            &m,
+            |t| mercs2_quartermaster::parse_unvalidated(t, format),
+            |m| mercs2_quartermaster::to_text(m, format),
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
         std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         // Re-open rather than patch state in place: the linter has to see the file that is now on
         // disk, not the one we think we wrote.
@@ -749,7 +757,7 @@ fn sev_chip(ui: &mut egui::Ui, s: Severity) {
 }
 
 /// A human label — what the contribution is called, not how it is built.
-fn contribution_name(c: &Contribution) -> String {
+pub(crate) fn contribution_name(c: &Contribution) -> String {
     match c {
         Contribution::AddOutfit { name, .. }
         | Contribution::AddModel { name, .. }
@@ -758,7 +766,30 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddLanguage { name, .. }
         | Contribution::AddLevel { name, .. }
         | Contribution::LevelAsset { name, .. }
+        | Contribution::AddScript { name, .. }
+        | Contribution::AddLayer { name, .. }
+        | Contribution::AddAnimation { name, .. }
+        | Contribution::AddFx { name, .. }
+        | Contribution::AddFxSprite { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
+        Contribution::ReplaceLua { target, .. }
+        | Contribution::ReplacePhy2 { target, .. }
+        | Contribution::ReplaceAnimation { target, .. }
+        | Contribution::ReplaceShader { target, .. }
+        | Contribution::ReplaceTerrainCell { target, .. }
+        | Contribution::AddStringDbKeys { target, .. }
+        | Contribution::ReplaceStringDbText { target, .. } => target.clone(),
+        Contribution::ReplaceFx { target, .. } => target.to_string(),
+        Contribution::AddPlacement { layer, entity } => format!("{layer} {}", leaf(entity)),
+        Contribution::AddShader { family, classes } => {
+            classes.first().map(|c| c.name.clone()).unwrap_or_else(|| family.name().to_string())
+        }
+        Contribution::LoadSound { soundbank, wavebank, stream, .. } => [soundbank, wavebank, stream]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" "),
         Contribution::AddShopItem { id, .. } | Contribution::FetchPackage { id, .. } => id.clone(),
         Contribution::AddMenuItem { label, .. } => label.clone(),
         Contribution::AddSound { bank, .. } => bank.clone(),
@@ -777,6 +808,7 @@ fn contribution_name(c: &Contribution) -> String {
         ),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
+        | Contribution::SetSpawnLists { target, .. }
         | Contribution::EditStateMachine { target, .. }
         | Contribution::EditStringDb { target, .. } => target.clone(),
         Contribution::EditWorld { layer, .. } => layer.clone(),
@@ -793,11 +825,6 @@ fn contribution_name(c: &Contribution) -> String {
         Contribution::PlaceFile { file, .. } => leaf(file),
         Contribution::AddRuntimeDll { dll } => leaf(dll),
         Contribution::Raw { payload, .. } => leaf(payload),
-        // New Contribution kinds (add_script/replace_lua/replace_phy2/add_placement/add_layer/
-        // add_animation/replace_animation/add_shader/replace_shader/add_fx/replace_fx/
-        // replace_terrain_cell/add_stringdb_keys/replace_stringdb_text)
-        // don't have first-class workshop UI yet; fall back to the machine tag.
-        other => other.kind().to_string(),
     }
 }
 
@@ -912,7 +939,6 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_model", "New model", "A new model on a donor's rig"),
             ("add_texture", "New texture", "A new texture under a name you choose"),
             ("add_sound", "New sound bank", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
-            ("load_sound", "Load sound", "Load a soundbank, wavebank or stream from the mod loader"),
             ("replace_sound_bank", "Replace sound bank", "Replace every cue of a shipped sound bank, same entry name"),
             ("replace_sound_cue", "Replace sound cue", "Replace one cue of a shipped sound bank with a new WAV"),
             ("replace_sound_wave", "Replace a line", "Replace one line of a shipped wavebank wherever it plays"),
@@ -946,7 +972,9 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
         "Script",
         &[
             ("patch_lua", "Patch script", "Append to a shipped script"),
+            ("set_spawn_lists", "Spawn lists", "Set a shipped script's spawn-list calls to other lists"),
             ("activate_layer", "Activate layer", "Turn a hidden world-state layer on (permanent)"),
+            ("load_sound", "Load sound", "Load a soundbank, wavebank or stream the game or this Shipment ships, in sessions that do not load it"),
             ("add_script", "New script", "Mint a new Lua module (import-able)"),
             ("replace_lua", "Replace script", "Replace a shipped script's bytecode"),
             ("add_shop_item", "New shop item", "Add a purchasable shop item"),
@@ -1051,9 +1079,9 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
         // A script routed from the Missions / Systems domain, or a table from anywhere: `asset` is the
         // script / table name, so it becomes the patch target. The sound kinds take no seed: the
         // Audio domain routes a script's name, which is not a bank.
-        Contribution::PatchLua { target, .. } | Contribution::EditStringDb { target, .. } => {
-            *target = asset.to_string()
-        }
+        Contribution::PatchLua { target, .. }
+        | Contribution::SetSpawnLists { target, .. }
+        | Contribution::EditStringDb { target, .. } => *target = asset.to_string(),
         _ => {}
     }
     Some(c)
@@ -1115,7 +1143,13 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             cues: Vec::new(),
             load_in: Vec::new(),
         },
-        "load_sound" => Contribution::LoadSound { soundbank: None, wavebank: None, stream: None, sessions: Vec::new() },
+        // It names no sound and no session: M0222 fires until a bank and a session are chosen.
+        "load_sound" => Contribution::LoadSound {
+            soundbank: None,
+            wavebank: None,
+            stream: None,
+            sessions: Vec::new(),
+        },
         // The bank names a bank the game ships, so it starts empty (M0215) until it is entered.
         "replace_sound_bank" => Contribution::ReplaceSoundBank {
             bank: String::new(),
@@ -1177,6 +1211,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             target: "wifpmcinterior".into(),
             append: PathBuf::from("src/patch.lua"),
         },
+        "set_spawn_lists" => Contribution::SetSpawnLists { target: "gurcon002".into(), lists: Vec::new() },
         "native_hook" => Contribution::NativeHook {
             target: Target::Retail,
             plugin: Some(PathBuf::from("src/plugin.asi")),
@@ -1222,7 +1257,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             phy2: PathBuf::from("src/collision.phy2"),
         },
         "add_placement" => Contribution::AddPlacement {
-            layer: "layers_static".into(),
+            layer: "vz_state_pmccon004".into(),
             entity: PathBuf::from("src/placement.yaml"),
         },
         "add_layer" => Contribution::AddLayer {
@@ -1247,15 +1282,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         // `shader-registry` capability.
         "add_shader" => Contribution::AddShader {
             family: mercs2_quartermaster::shader::ShaderFamily::Pixel,
-            classes: ["", "_pl", "_sl", "_pl_sl"]
-                .iter()
-                .map(|suffix| mercs2_quartermaster::manifest::ShaderClass {
-                    name: format!("{name}{suffix}"),
-                    stem: name.clone(),
-                    shader: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader.asm"),
-                    shader_low: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader_low.asm"),
-                })
-                .collect(),
+            classes: crate::kindform::shader_classes(mercs2_quartermaster::shader::ShaderFamily::Pixel, &name, &[]),
         },
         "replace_shader" => Contribution::ReplaceShader {
             target: "PgMeshVP".into(),
@@ -1461,7 +1488,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 /// The blast radius here is COMPUTED, never authored — only `raw` declares its own, and it is the
 /// one kind that can. Showing it is the point of giving this a main area: it answers "can this
 /// coexist with someone else's Shipment", which a modder cannot work out alone.
-pub fn center(root: &mut egui::Ui, p: &Panel, names: Option<&NameTable>) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel, sources: crate::kindform::Sources) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     egui::CentralPanel::default()
         .frame(
@@ -1520,26 +1547,8 @@ pub fn center(root: &mut egui::Ui, p: &Panel, names: Option<&NameTable>) -> Vec<
                 // Moved off Modkit, which is Tier 1 — install, load order, deploy. Choosing which
                 // hero wears an outfit is authoring, and authoring belongs to the tool that has the
                 // rig, the donor and the linter. Modkit keeping its own copy is what produced two
-                // independent writers of `_tOutfits` and the half-applied conflict.
-                if let Contribution::AddOutfit { wearer, slug, .. } = c {
-                    theme::section(ui, "Wardrobe", Some(slug), true, |ui| {
-                        ui.label(
-                            egui::RichText::new(
-                                "`_tOutfits` has one list per hero, so the wearers are a closed set; the outfit joins the list of each hero picked.",
-                            ).small()
-                            .color(theme::FAINT),
-                        );
-                        ui.add_space(7.0);
-                        ui.horizontal(|ui| {
-                            for w in WEARERS {
-                                let on = wearer.heroes().iter().any(|h| wearer_table_key(h) == wearer_table_key(w));
-                                if theme::pill(ui, w, on).clicked() {
-                                    acts.push(Act::ToggleWearer(i, w));
-                                }
-                            }
-                        });
-                    });
-                }
+                // independent writers of `_tOutfits` and the half-applied conflict. The wearer pills
+                // are `contribution_form`'s, the one writer the Shipment bench and the Depot share.
 
                 // ── FIELDS: the contribution, editable.
                 //
@@ -1556,14 +1565,8 @@ pub fn center(root: &mut egui::Ui, p: &Panel, names: Option<&NameTable>) -> Vec<
                         .filter(|a| a.is_file())
                         .and_then(|a| p.model_facts_for(&a));
                     let mut edited = c.clone();
-                    let commit = contribution_form(
-                        ui,
-                        &mut edited,
-                        root,
-                        &s.manifest.shipment.name,
-                        names,
-                        facts.as_ref(),
-                    );
+                    let ctx = FormCtx { root, shipment_name: &s.manifest.shipment.name, facts: facts.as_ref(), sources, template_classes: None };
+                    let commit = contribution_form(ui, &mut edited, &ctx);
                     if commit && edited != *c {
                         acts.push(Act::Edit(i, Box::new(edited)));
                     }
@@ -1700,7 +1703,7 @@ fn source_state(root: &Path, rel: &Path) -> (theme::FieldState, Option<String>) 
 }
 
 /// A `src/`-relative file row plus its live verdict.
-fn source_row(
+pub(crate) fn source_row(
     ui: &mut egui::Ui,
     label: &str,
     value: &mut PathBuf,
@@ -1713,50 +1716,6 @@ fn source_row(
         theme::field_note(ui, state, &n);
     }
     changed
-}
-
-/// An asset-reference row: free text, with the hash it resolves to shown live.
-///
-/// Every reference goes through `manifest::asset_hash`, which is a documented mandate — a bare
-/// `0x…` IS the hash and anything else is hashed as a name. Hashing the *string* `"0x56130E64"`
-/// yields `0xC6B71C1F`, so a field that computed its own preview differently would show one number
-/// while the builder used another.
-fn asset_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut String,
-    names: Option<&NameTable>,
-) -> bool {
-    let empty = value.trim().is_empty();
-    let state = if empty { theme::FieldState::Bad } else { theme::FieldState::Neutral };
-    let r = theme::text_field(ui, label, value, "name or 0xHASH", state);
-    if empty {
-        theme::field_note(ui, theme::FieldState::Bad, "required");
-    } else {
-        let h = mercs2_quartermaster::manifest::asset_hash(value);
-        match mercs2_quartermaster::manifest::bare_hash(value) {
-            // M0130: a hash is one-way, so a manifest full of them cannot be reviewed. Offer the
-            // name when one is known — advisory, never blocking.
-            Some(_) => match names.and_then(|n| n.reverse(h)) {
-                Some(name) => theme::field_note(
-                    ui,
-                    theme::FieldState::Warn,
-                    &format!("M0130 — this is `{name}`; a name diffs, a hash does not"),
-                ),
-                None => theme::field_note(
-                    ui,
-                    theme::FieldState::Neutral,
-                    &format!("0x{h:08X} — no name known for this hash"),
-                ),
-            },
-            None => theme::field_note(
-                ui,
-                theme::FieldState::Neutral,
-                &format!("hashes to 0x{h:08X}"),
-            ),
-        }
-    }
-    r.lost_focus()
 }
 
 /// A plain required-text row (asset NAME being minted, slug, display).
@@ -1816,7 +1775,7 @@ fn touches_editor(ui: &mut egui::Ui, touches: &mut Vec<Touch>, required: bool) -
             let label = format!("touch {i}");
             let r = theme::text_field(ui, &label, &mut t.0, "name or 0xHASH", state);
             commit |= r.lost_focus();
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("Remove").clicked() {
                 remove = Some(i);
             }
         });
@@ -1903,7 +1862,7 @@ fn parse_f32(text: &str) -> Result<f32, String> {
 }
 
 /// A finite `f64`.
-fn parse_f64(text: &str) -> Result<f64, String> {
+pub(crate) fn parse_f64(text: &str) -> Result<f64, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("required".into());
@@ -1925,7 +1884,7 @@ struct HeldNumber<T: Clone> {
 
 /// A number row. The text is held in egui memory while it is typed and written when the field
 /// loses focus and `parse` accepts it; text `parse` refuses stays in the field with the reason.
-fn number_row<T: Copy + PartialEq + Send + Sync + 'static>(
+pub(crate) fn number_row<T: Copy + PartialEq + Send + Sync + 'static>(
     ui: &mut egui::Ui,
     label: &str,
     value: &mut T,
@@ -2038,8 +1997,7 @@ fn sound_load_in_row(ui: &mut egui::Ui, load_in: &mut Vec<mercs2_quartermaster::
     use mercs2_quartermaster::manifest::LoadSession;
     let mut commit = false;
     ui.horizontal(|ui| {
-        let lw = theme::field_label_w(ui.available_width());
-        ui.add_sized([lw, 18.0], egui::Label::new("Load in"));
+        theme::field_label(ui, "Load in");
         for session in LoadSession::ALL {
             let on = load_in.contains(&session);
             if theme::pill(ui, session.token(), on).clicked() {
@@ -2079,15 +2037,17 @@ fn sound_bank_row(
     what: &str,
     bank: &mut String,
     language: &mut Option<mercs2_quartermaster::manifest::Language>,
+    s: &crate::kindform::Sources,
 ) -> bool {
+    use crate::kindform::{pick, List};
     use mercs2_quartermaster::manifest::{bare_hash, Language};
     use mercs2_quartermaster::sound::{entry_name, is_vo_bank};
     let mut commit = false;
-    let (label, placeholder, note) = match what {
-        "wavebank" => ("Wavebank", "vo_stream", "a wavebank the game ships, as its groups name it, or its entry's hash"),
-        _ => ("Bank", "ui_hud", "a bank the game ships, as its Lua loads it, or its entry's hash"),
+    let (label, placeholder, note, list) = match what {
+        "wavebank" => ("Wavebank", "vo_stream", "a wavebank the game ships, as its groups name it, or its entry's hash", List::WaveBanks),
+        _ => ("Bank", "ui_hud", "a bank the game ships, as its Lua loads it, or its entry's hash", List::SoundBanks),
     };
-    if text_row(ui, label, bank, placeholder, true) {
+    if pick(ui, label, bank, list, s, true, placeholder) {
         commit = true;
         if bare_hash(bank).is_none() && !is_vo_bank(bank) {
             *language = None;
@@ -2254,7 +2214,7 @@ fn sound_cue_list(ui: &mut egui::Ui, cues: &mut Vec<SoundCue>, root: &Path) -> b
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 theme::eyebrow(ui, &format!("Cue {i}"));
-                if ui.small_button("\u{2715}").on_hover_text("Remove this cue").clicked() {
+                if ui.small_button("Remove").clicked() {
                     remove = Some(i);
                 }
             });
@@ -2272,18 +2232,26 @@ fn sound_cue_list(ui: &mut egui::Ui, cues: &mut Vec<SoundCue>, root: &Path) -> b
     commit
 }
 
+/// What a contribution's field editor reads besides the contribution: the item's root, the
+/// Shipment's name, the model file's facts, the pickers' lists, and the game's template classes an
+/// `add_fx` template is edited against field by field (without them, by class and field name).
+pub(crate) struct FormCtx<'a> {
+    pub root: &'a Path,
+    pub shipment_name: &'a str,
+    pub facts: Option<&'a GlbFacts>,
+    pub sources: crate::kindform::Sources<'a>,
+    pub template_classes: Option<&'a crate::depotfx::Classes>,
+}
+
 /// Edit every field of one contribution. Returns true when a change should be written back.
 ///
 /// The caller passes a CLONE; this mutates it, and the caller compares and emits `Act::Edit`.
-fn contribution_form(
-    ui: &mut egui::Ui,
-    c: &mut Contribution,
-    root: &Path,
-    shipment_name: &str,
-    names: Option<&NameTable>,
-    facts: Option<&GlbFacts>,
-) -> bool {
+/// Every arm names every field of its kind, so a field qm adds does not compile until it has an
+/// editor here.
+pub(crate) fn contribution_form(ui: &mut egui::Ui, c: &mut Contribution, ctx: &FormCtx) -> bool {
+    use crate::kindform::{self as kf, List};
     use mercs2_quartermaster::manifest::{Layer, PlaceIn, Target};
+    let (root, shipment_name, facts, s) = (ctx.root, ctx.shipment_name, ctx.facts, &ctx.sources);
     let mut commit = false;
 
     match c {
@@ -2301,6 +2269,21 @@ fn contribution_form(
             );
             commit |= text_row(ui, "Wardrobe slug", slug, "MyOutfit", true);
             commit |= text_row(ui, "Display", display, "My outfit", true);
+            ui.horizontal(|ui| {
+                theme::field_label(ui, "Wearer");
+                for w in WEARERS {
+                    let on = wearer.heroes().iter().any(|h| wearer_table_key(h) == wearer_table_key(w));
+                    if theme::pill(ui, w, on).clicked() {
+                        kf::toggle_wearer(wearer, w);
+                        commit = true;
+                    }
+                }
+            });
+            theme::field_note(
+                ui,
+                if wearer.heroes().is_empty() { theme::FieldState::Bad } else { theme::FieldState::Neutral },
+                "`_tOutfits` has one list per hero; the outfit joins the list of each hero picked",
+            );
             // The chatter set is one of the sets qm knows the game holds (M0142), so it is a choice.
             ui.horizontal_wrapped(|ui| {
                 theme::field_label(ui, "Chatter");
@@ -2324,17 +2307,12 @@ fn contribution_form(
                     commit = true;
                 }
             });
-            // Levels as written, comma-separated; empty is the main campaign alone.
-            let mut levels_text = levels.as_ref().map(|l| l.join(", ")).unwrap_or_default();
-            if text_row(ui, "Levels", &mut levels_text, "vz", false) {
-                let list: Vec<String> = levels_text.split(',').map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-                *levels = (!list.is_empty()).then_some(list);
-                commit = true;
+            commit |= kf::optional(ui, "Levels", levels, || vec![mercs2_quartermaster::level::VZ.to_string()], |ui, ls| {
+                kf::list(ui, "level", ls, String::new, |ui, i, l| kf::pick(ui, &format!("Level {i}"), l, List::Levels, s, true, "vz"))
+            });
+            if levels.is_none() {
+                theme::field_note(ui, theme::FieldState::Neutral, "absent: the main campaign's wardrobe alone");
             }
-            // Wearer is chosen once, in the WARDROBE section above — it owns the (wearer, slug) merge
-            // key and the single `_tOutfits` writer. Duplicating the pills here made two writers of the
-            // same field, the exact split that section's comment exists to prevent. `wearer` is still
-            // read below for the donor auto-pick note.
             // The model FILE is OPTIONAL: pick one to INJECT a new mesh, or leave it empty to wear a
             // model the game already ships (named by "Asset name" above). Edited through a temp since
             // the field is `Option<PathBuf>`; an empty path maps back to `None`.
@@ -2377,15 +2355,13 @@ fn contribution_form(
                 );
             }
             glb_facts_note(ui, facts, GlbAdvice::Outfit { single_group: *single_group });
-            let mut d = donor.clone().unwrap_or_default();
-            if asset_row(ui, "Donor", &mut d, names) {
-                *donor = (!d.trim().is_empty()).then_some(d);
-                commit = true;
-            }
+            let first = wearer.heroes().first().copied().unwrap_or("mattias").to_string();
+            commit |= kf::optional(ui, "Donor", donor, || format!("pmc_hum_{first}"), |ui, d| {
+                kf::pick(ui, "Donor", d, List::Models, s, true, "pmc_hum_mattias")
+            });
             // An outfit's donor is OPTIONAL: omit it and the build hosts on the (first) wearer's own
             // hero model. Say so, so the empty field does not read as unfinished.
             if donor.is_none() {
-                let first = wearer.heroes().first().copied().unwrap_or("?");
                 theme::field_note(
                     ui,
                     theme::FieldState::Neutral,
@@ -2416,8 +2392,10 @@ fn contribution_form(
             );
             ui.add_space(6.0);
             // With single_group the atlas is baked from the GLB's own materials, so the manual slots
-            // do nothing — hide them rather than offer dead controls.
-            if !*single_group {
+            // do nothing — hide them rather than offer dead controls. A slot already set stays shown,
+            // so it can be cleared.
+            let any_slot = textures.diffuse.is_some() || textures.normal.is_some() || textures.specular.is_some();
+            if !*single_group || any_slot {
                 theme::eyebrow(ui, "Skin — omit a slot to keep the donor's");
                 for (lbl, slot) in [
                     ("Diffuse", &mut textures.diffuse),
@@ -2427,9 +2405,9 @@ fn contribution_form(
                     commit |= optional_source_row(ui, lbl, slot, root, &["png"]);
                 }
             }
-            commit |= retarget_summary(ui, retarget);
+            commit |= retarget_editor(ui, retarget, s, facts);
         }
-        Contribution::AddModel { name, model, donor, group, textures, retarget, collision: _ } => {
+        Contribution::AddModel { name, model, donor, group, textures, retarget, collision } => {
             commit |= text_row(ui, "Asset name", name, "my_custom_helipad", true);
             if source_row(ui, "Model", model, root, &["glb", "gltf", "obj"]) {
                 commit = true;
@@ -2441,22 +2419,45 @@ fn contribution_form(
                 }
             }
             glb_facts_note(ui, facts, GlbAdvice::Model);
-            let mut d = donor.clone().unwrap_or_default();
-            if asset_row(ui, "Donor", &mut d, names) {
-                *donor = (!d.trim().is_empty()).then_some(d);
-                commit = true;
+            commit |= kf::optional(ui, "Donor", donor, || "pmc_hum_mattias".to_string(), |ui, d| {
+                kf::pick(ui, "Donor", d, List::Models, s, true, "al_prop_crate")
+            });
+            if donor.is_none() {
+                theme::field_note(ui, theme::FieldState::Bad, "required by the build: the model whose container hosts the geometry");
             }
             // The host draw group. Previously unrecordable, so a conform could be previewed and
             // then not expressed.
-            let mut g = group.unwrap_or(0) as f32;
-            if theme::scalar_field(ui, "Host group", &mut g, 1.0) {
-                *group = Some((g.max(0.0) as u32).min(63));
-                commit = true;
-            }
+            commit |= kf::optional(ui, "Host group", group, || 0, |ui, g| {
+                number_row(ui, "Host group", g, "0..63", |v| v.to_string(), |t| parse_whole(t, 63))
+            });
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
                 "0..63 — the donor draw group the geometry replaces",
+            );
+            commit |= theme::combo_field(
+                ui,
+                "Collision",
+                collision,
+                &[
+                    (mercs2_quartermaster::manifest::CollisionSource::Donor, "the donor's"),
+                    (mercs2_quartermaster::manifest::CollisionSource::FollowGeometry, "follow geometry"),
+                ],
+                if *collision == mercs2_quartermaster::manifest::CollisionSource::FollowGeometry && retarget.is_some() {
+                    theme::FieldState::Bad
+                } else {
+                    theme::FieldState::Neutral
+                },
+            );
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                match collision {
+                    mercs2_quartermaster::manifest::CollisionSource::Donor => "the donor's PHY2, verbatim",
+                    mercs2_quartermaster::manifest::CollisionSource::FollowGeometry => {
+                        "a static PHY2 built from this model's own mesh replaces the donor's"
+                    }
+                },
             );
             ui.add_space(4.0);
             theme::eyebrow(ui, "Skin — omit to wear the donor's materials");
@@ -2467,14 +2468,89 @@ fn contribution_form(
             ] {
                 commit |= optional_source_row(ui, lbl, slot, root, &["png"]);
             }
-            commit |= retarget_summary(ui, retarget);
+            commit |= retarget_editor(ui, retarget, s, facts);
         }
-        Contribution::AddShopItem { .. } => {
-            theme::field_note(
+        Contribution::AddShopItem {
+            id, name, description, icon, shops, catalog, item_type, cash_cost, fuel_cost, max_stock, unlocked, behaviour,
+            equipment_type, levels,
+        } => {
+            use mercs2_quartermaster::manifest::{ShopBehaviour, ShopCatalog, ShopEquipmentType, ShopItemType, ShopVendor};
+            commit |= text_row(ui, "Id", id, "my_item", true);
+            commit |= text_row(ui, "Name", name, "[my.item]", true);
+            commit |= text_row(ui, "Description", description, "[my.item.desc]", false);
+            commit |= text_row(ui, "Icon", icon, "vehicles_tank_m1a2", true);
+            commit |= kf::list(ui, "level", levels, || mercs2_quartermaster::level::VZ.to_string(), |ui, i, l| {
+                text_row(ui, &format!("Level {i}"), l, "vz", true)
+            });
+            if levels.is_empty() {
+                theme::field_note(ui, theme::FieldState::Bad, "required: at least one level");
+            }
+            ui.horizontal_wrapped(|ui| {
+                theme::field_label(ui, "Shops");
+                for v in [ShopVendor::All, ShopVendor::Chi, ShopVendor::Gur, ShopVendor::Oil, ShopVendor::Pir, ShopVendor::Pmc] {
+                    let on = shops.contains(&v);
+                    if theme::pill(ui, v.faction_key(), on).clicked() {
+                        if on {
+                            shops.retain(|x| *x != v);
+                        } else {
+                            shops.push(v);
+                        }
+                        commit = true;
+                    }
+                }
+            });
+            if shops.is_empty() {
+                theme::field_note(ui, theme::FieldState::Bad, "required: at least one shop");
+            }
+            commit |= theme::combo_field(
                 ui,
+                "Catalog",
+                catalog,
+                &[(ShopCatalog::Support, "support"), (ShopCatalog::Equipment, "equipment")],
                 theme::FieldState::Neutral,
-                "shop items are edited in the manifest, not the workshop bench",
             );
+            let types = [
+                ShopItemType::Airstrike,
+                ShopItemType::Supply,
+                ShopItemType::Light,
+                ShopItemType::Heavy,
+                ShopItemType::Civilian,
+                ShopItemType::Boat,
+                ShopItemType::Heli,
+            ];
+            let type_options: Vec<(ShopItemType, &str)> = types.iter().map(|t| (*t, t.lua())).collect();
+            commit |= kf::optional(ui, "Type", item_type, || ShopItemType::Supply, |ui, t| {
+                theme::combo_field(ui, "Type", t, &type_options, theme::FieldState::Neutral)
+            });
+            commit |= number_row(ui, "Cash cost", cash_cost, "0", |v| v.to_string(), |t| parse_whole(t, u64::MAX));
+            commit |= number_row(ui, "Fuel cost", fuel_cost, "0", |v| v.to_string(), |t| parse_whole(t, u64::MAX));
+            commit |= number_row(ui, "Max stock", max_stock, "99", |v| v.to_string(), |t| parse_whole(t, u64::from(u32::MAX)));
+            ui.horizontal(|ui| {
+                theme::field_label(ui, "Unlocked");
+                commit |= ui.checkbox(unlocked, "").changed();
+            });
+            commit |= kf::optional(
+                ui,
+                "Behaviour",
+                behaviour,
+                || ShopBehaviour { module: String::new(), cargo: None, delivery_vehicle: None, script: None },
+                |ui, b| {
+                    let ShopBehaviour { module, cargo, delivery_vehicle, script } = b;
+                    let mut c = kf::pick(ui, "Module", module, List::Scripts, s, true, "mrxcratedelivery");
+                    c |= kf::optional(ui, "Cargo", cargo, String::new, |ui, v| text_row(ui, "Cargo", v, "a template name", true));
+                    c |= kf::optional(ui, "Delivery vehicle", delivery_vehicle, String::new, |ui, v| {
+                        text_row(ui, "Delivery vehicle", v, "a template name", true)
+                    });
+                    c |= kf::optional(ui, "Script", script, || PathBuf::from("src/support.lua"), |ui, p| {
+                        source_row(ui, "Script", p, root, &["lua"])
+                    });
+                    c
+                },
+            );
+            let equip = [(ShopEquipmentType::FuelTank, "fuel tank"), (ShopEquipmentType::GrapplingHook, "grappling hook")];
+            commit |= kf::optional(ui, "Equipment type", equipment_type, || ShopEquipmentType::FuelTank, |ui, t| {
+                theme::combo_field(ui, "Equipment type", t, &equip, theme::FieldState::Neutral)
+            });
         }
         Contribution::AddTexture { name, image, normal_map } => {
             commit |= text_row(ui, "Asset name", name, "my_custom_decal", true);
@@ -2521,8 +2597,41 @@ fn contribution_form(
             commit |= sound_load_in_row(ui, load_in);
             commit |= sound_cue_list(ui, cues, root);
         }
+        Contribution::LoadSound { soundbank, wavebank, stream, sessions } => {
+            use mercs2_quartermaster::manifest::LoadSession;
+            commit |= kf::optional(ui, "Soundbank", soundbank, String::new, |ui, b| {
+                kf::pick(ui, "Soundbank", b, List::SoundBanks, s, true, "ui_hud")
+            });
+            commit |= kf::optional(ui, "Wavebank", wavebank, String::new, |ui, b| {
+                kf::pick(ui, "Wavebank", b, List::WaveBanks, s, true, "ui_hud")
+            });
+            commit |= kf::optional(ui, "Stream", stream, String::new, |ui, st| {
+                text_row(ui, "Stream", st, "a stream of this Shipment's add_level, without .pws", true)
+            });
+            if soundbank.is_none() && wavebank.is_none() && stream.is_none() {
+                theme::field_note(ui, theme::FieldState::Bad, "M0222 \u{2014} name a soundbank, a wavebank or a stream");
+            }
+            ui.horizontal(|ui| {
+                theme::field_label(ui, "In");
+                for session in LoadSession::ALL {
+                    let on = sessions.contains(&session);
+                    if theme::pill(ui, session.token(), on).clicked() {
+                        if on {
+                            sessions.retain(|x| *x != session);
+                        } else {
+                            sessions.push(session);
+                            sessions.sort();
+                        }
+                        commit = true;
+                    }
+                }
+            });
+            if sessions.is_empty() {
+                theme::field_note(ui, theme::FieldState::Bad, "M0222 \u{2014} pick the sessions whose loader loads them");
+            }
+        }
         Contribution::ReplaceSoundBank { bank, language, category, cues } => {
-            commit |= sound_bank_row(ui, "bank", bank, language);
+            commit |= sound_bank_row(ui, "bank", bank, language, s);
             commit |= sound_category_row(ui, category, "the category every cue's group is in");
             theme::field_note(
                 ui,
@@ -2533,13 +2642,13 @@ fn contribution_form(
             commit |= sound_cue_list(ui, cues, root);
         }
         Contribution::ReplaceSoundCue { bank, language, category, cue } => {
-            commit |= sound_bank_row(ui, "bank", bank, language);
+            commit |= sound_bank_row(ui, "bank", bank, language, s);
             commit |= sound_category_row(ui, category, "the category of the cue's new group");
             theme::eyebrow(ui, "Cue — its name (or guid) is the game's cue it replaces");
             commit |= sound_cue_fields(ui, cue, root);
         }
         Contribution::ReplaceSoundWave { wavebank, language, line, wave } => {
-            commit |= sound_bank_row(ui, "wavebank", wavebank, language);
+            commit |= sound_bank_row(ui, "wavebank", wavebank, language, s);
             commit |= text_row(ui, "Line", line, "0x96FFDF9F", true);
             theme::field_note(
                 ui,
@@ -2577,11 +2686,11 @@ fn contribution_form(
             );
         }
         Contribution::ReplaceTexture { target, image } => {
-            commit |= asset_row(ui, "Target", target, names);
+            commit |= kf::pick(ui, "Target", target, List::Textures, s, true, "name or 0xHASH");
             commit |= source_row(ui, "Image", image, root, &["png"]);
         }
         Contribution::PatchLua { target, append } => {
-            commit |= text_row(ui, "Target script", target, "wifpmcinterior", true);
+            commit |= kf::pick(ui, "Target script", target, List::Scripts, s, true, "wifpmcinterior");
             commit |= source_row(ui, "Append", append, root, &["lua"]);
             theme::field_note(
                 ui,
@@ -2589,12 +2698,32 @@ fn contribution_form(
                 "a declared MUTATION — relinked across every installed Shipment at deploy",
             );
         }
+        Contribution::SetSpawnLists { target, lists } => {
+            commit |= kf::pick(ui, "Target script", target, List::Scripts, s, true, "gurcon002");
+            let blank = || mercs2_quartermaster::manifest::SpawnListSet {
+                function: String::new(),
+                building: String::new(),
+                group: None,
+                list: String::new(),
+            };
+            commit |= kf::list(ui, "list", lists, blank, |ui, _, row| {
+                let mut c = text_row(ui, "Function", &mut row.function, "SetupDangerousObjBuildings", true);
+                c |= text_row(ui, "Building", &mut row.building, "TallCommBuild", true);
+                c |= kf::optional(ui, "Group", &mut row.group, String::new, |ui, g| text_row(ui, "Group", g, "Rooftop", true));
+                c |= text_row(ui, "List", &mut row.list, "Spawnlist (VZ Elite)", true);
+                c
+            });
+        }
         Contribution::EditStateMachine { target, states } => {
-            commit |= asset_row(ui, "Target", target, names);
+            commit |= kf::pick(ui, "Target", target, List::Models, s, true, "al_veh_boat_destroyer");
             commit |= source_row(ui, "States", states, root, &["yaml", "yml"]);
         }
+        Contribution::ReplacePhy2 { target, phy2 } => {
+            commit |= kf::pick(ui, "Target", target, List::Models, s, true, "al_veh_boat_destroyer");
+            commit |= source_row(ui, "PHY2 file", phy2, root, &["phy2"]);
+        }
         Contribution::EditWorld { layer, edits } => {
-            commit |= text_row(ui, "Layer", layer, "vz_state_pmccon004", true);
+            commit |= kf::pick(ui, "Layer", layer, List::LayerBlocks, s, true, "vz_state_pmccon004");
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
@@ -2608,29 +2737,16 @@ fn contribution_form(
             );
         }
         Contribution::AddTinyGeometry { layer, cell, key, objects, model } => {
-            commit |= text_row(ui, "Layer", layer, "vz_state_mar_city_pristine", true);
+            commit |= kf::pick(ui, "Layer", layer, List::Layers, s, true, "vz_state_mar_city_pristine");
             theme::field_note(ui, theme::FieldState::Neutral, "a layer NAME; the placement goes into it");
             commit |= number_row(ui, "Cell row", &mut cell.row, "0..39, from z", |v| v.to_string(), |t| parse_whole(t, 39));
             commit |= number_row(ui, "Cell col", &mut cell.col, "0..39, from x", |v| v.to_string(), |t| parse_whole(t, 39));
             commit |= number_row(ui, "Key", key, "the placement's GUID", |v| format!("0x{v:08X}"), |t| parse_whole(t, u32::MAX as u64));
-            let mut remove: Option<usize> = None;
-            for (i, o) in objects.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    let state = if o.trim().is_empty() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
-                    let r = theme::text_field(ui, &format!("object {i}"), o, "0xGUID or placement name", state);
-                    commit |= r.lost_focus();
-                    if ui.small_button("✕").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                objects.remove(i);
-                commit = true;
-            }
-            if ui.button("+ object").clicked() {
-                objects.push(String::new());
-                commit = true;
+            commit |= kf::list(ui, "object", objects, String::new, |ui, i, o| {
+                text_row(ui, &format!("Object {i}"), o, "0xGUID or placement name", true)
+            });
+            if objects.is_empty() {
+                theme::field_note(ui, theme::FieldState::Bad, "M0240 \u{2014} name the placements this stand-in draws");
             }
             commit |= source_row(ui, "Model", model, root, &["glb", "gltf"]);
             theme::field_note(
@@ -2641,34 +2757,25 @@ fn contribution_form(
             );
         }
         Contribution::ActivateLayer { layer, replaces } => {
-            commit |= text_row(ui, "Layer", layer, "vz_state_pmccon004_destroyed", true);
+            commit |= kf::pick(ui, "Layer", layer, List::Layers, s, true, "vz_state_pmccon004_destroyed");
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
                 "MarkForAddition at runtime — a layer name (matched case-insensitively), not a path. Baked into \
                  the mod loader; the world never grows a per-mod script.",
             );
-            // `replaces` is a list of layer NAMES (MarkForRemoval, in order). Names carry no commas,
-            // so a comma-separated row is a faithful, reversible edit.
-            let mut joined = replaces.join(", ");
-            if text_row(ui, "Replaces", &mut joined, "vz_state_pmccon004_pristine", false) {
-                *replaces = joined
-                    .split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect();
-                commit = true;
-            }
+            // `replaces` is a list of layer NAMES (MarkForRemoval, in order).
+            commit |= kf::list(ui, "replaced layer", replaces, String::new, |ui, i, l| {
+                kf::pick(ui, &format!("Replaces {i}"), l, List::Layers, s, true, "vz_state_pmccon004_pristine")
+            });
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
-                "the pristine / prior overlay this one supersedes (MarkForRemoval) — comma-separated, \
-                 optional",
+                "the pristine / prior overlays this one supersedes (MarkForRemoval), in order",
             );
         }
         Contribution::EditStringDb { target, strings } => {
-            commit |= asset_row(ui, "Target table", target, names);
+            commit |= kf::pick(ui, "Target table", target, List::StringTables, s, true, "english");
             commit |= source_row(ui, "Strings", strings, root, &["txt"]);
             theme::field_note(
                 ui,
@@ -2683,32 +2790,55 @@ fn contribution_form(
                 theme::text_field(ui, "Display", display, "Polski", theme::FieldState::Neutral)
                     .lost_focus();
             commit |= source_row(ui, "Strings", strings, root, &["strings", "txt"]);
-            let mut b = base.clone().unwrap_or_default();
-            if theme::text_field(ui, "Base", &mut b, "english (default)", theme::FieldState::Neutral)
-                .lost_focus()
-            {
-                *base = (!b.is_empty()).then_some(b);
-                commit = true;
-            }
+            commit |= kf::optional(ui, "Base", base, || "english".to_string(), |ui, b| {
+                kf::pick(ui, "Base", b, List::Languages, s, true, "english")
+            });
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
-        Contribution::LevelAsset { level, asset_type, name, rungs, from, .. } => {
-            commit |= theme::text_field(ui, "Level", level, "dlc01", theme::FieldState::Neutral).lost_focus();
-            commit |= theme::text_field(ui, "Type", asset_type, "model", theme::FieldState::Neutral).lost_focus();
-            commit |= theme::text_field(ui, "Name", name, "0x00000000", theme::FieldState::Neutral).lost_focus();
+        Contribution::LevelAsset { level, asset_type, name, rungs, from, templates, edits } => {
+            commit |= text_row(ui, "Level", level, "dlc01", true);
+            commit |= kf::pick(ui, "Type", asset_type, List::AssetTypes, s, true, "model");
+            commit |= text_row(ui, "Name", name, "name or 0xHASH", true);
             commit |= from_row(ui, from);
             match from {
                 Some(id) => derived_row(ui, "Rungs", &format!("from {id}")),
                 None => {
-                    for r in rungs.iter_mut() {
-                        commit |= source_row(ui, "Rung", &mut r.file, root, &["ucfx"]);
+                    commit |= kf::list(
+                        ui,
+                        "rung",
+                        rungs,
+                        || mercs2_quartermaster::manifest::LevelRung { block: String::new(), file: PathBuf::from("src/rung.ucfx") },
+                        |ui, i, r| {
+                            let mercs2_quartermaster::manifest::LevelRung { block, file } = r;
+                            let mut c = text_row(ui, &format!("Rung {i} block"), block, "c30457-c20204_P001_Q2", true);
+                            if let Some(why) = mercs2_quartermaster::level::block_refusal(block) {
+                                theme::field_note(ui, theme::FieldState::Bad, &why);
+                            }
+                            c |= source_row(ui, &format!("Rung {i} file"), file, root, &["ucfx"]);
+                            c
+                        },
+                    );
+                    if rungs.is_empty() {
+                        theme::field_note(ui, theme::FieldState::Bad, "required: at least one rung");
                     }
                 }
             }
+            commit |= kf::list(ui, "template", templates, String::new, |ui, i, t| {
+                text_row(ui, &format!("Template {i}"), t, "a template name", true)
+            });
+            commit |= kf::map_rows(ui, "template edit", edits, Default::default, |ui, template, classes| {
+                let mut c = text_row(ui, "Template", template, "a template name", true);
+                c |= kf::map_rows(ui, "class edit", classes, Default::default, |ui, class, fields| {
+                    let mut c = text_row(ui, "Class", class, "RedEffectComponent", true);
+                    c |= kf::record(ui, "field edit", fields);
+                    c
+                });
+                c
+            });
         }
         Contribution::AddLevel { name, display, streams, from, mission, details, date } => {
             commit |= theme::text_field(ui, "Level", name, "dlc01", theme::FieldState::Neutral).lost_focus();
@@ -2720,9 +2850,9 @@ fn contribution_form(
             match from {
                 Some(id) => derived_row(ui, "Streams", &format!("from {id}")),
                 None => {
-                    for s in streams.iter_mut() {
-                        commit |= source_row(ui, "Stream", s, root, &["pws"]);
-                    }
+                    commit |= kf::list(ui, "stream", streams, || PathBuf::from("src/stream.pws"), |ui, i, p| {
+                        source_row(ui, &format!("Stream {i}"), p, root, &["pws"])
+                    });
                 }
             }
             theme::field_note(
@@ -2751,7 +2881,7 @@ fn contribution_form(
             commit |= text_row(ui, "sha256", sha256, "64 lowercase hex digits", false);
             commit |= number_row(ui, "Size", size, "bytes", |v| v.to_string(), |t| parse_whole(t, u64::MAX));
         }
-        Contribution::NativeHook { target, plugin, symbol, touches, signature_guard: _ } => {
+        Contribution::NativeHook { target, plugin, symbol, touches, signature_guard } => {
             // `both` is reserved and rejected in v1, so it is not offered.
             commit |= theme::combo_field(
                 ui,
@@ -2772,11 +2902,7 @@ fn contribution_form(
                 theme::FieldState::Neutral,
                 "placed in scripts/ — the loader's own glob. There is no destination to choose.",
             );
-            let mut s = symbol.clone().unwrap_or_default();
-            if text_row(ui, "Symbol", &mut s, "optional", false) {
-                *symbol = (!s.trim().is_empty()).then_some(s);
-                commit = true;
-            }
+            commit |= kf::optional(ui, "Symbol", symbol, String::new, |ui, sym| text_row(ui, "Symbol", sym, "a symbol to detour", true));
             if plugin.is_none() && symbol.is_none() {
                 theme::field_note(
                     ui,
@@ -2787,6 +2913,18 @@ fn contribution_form(
             ui.add_space(4.0);
             theme::eyebrow(ui, "Declared blast radius");
             commit |= touches_editor(ui, touches, false);
+            ui.add_space(4.0);
+            theme::eyebrow(ui, "Signature guard");
+            commit |= kf::map_rows(ui, "guard", signature_guard, String::new, |ui, addr, bytes| {
+                let mut c = text_row(ui, "Address", addr, "0x00478120", true);
+                c |= text_row(ui, "Prologue bytes", bytes, "55 8B EC 51 53 56 57", true);
+                c
+            });
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "per touched address, the leading bytes the plugin checks before it patches",
+            );
         }
         Contribution::PlaceFile { file, dest } => {
             commit |= source_row(ui, "File", file, root, &[]);
@@ -2873,17 +3011,195 @@ fn contribution_form(
             theme::eyebrow(ui, "Declared blast radius — must match the payload exactly");
             commit |= touches_editor(ui, touches, true);
         }
-        // Newer Contribution kinds without bespoke workshop editors yet. Manifest is still fully
-        // editable as YAML; this panel just doesn't offer field-level UI for them today.
-        other => {
+        Contribution::AddScript { name, source, exports, load } => {
+            use mercs2_quartermaster::manifest::{LibraryLoad, LoadSession};
+            commit |= text_row(ui, "Module name", name, "mymod_util", true);
+            commit |= source_row(ui, "Source", source, root, &["lua"]);
+            commit |= kf::list(ui, "export", exports, String::new, |ui, i, e| {
+                text_row(ui, &format!("Export {i}"), e, "a global the module defines", true)
+            });
+            commit |= kf::optional(
+                ui,
+                "Load",
+                load,
+                || LibraryLoad { when: String::new(), sessions: Vec::new() },
+                |ui, l| {
+                    let LibraryLoad { when, sessions } = l;
+                    let mut c = kf::pick(ui, "When", when, List::Hooks, s, true, "world.begin");
+                    let fires = mercs2_quartermaster::hooks::hook(when).map(|h| h.sessions.clone()).unwrap_or_default();
+                    ui.horizontal(|ui| {
+                        theme::field_label(ui, "In");
+                        for session in LoadSession::ALL {
+                            let on = sessions.contains(&session);
+                            if theme::pill(ui, session.token(), on).clicked() {
+                                if on {
+                                    sessions.retain(|x| *x != session);
+                                } else {
+                                    sessions.push(session);
+                                    sessions.sort();
+                                }
+                                c = true;
+                            }
+                        }
+                    });
+                    if sessions.is_empty() {
+                        theme::field_note(ui, theme::FieldState::Bad, "M0312 \u{2014} pick the sessions it loads in");
+                    }
+                    for x in sessions.iter().filter(|x| !fires.contains(x)) {
+                        theme::field_note(
+                            ui,
+                            theme::FieldState::Bad,
+                            &format!("M0312 \u{2014} hook {when} does not fire in {}", x.token()),
+                        );
+                    }
+                    c
+                },
+            );
+            if load.is_none() {
+                theme::field_note(ui, theme::FieldState::Neutral, "absent: the module runs only when something imports it after it ran");
+            }
+        }
+        Contribution::ReplaceLua { target, source } => {
+            commit |= kf::pick(ui, "Target script", target, List::Scripts, s, true, "wifpmcinterior");
+            commit |= source_row(ui, "Source", source, root, &["lua"]);
+        }
+        Contribution::AddPlacement { layer, entity } => {
+            commit |= kf::pick(ui, "Layer", layer, List::Layers, s, true, "vz_state_pmccon004");
+            commit |= source_row(ui, "Entity", entity, root, &["yaml", "yml", "json", "toml"]);
+        }
+        Contribution::AddLayer { name, template, entities } => {
+            commit |= text_row(ui, "Layer name", name, "my_layer", true);
+            commit |= kf::pick(ui, "Template layer", template, List::LayerBlocks, s, true, "layers_static");
+            commit |= source_row(ui, "Entities", entities, root, &["yaml", "yml", "json", "toml"]);
+        }
+        Contribution::AddAnimation { name, clip, trnm, events } => {
+            commit |= text_row(ui, "Asset name", name, "my_clip", true);
+            commit |= source_row(ui, "Clip", clip, root, &["hkx"]);
+            commit |= source_row(ui, "TRNM", trnm, root, &["trnm", "bin"]);
+            commit |= kf::optional(ui, "Events", events, || PathBuf::from("src/clip.evnt"), |ui, p| {
+                source_row(ui, "Events", p, root, &["evnt", "bin"])
+            });
+        }
+        Contribution::ReplaceAnimation { target, clip, trnm, events } => {
+            commit |= kf::pick(ui, "Target", target, List::Animations, s, true, "name or 0xHASH");
+            commit |= source_row(ui, "Clip", clip, root, &["hkx"]);
+            commit |= source_row(ui, "TRNM", trnm, root, &["trnm", "bin"]);
+            commit |= kf::optional(ui, "Events", events, || PathBuf::from("src/clip.evnt"), |ui, p| {
+                source_row(ui, "Events", p, root, &["evnt", "bin"])
+            });
+        }
+        Contribution::AddShader { family, classes } => {
+            use mercs2_quartermaster::shader::ShaderFamily;
+            let options: Vec<(ShaderFamily, &str)> = ShaderFamily::ALL.iter().map(|f| (*f, f.name())).collect();
+            if theme::combo_field(ui, "Family", family, &options, theme::FieldState::Neutral) {
+                let base = classes.first().map(|c| c.name.clone()).unwrap_or_else(|| "my_shader".to_string());
+                *classes = kf::shader_classes(*family, &base, classes);
+                commit = true;
+            }
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
                 &format!(
-                    "No field editor yet for `{}` — edit the manifest.yaml directly.",
-                    other.kind()
+                    "{:?} family \u{b7} {} class(es) in light-class order \u{b7} binder constants: {}",
+                    family.stage(),
+                    family.class_count(),
+                    family.info().constants.join(", ")
                 ),
             );
+            if classes.len() != family.class_count() {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Bad,
+                    &format!("M0234 \u{2014} {} classes; this family takes {}", classes.len(), family.class_count()),
+                );
+                if ui.button("Set the classes from the family").clicked() {
+                    let base = classes.first().map(|c| c.name.clone()).unwrap_or_else(|| "my_shader".to_string());
+                    *classes = kf::shader_classes(*family, &base, classes);
+                    commit = true;
+                }
+            }
+            for (i, class) in classes.iter_mut().enumerate() {
+                let mercs2_quartermaster::manifest::ShaderClass { name, stem, shader, shader_low } = class;
+                ui.push_id(("shader_class", i), |ui| {
+                    ui.add_space(4.0);
+                    let suffix = family.class_suffixes().get(i).copied().unwrap_or("");
+                    theme::eyebrow(ui, &format!("Class {i}{}", if suffix.is_empty() { " (base)".to_string() } else { format!(" ({suffix})") }));
+                    commit |= text_row(ui, "Name", name, "my_shader", true);
+                    commit |= text_row(ui, "Stem", stem, "my_shader", true);
+                    if let Some(why) = mercs2_quartermaster::shader::stem_refusal(stem) {
+                        theme::field_note(ui, theme::FieldState::Bad, &format!("M0234 \u{2014} {why}"));
+                    } else {
+                        theme::field_note(ui, theme::FieldState::Neutral, &format!("records {stem}_3.sho and {stem}_3l.sho"));
+                    }
+                    commit |= kf::shader_source(ui, "Shader", shader, root);
+                    commit |= kf::shader_source(ui, "Shader low", shader_low, root);
+                });
+            }
+        }
+        Contribution::ReplaceShader { target, shader, shader_low } => {
+            commit |= kf::pick(ui, "Target stem", target, List::ShaderStems, s, true, "PgMeshVP");
+            commit |= kf::shader_source(ui, "Shader", shader, root);
+            commit |= kf::optional(ui, "Shader low", shader_low, || mercs2_quartermaster::manifest::ShaderSource::asm("src/shader_low.asm"), |ui, src| {
+                kf::shader_source(ui, "Shader low", src, root)
+            });
+        }
+        Contribution::AddFx { name, effect, template } => {
+            commit |= text_row(ui, "Effect name", name, "my_effect", true);
+            commit |= source_row(ui, "Effect", effect, root, &["yaml", "yml", "json", "toml"]);
+            let mercs2_quartermaster::template::TemplateForm { name: tname, name_flag, components } = template;
+            ui.add_space(4.0);
+            theme::eyebrow(ui, "Template that starts it");
+            commit |= text_row(ui, "Template name", tname, "my_effect", true);
+            commit |= number_row(ui, "Name flag", name_flag, "0..255", |v| v.to_string(), |t| parse_whole(t, u64::from(u8::MAX)));
+            match ctx.template_classes {
+                Some(classes) => {
+                    let mut form = mercs2_quartermaster::template::TemplateForm { name: tname.clone(), name_flag: *name_flag, components: std::mem::take(components) };
+                    commit |= crate::depotfx::template_editor(ui, &mut form, name, classes, s.names);
+                    *components = form.components;
+                }
+                None => {
+                    commit |= kf::components(ui, components);
+                    if components.is_empty() {
+                        theme::field_note(ui, theme::FieldState::Bad, "M0255 \u{2014} the template declares its RedEffectComponent");
+                    }
+                }
+            }
+        }
+        Contribution::ReplaceFx { target, edits } => {
+            use mercs2_quartermaster::manifest::FxTarget;
+            let mut by_template = matches!(target, FxTarget::Template { .. });
+            if theme::combo_field(ui, "Target is", &mut by_template, &[(false, "an effect"), (true, "a template's effect")], theme::FieldState::Neutral) {
+                *target = if by_template {
+                    FxTarget::Template { template: String::new() }
+                } else {
+                    FxTarget::Effect { effect: String::new() }
+                };
+                commit = true;
+            }
+            match target {
+                FxTarget::Effect { effect } => commit |= kf::pick(ui, "Effect", effect, List::Effects, s, true, "name or 0xHASH"),
+                FxTarget::Template { template } => {
+                    commit |= kf::pick(ui, "Template", template, List::EffectTemplates, s, true, "global_particle_explosion_c4")
+                }
+            }
+            commit |= source_row(ui, "Edits", edits, root, &["yaml", "yml", "json", "toml"]);
+        }
+        Contribution::AddFxSprite { name, image } => {
+            commit |= text_row(ui, "Sprite name", name, "my_sprite", true);
+            commit |= source_row(ui, "Image", image, root, &["png"]);
+        }
+        Contribution::ReplaceTerrainCell { target, cell } => {
+            commit |= kf::pick(ui, "Target cell", target, List::TerrainCells, s, true, "name or 0xHASH");
+            commit |= source_row(ui, "Cell", cell, root, &["bin", "ucfx"]);
+        }
+        Contribution::AddStringDbKeys { target, strings } => {
+            commit |= kf::pick(ui, "Target table", target, List::StringTables, s, true, "english");
+            commit |= source_row(ui, "Strings", strings, root, &["txt"]);
+            theme::field_note(ui, theme::FieldState::Neutral, "one `[Bracket.Key] = Text` per line, each key new to the table");
+        }
+        Contribution::ReplaceStringDbText { target, pairs } => {
+            commit |= kf::pick(ui, "Target table", target, List::StringTables, s, true, "english");
+            commit |= source_row(ui, "Pairs", pairs, root, &["pairs", "txt"]);
         }
     }
     commit
@@ -3235,7 +3551,7 @@ fn dep_list<T: Clone + PartialEq + Send + Sync + 'static>(
                     commit = true;
                 }
             });
-            if ui.small_button("✕").clicked() {
+            if ui.small_button("Remove").clicked() {
                 remove = Some(i);
             }
         });
@@ -3308,16 +3624,47 @@ fn optional_source_row(
     changed
 }
 
-/// The retarget sub-block, read-only plus a way in.
-///
-/// The bone map is not hand-editable here on purpose: it is produced by the rig bench, where a bone
-/// can be seen. What this shows is whether one is recorded, because a Shipment carrying only
-/// `from:` rebuilds to something the author never approved.
-fn retarget_summary(
+/// The retarget part: the source rig's convention, and the bone map (source bone → target bone, or
+/// dropped) as rows. Added, it starts from the convention the model file's joints read as.
+fn retarget_editor(
     ui: &mut egui::Ui,
     rt: &mut Option<mercs2_quartermaster::manifest::Retarget>,
+    s: &crate::kindform::Sources,
+    facts: Option<&GlbFacts>,
 ) -> bool {
+    use crate::kindform::{self as kf, List};
     ui.add_space(4.0);
+    let detected = facts.map(|f| f.rig.slug()).unwrap_or(mercs2_formats::retarget::SourceRig::Generic.slug());
+    let commit = kf::optional(
+        ui,
+        "Retarget",
+        rt,
+        || mercs2_quartermaster::manifest::Retarget { from: detected.to_string(), bones: None },
+        |ui, r| {
+            let mut c = kf::pick(ui, "Rig convention", &mut r.from, List::Conventions, s, true, "mixamo");
+            c |= kf::optional(ui, "Bone map", &mut r.bones, Default::default, |ui, bones| {
+                kf::map_rows(ui, "bone", bones, || None, |ui, from, to| {
+                    let mut c = text_row(ui, "Source bone", from, "mixamorig:Hips", true);
+                    let mut dropped = to.is_none();
+                    ui.horizontal(|ui| {
+                        theme::field_label(ui, "Dropped");
+                        c |= ui.checkbox(&mut dropped, "").changed();
+                    });
+                    if dropped {
+                        *to = None;
+                    } else {
+                        let mut t = to.clone().unwrap_or_default();
+                        if text_row(ui, "Target bone", &mut t, "Bone_Hips", true) || to.is_none() {
+                            *to = Some(t);
+                            c = true;
+                        }
+                    }
+                    c
+                })
+            });
+            c
+        },
+    );
     match rt {
         None => {
             theme::field_note(
@@ -3325,11 +3672,9 @@ fn retarget_summary(
                 theme::FieldState::Neutral,
                 "No retarget — the source is assumed already hero-rigged.",
             );
-            false
         }
         Some(r) => {
             let n = r.bones.as_ref().map(|b| b.len()).unwrap_or(0);
-            theme::kv(ui, "Retarget", egui::RichText::new(format!("{} rig", r.from)));
             if n == 0 {
                 // A convention (valve/mixamo/…) has a deterministic table, so from-only is complete
                 // and reproducible — informational, not a warning. Only hand-adjusted bones need to
@@ -3347,9 +3692,9 @@ fn retarget_summary(
                     &format!("{n} hand-recorded bone rows — the build uses these exactly"),
                 );
             }
-            false
         }
     }
+    commit
 }
 
 fn empty_middle(ui: &mut egui::Ui, title: &str, sub: &str) {
@@ -3447,6 +3792,13 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         ],
         Contribution::PatchLua { target, .. } => vec![
             ("Writes".to_string(), format!("script {target}")),
+            (
+                "Merge".to_string(),
+                "relinked across the installed set at install".to_string(),
+            ),
+        ],
+        Contribution::SetSpawnLists { target, lists } => vec![
+            ("Writes".to_string(), format!("script {target}: {} spawn list(s)", lists.len())),
             (
                 "Merge".to_string(),
                 "relinked across the installed set at install".to_string(),
@@ -3781,29 +4133,6 @@ pub fn apply(
         }
         // Handled by the caller, which owns the workbench: the panel cannot switch pages itself.
         Act::Craft(..) => {}
-        // A hero pill toggles that hero: picked heroes keep their order, a new one goes last, and one
-        // hero is written as a plain name. Unpicking the last leaves an empty list, which M0141 reports.
-        Act::ToggleWearer(i, w) => match p.mutate(names, |m| {
-            if let Some(Contribution::AddOutfit { wearer, .. }) = m.contributions.get_mut(i) {
-                let mut heroes: Vec<String> = wearer.heroes().into_iter().map(str::to_string).collect();
-                match heroes.iter().position(|h| wearer_table_key(h) == wearer_table_key(w)) {
-                    Some(at) => {
-                        heroes.remove(at);
-                    }
-                    None => heroes.push(w.to_string()),
-                }
-                *wearer = match heroes.as_slice() {
-                    [one] => Wearer::One(one.clone()),
-                    _ => Wearer::Many(heroes),
-                };
-            }
-        }) {
-            Ok(()) => *status = p.status.clone(),
-            Err(e) => {
-                p.error = Some(e);
-                *status = "could not write the manifest".into();
-            }
-        },
         Act::Edit(i, c) => match p.upsert_contribution(names, Some(i), *c) {
             Ok(_) => *status = p.status.clone(),
             Err(e) => {
@@ -4360,6 +4689,41 @@ mod tests {
         assert_eq!(s.manifest.load.conflicts, conflicts);
     }
 
+    /// An edit made after the manifest changed on disk is refused, and the hand edit stays; reopened,
+    /// the edit writes.
+    #[test]
+    fn an_edit_is_refused_once_the_manifest_changed_on_disk() {
+        let d = tmp("stale_manifest");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).unwrap();
+        let path = d.join("manifest.yaml");
+        let by_hand = format!("# hand-edited\n{}", std::fs::read_to_string(&path).unwrap());
+        std::fs::write(&path, &by_hand).unwrap();
+        let err = p.mutate(None, |m| m.shipment.version = "9.9.9".into()).expect_err("must refuse");
+        assert!(err.contains("changed on disk"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), by_hand);
+        p.open_shipment(&d, None);
+        let was = p.shipment.as_ref().unwrap().manifest.shipment.version.clone();
+        p.mutate(None, |m| m.shipment.version = "9.9.9".into()).expect("reopened, it writes");
+        assert_eq!(p.shipment.as_ref().unwrap().manifest.shipment.version, "9.9.9");
+        // The hand edit stays: only the version is rewritten.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), by_hand.replace(&format!("version: {was}"), "version: 9.9.9"));
+    }
+
+    /// A TOML manifest is edited in TOML, its comments and layout kept.
+    #[test]
+    fn a_toml_manifest_is_edited_in_place() {
+        let d = tmp("toml_manifest");
+        let text = "# by hand\nformat = 2\ncontributions = []\n\n[shipment]\nname = \"toml-shipment\"\nversion = \"1.0.0\"   # first cut\ntarget = \"retail\"\n";
+        std::fs::write(d.join("manifest.toml"), text).unwrap();
+        let mut p = Panel::default();
+        p.open_shipment(&d, None);
+        assert!(p.shipment.is_some(), "{:?}", p.error);
+        p.mutate(None, |m| m.shipment.version = "1.1.0".into()).expect("a TOML manifest writes");
+        assert_eq!(std::fs::read_to_string(d.join("manifest.toml")).unwrap(), text.replace("\"1.0.0\"", "\"1.1.0\""));
+        assert_eq!(p.shipment.as_ref().unwrap().manifest.shipment.version, "1.1.0");
+    }
+
     /// Reached from a folder picker, so picking the wrong folder must not destroy someone's work.
     #[test]
     fn scaffold_refuses_to_overwrite_an_existing_manifest() {
@@ -4730,5 +5094,124 @@ mod tests {
         assert_ne!(r3, r1, "a different file must not overwrite");
         assert_eq!(std::fs::read(d.join(&r1)).unwrap(), b"AAAA", "original was overwritten");
         assert_eq!(std::fs::read(d.join(&r3)).unwrap(), b"BBBB");
+    }
+}
+
+/// Every kind's field editor: each draws, and every optional part it offers holds a value qm reads
+/// back as written.
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+    use mercs2_quartermaster::manifest as m;
+
+    /// `c` with every optional part present, each set to the value its `+ Add` control starts from
+    /// or to a value of the part's shape.
+    fn every_part(mut c: Contribution) -> Contribution {
+        use mercs2_quartermaster::template::{FieldInput, Records};
+        let p = |s: &str| PathBuf::from(s);
+        match &mut c {
+            Contribution::AddOutfit { chatter, levels, donor, textures, retarget, single_group, briefing_safe, .. } => {
+                *chatter = mercs2_quartermaster::outfits::chatter_sets().unwrap().first().cloned();
+                *levels = Some(vec!["vz".into()]);
+                *donor = Some("pmc_hum_mattias".into());
+                *textures = m::Textures { diffuse: Some(p("src/d.png")), normal: Some(p("src/n.png")), specular: Some(p("src/s.png")) };
+                *retarget = Some(m::Retarget { from: "mixamo".into(), bones: Some([("Hips".into(), Some("Bone_Hips".into())), ("Tail".into(), None)].into()) });
+                *single_group = true;
+                *briefing_safe = false;
+            }
+            Contribution::AddModel { donor, group, textures, retarget, collision, .. } => {
+                *donor = Some("pmc_hum_mattias".into());
+                *group = Some(3);
+                *textures = m::Textures { diffuse: Some(p("src/d.png")), normal: None, specular: None };
+                *retarget = Some(m::Retarget { from: "generic".into(), bones: None });
+                *collision = m::CollisionSource::FollowGeometry;
+            }
+            Contribution::AddTexture { normal_map, .. } => *normal_map = true,
+            Contribution::LoadSound { soundbank, wavebank, stream, sessions } => {
+                *soundbank = Some("ui_hud".into());
+                *wavebank = Some("ui_hud".into());
+                *stream = Some("my_stream".into());
+                *sessions = vec![m::LoadSession::Gameplay];
+            }
+            Contribution::ReplaceSoundBank { language, .. }
+            | Contribution::ReplaceSoundCue { language, .. }
+            | Contribution::ReplaceSoundWave { language, .. } => *language = Some(m::Language::English),
+            Contribution::AddScript { exports, load, .. } => {
+                *exports = vec!["MyFn".into()];
+                *load = Some(m::LibraryLoad { when: mercs2_quartermaster::hooks::hooks()[0].id.clone(), sessions: vec![m::LoadSession::Gameplay] });
+            }
+            Contribution::AddAnimation { events, .. } | Contribution::ReplaceAnimation { events, .. } => *events = Some(p("src/e.evnt")),
+            Contribution::ReplaceShader { shader_low, .. } => *shader_low = Some(m::ShaderSource::blob("src/low.sho")),
+            Contribution::AddFx { template, .. } => {
+                template.components.insert("RedEffectComponent".into(), Records::One([("Effect".into(), FieldInput::Text("my_fx".into()))].into()));
+                template.components.insert("Light".into(), Records::Many(vec![[("Radius".into(), FieldInput::Float(2.5))].into()]));
+            }
+            Contribution::ReplaceFx { target, .. } => *target = m::FxTarget::Template { template: "global_particle_explosion_c4".into() },
+            Contribution::ActivateLayer { replaces, .. } => *replaces = vec!["a".into(), "b".into()],
+            Contribution::AddLanguage { base, .. } => *base = Some("english".into()),
+            Contribution::AddLevel { streams, .. } => *streams = vec![p("src/a.pws")],
+            Contribution::LevelAsset { rungs, templates, edits, .. } => {
+                *rungs = vec![m::LevelRung { block: "c1-c2_P000_Q3".into(), file: p("src/r.ucfx") }];
+                *templates = vec!["my_template".into()];
+                *edits = [("my_template".into(), [("Health".into(), [("Max".into(), FieldInput::Int(100))].into())].into())].into();
+            }
+            Contribution::NativeHook { plugin, symbol, touches, signature_guard, .. } => {
+                *plugin = Some(p("src/p.asi"));
+                *symbol = Some("Sym".into());
+                *touches = vec![m::Touch("0x00478120".into())];
+                *signature_guard = [("0x00478120".into(), "55 8B EC".into())].into();
+            }
+            Contribution::AddShopItem { description, item_type, behaviour, equipment_type, unlocked, .. } => {
+                *description = "[my.item.desc]".into();
+                *item_type = Some(m::ShopItemType::Boat);
+                *behaviour = Some(m::ShopBehaviour {
+                    module: "mrxcratedelivery".into(),
+                    cargo: Some("c".into()),
+                    delivery_vehicle: Some("v".into()),
+                    script: Some(p("src/s.lua")),
+                });
+                *equipment_type = Some(m::ShopEquipmentType::GrapplingHook);
+                *unlocked = true;
+            }
+            Contribution::Raw { description, .. } => *description = Some("bytes".into()),
+            _ => {}
+        }
+        c
+    }
+
+    fn draw(c: &Contribution) {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let root = std::env::temp_dir();
+        let sources = crate::kindform::Sources { index: None, corpus: &[], names: None, levels: &[] };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 4000.0))),
+            ..Default::default()
+        };
+        crate::gui::run_headless(&ctx, input, |ui| {
+            let mut edited = c.clone();
+            let form = FormCtx { root: &root, shipment_name: "test", facts: None, sources, template_classes: None };
+            assert!(!contribution_form(ui, &mut edited, &form), "{}: a draw with no input commits nothing", c.kind());
+            assert_eq!(&edited, c, "{}: a draw with no input changes nothing", c.kind());
+        });
+    }
+
+    #[test]
+    fn every_kind_draws_bare_and_with_every_part() {
+        for kind in Contribution::ALL_KINDS {
+            let bare = stub(kind, 1).unwrap_or_else(|| panic!("{kind} has no stub"));
+            draw(&bare);
+            draw(&every_part(bare));
+        }
+    }
+
+    #[test]
+    fn every_part_reads_back_as_written() {
+        for kind in Contribution::ALL_KINDS {
+            let full = every_part(stub(kind, 1).unwrap());
+            let yaml = serde_norway::to_string(&full).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            let back: Contribution = serde_norway::from_str(&yaml).unwrap_or_else(|e| panic!("{kind}: {e}\n{yaml}"));
+            assert_eq!(back, full, "{kind}\n{yaml}");
+        }
     }
 }
