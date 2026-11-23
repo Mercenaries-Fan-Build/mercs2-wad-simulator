@@ -921,6 +921,66 @@ pub fn wavebank_players(
     Ok(WavebankPlayers { entry, carriers })
 }
 
+/// One WAD's copy of a bank: its soundbank, and each wavebank of that WAD a group of it plays, by bank
+/// hash. A wavebank the WAD does not hold is not in `wavebanks`.
+#[derive(Debug, Clone)]
+pub struct CarriedBank {
+    pub carrier: Carrier,
+    pub soundbank: Soundbank,
+    pub wavebanks: BTreeMap<u32, WavebankFile>,
+}
+
+/// The game's copies of the bank `bank` of `language` (or none): in that language's WAD in `game`, or
+/// in `vz.wad` (`game`) and `shell.wad` (opened into `shell`), each with the wavebanks its groups play
+/// ([`fill_wavebank`]: a group may play another bank's wavebank, §11.4). No carrier holding it is an
+/// error naming the entry.
+pub fn carried_banks(
+    game: &mut GameStack,
+    shell: &mut Option<GameStack>,
+    bank: &str,
+    language: Option<Language>,
+) -> Result<Vec<CarriedBank>, String> {
+    let entry = entry_name(bank, language);
+    let hash = asset_hash(&entry);
+    let mut out = Vec::new();
+    for (carrier, stack) in carriers_for(game, shell, language)? {
+        let Some(soundbank) = carrier_soundbank(stack, carrier, hash)? else { continue };
+        let reached: BTreeSet<u32> = soundbank.groups.iter().flat_map(|g| g.waves().iter().map(|w| w.wavebank)).collect();
+        let mut cache = BTreeMap::new();
+        for h in reached {
+            fill_wavebank(stack, carrier, h, &mut cache)?;
+        }
+        let wavebanks = cache.into_iter().filter(|(h, _)| soundbank.groups.iter().any(|g| g.waves().iter().any(|w| w.wavebank == *h))).collect();
+        out.push(CarriedBank { carrier, soundbank, wavebanks });
+    }
+    if out.is_empty() {
+        return Err(format!("no game WAD carries a soundbank named {entry:?} (0x{hash:08X})"));
+    }
+    Ok(out)
+}
+
+/// The game's copies of the wavebank entry `wavebank` of `language` (or none), each with its WAD, as
+/// [`carried_banks`] finds a bank's. No carrier holding it is an error naming the entry.
+pub fn carried_wavebanks(
+    game: &mut GameStack,
+    shell: &mut Option<GameStack>,
+    wavebank: &str,
+    language: Option<Language>,
+) -> Result<Vec<(Carrier, WavebankFile)>, String> {
+    let entry = entry_name(wavebank, language);
+    let hash = asset_hash(&entry);
+    let mut out = Vec::new();
+    for (carrier, stack) in carriers_for(game, shell, language)? {
+        if let Some(wb) = carrier_wavebank(stack, carrier, hash)? {
+            out.push((carrier, wb));
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("no game WAD carries a wavebank named {entry:?} (0x{hash:08X})"));
+    }
+    Ok(out)
+}
+
 /// Resolve a line: the wavebank's entry (`<wavebank>.<language>` for a localized one, or a bare
 /// hash of it) in each carrier that holds it ([`wavebank_players`]), the one record whose clip hash
 /// is `line`, and every soundbank of those carriers whose groups play that record.

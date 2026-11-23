@@ -152,9 +152,15 @@ impl ShaderFamily {
     /// Registrations a family takes per `add_shader`: the four light classes of a pixel shader, one
     /// vertex shader.
     pub fn class_count(self) -> usize {
+        self.class_suffixes().len()
+    }
+
+    /// The name suffix of each class, in light-class order: base, `_pl`, `_sl`, `_pl_sl` for a pixel
+    /// family; the base alone for a vertex family.
+    pub fn class_suffixes(self) -> &'static [&'static str] {
         match self.stage() {
-            Stage::Pixel => 4,
-            Stage::Vertex => 1,
+            Stage::Pixel => &["", "_pl", "_sl", "_pl_sl"],
+            Stage::Vertex => &[""],
         }
     }
 

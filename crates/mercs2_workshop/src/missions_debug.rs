@@ -23,7 +23,7 @@
 //!   lights a node whose line ran, with its count.
 
 use crate::blueprint::{self, Graph};
-use crate::lua_source::Script;
+use mercs2_quartermaster::lua_source::Script;
 use mercs2_bridge::debug::{DebugClient, DebugError, Frame};
 use mercs2_formats::lua_debug::{self, Arg, At, Breakpoint, Event, HostKind, PauseReason, Request, Step, MAX_FRAME_BYTES, PROTOCOL};
 use mercs2_formats::lua_linemap::{shipped_for, shipped_scripts, LineMap, Shipped, CORPUS_SOURCES};

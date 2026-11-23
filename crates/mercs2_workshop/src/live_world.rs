@@ -10,7 +10,7 @@ use crate::live_link::{Entity, EntityClass, Live};
 use mercs2_core::{AnimState, Entity as Ecs, GuidMap, LayerOp, ModelRef, SkinPalette, Transform, World};
 use mercs2_engine::game_world::{load_streaming_world_data, CollisionOp, StreamingWorld, StreamingWorldData};
 use mercs2_engine::render::LoadProgress;
-use mercs2_engine::scene::Scene;
+use mercs2_engine::scene::{Scene, WorldScope};
 use mercs2_formats::hash::pandemic_hash_m2;
 use glam::{Quat, Vec3};
 use std::cell::RefCell;
@@ -59,6 +59,8 @@ pub struct Drawn {
 pub struct Mirror {
     state: State,
     pub world: World,
+    /// The scope the scene keeps `world`'s entities under.
+    pub scope: WorldScope,
     actors: HashMap<String, Actor>,
     /// Models that would not load, and why: their entities are reported and not drawn.
     failed: HashMap<u32, String>,
@@ -83,6 +85,7 @@ impl Default for Mirror {
         Mirror {
             state: State::Idle,
             world: World::new(),
+            scope: WorldScope::new(),
             actors: HashMap::new(),
             failed: HashMap::new(),
             dynamic: HashSet::new(),
@@ -132,11 +135,13 @@ impl Mirror {
         self.failed.iter()
     }
 
-    /// Reloads from `wad` if the archive changed; the mirror is that archive's.
-    pub fn start(&mut self, wad: &str) {
+    /// Reloads from `wad` if the archive changed; the mirror is that archive's. What the old mirror
+    /// put in the scene comes out with it.
+    pub fn start(&mut self, wad: &str, scene: &mut Scene) {
         if self.wad == wad && !matches!(self.state, State::Failed(_)) {
             return;
         }
+        scene.forget_scope(self.scope);
         *self = Mirror { wad: wad.to_string(), ..Mirror::default() };
         let progress = Arc::new(LoadProgress::new(LOAD_STAGES));
         let (tx, rx) = std::sync::mpsc::channel();
@@ -162,7 +167,7 @@ impl Mirror {
         scene.set_lights(Vec::new());
         scene.set_spot_lights(Vec::new());
         scene.clear_fog();
-        scene.set_terrain_hidden(None);
+        scene.set_terrain_hidden(self.scope, None);
     }
 
     fn finish(&mut self, loaded: Loaded, scene: &mut Scene) {
@@ -171,14 +176,14 @@ impl Mirror {
         self.names = Rc::new(data.template_names().iter().map(|(_, n)| (pandemic_hash_m2(n), n.clone())).collect());
         let block_layers = data.static_block_layers().to_vec();
         let guids = Rc::new(RefCell::new(GuidMap::new()));
-        let (terrain, stream) = data.into_streaming_world(guids.clone());
+        let (terrain, stream) = data.into_streaming_world(guids.clone(), self.scope);
         self.terrain = Some(terrain.hash);
-        scene.load_model(terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
+        scene.load_model(self.scope, terrain.hash, &terrain.verts, &terrain.indices, &terrain.draws, &terrain.textures, &terrain.skin);
         self.world.spawn((
             Transform::IDENTITY,
             ModelRef { model: terrain.hash },
             AnimState::default(),
-            SkinPalette { mats: scene.model_rest_palette(terrain.hash) },
+            SkinPalette { mats: scene.model_rest_palette(self.scope, terrain.hash) },
         ));
         {
             let mut g = guids.borrow_mut();
@@ -257,7 +262,7 @@ impl Mirror {
 
     /// Terrain on or off: the base mesh and every hi-res tile.
     pub fn show_terrain(&self, scene: &mut Scene, on: bool) {
-        scene.set_terrain_hidden(if on { None } else { self.terrain });
+        scene.set_terrain_hidden(self.scope, if on { None } else { self.terrain });
     }
 
     /// Make the executor's layers the game's: `_tLoadedLayers` dynamic, the master script's list static.
@@ -321,7 +326,7 @@ impl Mirror {
         for g in gone {
             if let Some(a) = self.actors.remove(&g) {
                 let _ = self.world.despawn(a.entity);
-                scene.forget_entity(a.entity);
+                scene.forget_entity(self.scope, a.entity);
             }
         }
     }
@@ -332,10 +337,10 @@ impl Mirror {
         if self.failed.contains_key(&e.model) {
             return false;
         }
-        let loaded = !scene.has_model(e.model);
+        let loaded = !scene.has_model(self.scope, e.model);
         if loaded {
             match load_model_data(w, e.model) {
-                Ok(md) => scene.load_model(e.model, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin),
+                Ok(md) => scene.load_model(self.scope, e.model, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin),
                 Err(why) => {
                     self.failed.insert(e.model, why);
                     return true;
@@ -350,9 +355,9 @@ impl Mirror {
             Transform { translation: pos, rotation: Quat::from_rotation_y(e.yaw.to_radians()), scale: Vec3::ONE },
             ModelRef { model: e.model },
             AnimState::default(),
-            SkinPalette { mats: scene.model_rest_palette(e.model) },
+            SkinPalette { mats: scene.model_rest_palette(self.scope, e.model) },
         ));
-        scene.set_entity_render_state(entity, default_render_state(w, e.model));
+        scene.set_entity_render_state(self.scope, entity, default_render_state(w, e.model));
         self.actors.insert(e.guid.clone(), Actor { entity, pos, yaw: e.yaw, class: e.class });
         loaded
     }

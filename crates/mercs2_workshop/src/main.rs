@@ -66,6 +66,19 @@ mod audioplay; // One-shot audio preview on the default output device (cpal)
 mod audioroute; // Which banks and cues play each VO line, from English.wad
 mod audioexport; // VO clips out as WAV + captions.csv
 mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
+mod depot; // The Depot: the modder's own Draft/Ready items in one workspace folder
+mod depotpage; // The Depot page: All items, the selected item, New item
+mod depotstates; // The destruction-states editor of an edit_state_machine item
+mod depottext; // The string-table editors of the text kinds' items
+mod depotworld; // The world editors of the placement kinds' items, and the layer they build
+mod depottiny; // The add_tiny_geometry preview: the stand-in qm builds, and its objects
+mod depotsound; // The sound kinds' preview: each cue shipped beside the cue qm builds, playable
+mod depottex; // The texture kinds' preview: the game's texture, the PNG and the texture qm builds
+mod depotfx; // The effect kinds' editor and preview: the effect qm builds, run in the engine
+mod depotanim; // The animation kinds' editor and preview: the clip on a hero, played in the engine
+mod kindform; // Every kind's field editor parts: pickers over the game's lists, optional parts, list rows
+mod statemachine; // A destruction state machine as the Depot edits it: script lines, the build's checks
+mod collision; // A model's PHY2 collision: the shipped body, its facts, its outline
 mod layerview; // Inspect's LAYERS tab: every entity of a layer in 3D, where the layer places it
 mod textpage; // Inspect's TEXT tab: every string table side by side by key
 mod movieview; // Inspect's UI tab: a Scaleform movie playing in the viewport, on the engine's player
@@ -90,7 +103,6 @@ mod live_map;
 mod live_overlay;
 mod live_world;
 mod luaview;
-mod lua_source;
 mod blueprint;
 mod engine_calls; // Which script functions the game's executables call by name, and its engine bindings
 mod missions;

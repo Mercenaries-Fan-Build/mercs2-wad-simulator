@@ -22,67 +22,173 @@ use std::path::{Path, PathBuf};
 // edit_state_machine — the destruction writer, end to end
 // ---------------------------------------------------------------------------
 
-/// The FIRST destructible model in the stack — scanned by hash so the test never depends on knowing
-/// a retail name. Returns a `0x…` target (the manifest accepts a bare hash anywhere a name goes) and
-/// the model's edit inputs. Panics when the stack carries none.
-fn a_destructible(game: &mut mercs2_quartermaster::GameStack) -> (String, mercs2_quartermaster::game::ModelEditInputs) {
+/// The FIRST destructible model in the stack whose chain has `rungs` rungs — scanned by hash so the
+/// test never depends on knowing a retail name. Returns a `0x…` target (the manifest accepts a bare
+/// hash anywhere a name goes) and the model's chain. Panics when the stack carries none.
+fn a_destructible(game: &mut mercs2_quartermaster::GameStack, rungs: usize) -> (String, mercs2_quartermaster::game::ModelChain) {
     use mercs2_formats::types::TYPE_ID_MODEL;
     for hash in game.asset_hashes(TYPE_ID_MODEL) {
-        if let Some(inputs) = game.model_container_for_edit(hash) {
-            if mercs2_formats::orchestrator::parse_state_machine(&inputs.container).is_some() {
-                return (format!("0x{hash:08X}"), inputs);
-            }
+        let chain = game.model_chain(hash).unwrap_or_else(|e| panic!("{e}")).expect("a model row");
+        if chain.rungs.len() == rungs && mercs2_formats::orchestrator::parse_state_machine(&chain.rungs[0].container).is_some() {
+            return (format!("0x{hash:08X}"), chain);
         }
     }
-    panic!("no model in the retail stack carries a state machine")
+    panic!("no model in the retail stack carries a state machine and {rungs} rung(s)")
 }
 
-/// ★ edit_state_machine, end to end against retail: a NO-OP edit (extract the machine, change
-/// nothing, rebuild) must produce an overlay whose model container is BYTE-IDENTICAL to the base,
-/// carried as a single-model block with a primary ASET row — no block-mate shadowed, no dangling
-/// rung. This is the whole "recompute the row, don't shadow everything" claim, checked on real bytes.
+/// The single entry of a single-entry block: its entry and its container.
+fn only_entry(block: &mercs2_formats::patch_wad::PatchBlock) -> (mercs2_formats::ucfx::BlockTableEntry, Vec<u8>) {
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1, "{} must be a single-entry block", block.path_string);
+    let pos = 4 + 16;
+    (entries[0].clone(), dec[pos..pos + entries[0].chunk_size as usize].to_vec())
+}
+
+/// Every row's chain in a read-back WAD, `_P000` first, after checking what the engine needs of it:
+/// each block the row names exists and holds the row's asset exactly once (`aset_refcheck`'s rule).
+fn chains_hold(contents: &mercs2_formats::patch_wad::PatchWadContents) -> std::collections::BTreeMap<u32, Vec<usize>> {
+    let mut out = std::collections::BTreeMap::new();
+    for (bi, block) in contents.blocks.iter().enumerate() {
+        for row in &block.aset_entries {
+            let mut chain = vec![bi];
+            for v in [row.u32_2 & 0xFFFF, row.u32_1 >> 16, row.u32_1 & 0xFFFF] {
+                if v == 0xFFFF {
+                    break;
+                }
+                chain.push(v as usize);
+            }
+            for &b in &chain {
+                let target = contents.blocks.get(b).unwrap_or_else(|| panic!("0x{:08X} names block {b} of {}", row.asset_hash, contents.blocks.len()));
+                let dec = mercs2_formats::sges::decompress_sges(&target.compressed_data).expect("sges");
+                let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+                let held = entries.iter().filter(|e| e.name_hash == row.asset_hash).count();
+                assert_eq!(held, 1, "block {b} ({}) holds 0x{:08X} {held} time(s)", target.path_string, row.asset_hash);
+            }
+            out.insert(row.asset_hash, chain);
+        }
+    }
+    out
+}
+
+/// What every re-emitted chain must be, against the chain the stack ships: one block per rung, the
+/// row naming them in order, `_P000` holding `p000` and each finer rung its retail container byte for
+/// byte, each entry's third word the byte sum of the containers before it, and each block's tier byte
+/// its source block's.
+fn assert_chain_carried(contents: &mercs2_formats::patch_wad::PatchWadContents, shipped: &mercs2_quartermaster::game::ModelChain, p000: &[u8]) {
+    let chains = chains_hold(contents);
+    let chain = &chains[&shipped.hash];
+    assert_eq!(chain.len(), shipped.rungs.len(), "every rung the row names ships: {chain:?}");
+    let mut before = 0u32;
+    for (n, (&b, rung)) in chain.iter().zip(&shipped.rungs).enumerate() {
+        let block = &contents.blocks[b];
+        let (entry, container) = only_entry(block);
+        assert_eq!(entry.name_hash, shipped.hash);
+        assert_eq!(entry.field_c, before, "_P{n:03}'s third word is the byte sum of the rungs before it");
+        assert_eq!(block.packed_field >> 24, rung.packed_field >> 24, "_P{n:03} keeps its source block's tier");
+        assert_eq!(block.packed_field >> 24, n as u32, "retail's tier is the rung");
+        let expected = if n == 0 { p000 } else { rung.container.as_slice() };
+        assert!(container == expected, "_P{n:03}'s container is not what it should carry");
+        before += container.len() as u32;
+    }
+}
+
+/// ★ edit_state_machine, end to end against retail, on a model whose near geometry is in finer rungs:
+/// a NO-OP edit (extract the machine, change nothing, rebuild) ships the model's whole chain — the
+/// `_P000` container byte-identical to the base, every finer rung carried byte for byte at its tier,
+/// and nothing else.
 #[test]
-fn edit_state_machine_noop_ships_a_byte_identical_single_model_block() {
+fn edit_state_machine_noop_carries_the_whole_chain() {
     let mut game = retail_game();
-    let (target, inputs) = a_destructible(&mut game);
-    let hash = mercs2_quartermaster::manifest::asset_hash(&target);
+    let target = "al_veh_boat_destroyer";
+    let shipped = game.model_chain(mercs2_quartermaster::manifest::asset_hash(target)).unwrap().expect("the destroyer");
+    assert_eq!(shipped.rungs.len(), 3, "the destroyer ships _P000, _P001 and _P002");
 
-    // Extract the machine to the `states:` baseline and ship it UNCHANGED — the no-op.
-    let sm = mercs2_formats::orchestrator::parse_state_machine(&inputs.container).unwrap();
+    let sm = mercs2_formats::orchestrator::parse_state_machine(&shipped.rungs[0].container).unwrap();
     let yaml = mercs2_quartermaster::states::extract(&sm, |_| None);
-
     let dir = scratch("esm_noop");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/states.yaml"), &yaml).unwrap();
-    let s = shipment(
-        &dir,
-        &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
-    );
+    let s = shipment(&dir, &format!("  - kind: edit_state_machine\n    target: {target}\n    states: src/states.yaml\n"));
 
     let report = build::build(&s, Some(&mut game), None, None, None, None).expect("edit_state_machine must build");
-    let wad_path = report.wad.expect("a WAD must be emitted");
-    let on_disk = std::fs::read(&wad_path).unwrap();
+    let on_disk = std::fs::read(report.wad.expect("a WAD must be emitted")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
-    assert_eq!(contents.blocks.len(), 1, "one model, one block — nothing else shadowed");
-    let block = &contents.blocks[0];
+    assert_eq!(contents.blocks.len(), 3, "the model's three rungs and nothing else");
+    assert_chain_carried(&contents, &shipped, &shipped.rungs[0].container);
+}
 
-    // The ASET row: primary rung re-pointed to our block, every finer rung sentinelled to coarse
-    // tier (we carry only the primary), so nothing dangles.
-    let row = &block.aset_entries[0];
-    assert_eq!(row.asset_hash, hash);
-    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "_P001 must sentinel — the rung is not carried");
-    assert_eq!(row.u32_1, 0xFFFF_FFFF, "_P002/_P003 must sentinel — not dangle");
+/// `replace_phy2` carries the chain the same way: the destroyer with its own collision put back.
+#[test]
+fn replace_phy2_carries_the_whole_chain() {
+    let mut game = retail_game();
+    let target = "al_veh_boat_destroyer";
+    let shipped = game.model_chain(mercs2_quartermaster::manifest::asset_hash(target)).unwrap().expect("the destroyer");
+    let p000 = &shipped.rungs[0].container;
+    let (at, len) = mercs2_formats::phy2_container::phy2_span_in_container(p000).expect("a PHY2 chunk");
 
-    // The block is a proper single-entry table carrying the MODEL container with its original
-    // field_c, and — this is the no-op claim — the container is byte-identical to the base.
-    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
-    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-    assert_eq!(count, 1);
-    assert_eq!(entries[0].name_hash, hash);
-    assert_eq!(entries[0].field_c, inputs.field_c, "field_c must be preserved, not guessed");
-    let pos = 4 + entries.len() * 16;
-    let container = &dec[pos..pos + entries[0].chunk_size as usize];
-    assert_eq!(container, inputs.container.as_slice(), "a no-op edit must reproduce the base container");
+    let dir = scratch("phy2_chain");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/p.phy2"), &p000[at..at + len]).unwrap();
+    let s = shipment(&dir, &format!("  - kind: replace_phy2\n    target: {target}\n    phy2: src/p.phy2\n"));
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("replace_phy2 must build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD must be emitted")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
+    let edited = mercs2_formats::phy2_container::replace_phy2_in_container(p000, at, len, &p000[at..at + len]).unwrap();
+    assert_chain_carried(&contents, &shipped, &edited);
+}
+
+/// Two models whose finer rungs share one retail block, edited in one Shipment: each row's every rung
+/// names a block holding that model. Numbered by their retail block, the two rungs would claim one
+/// source index and one model's row would name the other's block, where the engine's rung gate spins.
+/// Then the WAD read back and written again, as a merge does, keeps both chains.
+#[test]
+fn two_models_sharing_a_rung_block_keep_their_own_rungs() {
+    use mercs2_formats::types::TYPE_ID_MODEL;
+    let mut game = retail_game();
+    let mut by_block: std::collections::HashMap<u16, u32> = std::collections::HashMap::new();
+    let mut pair = None;
+    'scan: for hash in game.asset_hashes(TYPE_ID_MODEL) {
+        let chain = game.model_chain(hash).unwrap().expect("a model row");
+        if mercs2_formats::orchestrator::parse_state_machine(&chain.rungs[0].container).is_none() {
+            continue;
+        }
+        for r in &chain.rungs[1..] {
+            if let Some(&first) = by_block.get(&r.block) {
+                pair = Some((first, hash));
+                break 'scan;
+            }
+        }
+        for r in &chain.rungs[1..] {
+            by_block.insert(r.block, hash);
+        }
+    }
+    let (a, b) = pair.expect("two destructibles share a finer-rung block in retail");
+    let a = game.model_chain(a).unwrap().expect("a");
+    let b = game.model_chain(b).unwrap().expect("b");
+
+    let dir = scratch("esm_shared_rung");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let mut manifest = String::new();
+    for (i, m) in [&a, &b].into_iter().enumerate() {
+        let sm = mercs2_formats::orchestrator::parse_state_machine(&m.rungs[0].container).unwrap();
+        std::fs::write(dir.join(format!("src/s{i}.yaml")), mercs2_quartermaster::states::extract(&sm, |_| None)).unwrap();
+        manifest.push_str(&format!("  - kind: edit_state_machine\n    target: \"0x{:08X}\"\n    states: src/s{i}.yaml\n", m.hash));
+    }
+    let report = build::build(&shipment(&dir, &manifest), Some(&mut game), None, None, None, None).expect("both build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    for m in [&a, &b] {
+        assert_chain_carried(&contents, m, &m.rungs[0].container);
+    }
+
+    let again = mercs2_formats::patch_wad::build_patch_wad_multi(&contents.blocks, contents.csum_value, &mercs2_formats::patch_wad::FFCS_CERT_BLOB)
+        .expect("write the read-back blocks again");
+    let round = mercs2_formats::patch_wad::read_patch_wad(&again).expect("re-read the rewrite");
+    for m in [&a, &b] {
+        assert_chain_carried(&round, m, &m.rungs[0].container);
+    }
 }
 
 /// A real edit — rename a state — lands in the shipped container and still parses, while every other
@@ -90,7 +196,8 @@ fn edit_state_machine_noop_ships_a_byte_identical_single_model_block() {
 #[test]
 fn edit_state_machine_renames_a_state_end_to_end() {
     let mut game = retail_game();
-    let (target, inputs) = a_destructible(&mut game);
+    let (target, inputs) = a_destructible(&mut game, 1);
+    let inputs = &inputs.rungs[0];
     let sm = mercs2_formats::orchestrator::parse_state_machine(&inputs.container).unwrap();
     let (ni, si) = sm
         .nodes
@@ -2378,6 +2485,39 @@ fn edit_world_emits_a_shadowing_layer_overlay_and_no_op_round_trips() {
     assert_eq!(noop_decoded, inputs.block, "a no-op layer edit must reproduce the block's decoded bytes");
 }
 
+/// A real layer's extract (`qm extract-world`'s text) reads back, writes back as the same bytes, and
+/// as an edit of its own layer changes nothing.
+#[test]
+fn a_retail_layer_extract_writes_back_as_it_was_and_changes_nothing() {
+    use mercs2_quartermaster::world;
+    let mut game = retail_game();
+    let mut remodels = 0;
+    for needle in ["vz_state_pmccon004", "layers_static"] {
+        let inputs = game.layer_block_for_edit(needle).unwrap_or_else(|| panic!("{needle} in the stack"));
+        let places = mercs2_formats::placement::load_placements(&inputs.block).expect("placements");
+        let models: std::collections::HashMap<u32, u32> = mercs2_formats::placement::load_model_placements(&inputs.block)
+            .into_iter()
+            .map(|m| (m.key, m.model_hash))
+            .collect();
+        let names: std::collections::HashMap<String, String> =
+            places.iter().filter_map(|p| p.name.clone().map(|n| (format!("0x{:08X}", p.key), n))).collect();
+        let dumped: Vec<world::Placed> = places
+            .iter()
+            .map(|p| world::Placed { key: p.key, name: p.name.clone(), pos: p.pos, quat: p.quat, model: models.get(&p.key).copied() })
+            .collect();
+        let text = world::extract(&dumped, |_| None).unwrap_or_else(|e| panic!("{needle}: {e}"));
+        let doc = world::parse(&text).unwrap_or_else(|e| panic!("{needle}: {e}"));
+        assert_eq!(doc.edits.len(), places.len(), "{needle}");
+        remodels += doc.edits.iter().filter(|e| e.model.is_some()).count();
+        assert_eq!(world::write_world(&doc, |e| names.get(e).cloned()).unwrap(), text, "{needle}");
+        let (edited, moved, _) = build::edit_world_block(&inputs.block, &doc, needle).unwrap_or_else(|e| panic!("{needle}: {e}"));
+        assert!(moved >= places.len(), "{needle}: {moved} of {}", places.len());
+        assert_eq!(edited, inputs.block, "{needle}: its own extract changed the layer");
+        eprintln!("{needle}: {} entities, {} B of text", places.len(), text.len());
+    }
+    assert!(remodels > 0, "neither layer's extract carries a model");
+}
+
 /// ★ edit_world end to end: a Shipment that moves one entity in a real layer builds into an overlay
 /// that shadows the base layer and reads the entity back at its new position.
 #[test]
@@ -2424,6 +2564,10 @@ fn edit_world_builds_an_overlay_that_moves_an_entity() {
     let after = mercs2_formats::placement::load_placements(&decoded).expect("re-parse");
     let moved = after.iter().find(|p| p.key == target.key).expect("entity present");
     assert_eq!(moved.pos, new_pos, "the entity must read back at the new position");
+    // The container the edit wrote into is resealed: every CSUM of the overlay holds.
+    let (_, issues) = mercs2_formats::ucfx::walk_decompressed_block(&decoded, &base_path);
+    let stale: Vec<_> = issues.iter().filter(|i| i.detail.contains("CSUM")).collect();
+    assert!(stale.is_empty(), "{stale:?}");
     // Every other entity is where it was.
     let before = mercs2_formats::placement::load_placements(&base_block).unwrap();
     for (a, b) in before.iter().zip(&after) {
@@ -2999,6 +3143,37 @@ mod sound {
         eprintln!("groups of other soundbanks playing an engine-loaded bank's waves: {foreign:08X?}");
         let gas_old = m2("veh_largegasold");
         assert_eq!(foreign, BTreeSet::from([(m2("veh_largedieselold"), gas_old), (m2("veh_largedieselnew"), gas_old)]));
+    }
+
+    /// `sound::carried_banks` reads, beside a bank, each wavebank its groups play, another bank's
+    /// included: `veh_largedieselold`'s groups play waves of `veh_largegasold`'s wavebank. A bank
+    /// both levels carry comes back once per WAD; `sound::carried_wavebanks` finds a localized
+    /// wavebank in its language's WAD; and a name no WAD carries is an error naming it.
+    #[test]
+    fn the_game_copies_of_a_bank_carry_every_wavebank_its_groups_play() {
+        use mercs2_quartermaster::manifest::Language;
+        use mercs2_quartermaster::sound::{carried_banks, carried_wavebanks, Carrier};
+        let mut vz = GameStack::open(&[vz_wad()]).unwrap();
+        let mut shell = None;
+        let diesel = carried_banks(&mut vz, &mut shell, "veh_largedieselold", None).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(diesel.iter().map(|c| c.carrier).collect::<Vec<_>>(), vec![Carrier::Vz]);
+        let played: BTreeSet<u32> = diesel[0].soundbank.groups.iter().flat_map(|g| g.waves().iter().map(|w| w.wavebank)).collect();
+        assert!(played.contains(&m2("veh_largegasold")), "{played:08X?}");
+        assert_eq!(diesel[0].wavebanks.keys().copied().collect::<BTreeSet<u32>>(), played);
+        for (h, wb) in &diesel[0].wavebanks {
+            assert_eq!(wb.bank_hash, *h);
+        }
+
+        let hud = carried_banks(&mut vz, &mut shell, "ui_hud", None).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(hud.iter().map(|c| c.carrier).collect::<Vec<_>>(), vec![Carrier::Vz, Carrier::Shell]);
+
+        let mut english = english_wad();
+        let vo = carried_wavebanks(&mut english, &mut None, "vo_stream", Some(Language::English)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(vo.len(), 1);
+        assert_eq!((vo[0].0, vo[0].1.bank_hash, vo[0].1.stream_name.as_deref()), (Carrier::Language(Language::English), m2("vo_stream"), Some("vo_stream.pws")));
+
+        let e = carried_banks(&mut vz, &mut shell, "no_such_bank", None).err().unwrap_or_default();
+        assert!(e.contains("\"no_such_bank\""), "{e}");
     }
 
     /// The cues `db` routes that `eng` resolves, but `except`.
@@ -4499,25 +4674,42 @@ fn placement_shipment(label: &str, entities: &str, contributions: &str) -> disco
     shipment(&dir, contributions)
 }
 
-/// A key `layers_static`'s block places, and one it does not.
+/// A key `layers_static`'s block places, and one no layer of the game places.
 fn placed_and_free_key(game: &mut mercs2_quartermaster::GameStack) -> (u32, u32) {
     let inputs = game.layer_block_for_edit("layers_static").expect("layers_static in the stack");
     let keys = mercs2_formats::placement::entity_key_set(&inputs.block);
     let placed = *keys.iter().min().expect("layers_static places entities");
-    let free = (0x7F00_0000u32..).find(|k| !keys.contains(k)).expect("a free key");
+    let all = game_keys(game);
+    let free = (0x7F00_0000u32..).find(|k| !all.contains_key(k)).expect("a free key");
     (placed, free)
 }
 
-/// An `add_placement` key the target layer's block already places is M0198, and blocks the build;
-/// a key it does not place is quiet. Two records of one file under one key are M0198 for
-/// `add_placement` and `add_layer` alike.
+/// Every key a layer of the game places, with the layer that places it.
+fn game_keys(game: &mut mercs2_quartermaster::GameStack) -> std::collections::BTreeMap<u32, u32> {
+    let mut out = std::collections::BTreeMap::new();
+    for (layer, c) in game.layer_containers().expect("the game's layers") {
+        for k in mercs2_formats::placement::entity_key_set(&c) {
+            out.entry(k).or_insert(layer);
+        }
+    }
+    out
+}
+
+/// A key some layer of the game places is M0198 for `add_placement` and `add_layer` alike, whatever
+/// layer the contribution names, and blocks the build; a key no layer places is quiet. Two records
+/// of one file under one key are M0198 for both kinds.
 #[test]
 fn m0198_refuses_a_key_already_placed() {
     use mercs2_quartermaster::lint;
     let mut game = retail_game();
     let (placed, free) = placed_and_free_key(&mut game);
-    let entity = |key: u32| format!("key: 0x{key:08X}\nmodel: al_prop_barrel_red\npos: [0, 0, 0]\n");
-    let add = "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n";
+    let elsewhere = {
+        let in_static = mercs2_formats::placement::entity_key_set(&game.layer_block_for_edit("layers_static").unwrap().block);
+        *game_keys(&mut game).keys().find(|k| !in_static.contains(k)).expect("a key placed outside layers_static")
+    };
+    let entity = |key: u32| format!("key: \"0x{key:08X}\"\nmodel: global_barrela\npos: [0, 0, 0]\n");
+    let add = "  - kind: add_placement\n    layer: vz_state_pmccon004\n    entity: src/e.yaml\n";
+    let new_layer = "  - kind: add_layer\n    name: vz_state_qm_w2_test\n    template: layers_static\n    entities: src/e.yaml\n";
 
     let taken = placement_shipment("m0198_taken", &entity(placed), add);
     let d = lint::placement_game_checks(&taken.manifest, &taken.root, &mut game);
@@ -4528,22 +4720,31 @@ fn m0198_refuses_a_key_already_placed() {
         Err(e) => panic!("expected the build to block on M0198, got {e}"),
         Ok(_) => panic!("a key the layer places must not build"),
     }
+    for c in [add, new_layer] {
+        let s = placement_shipment("m0198_elsewhere", &entity(elsewhere), c);
+        let d = lint::placement_game_checks(&s.manifest, &s.root, &mut game);
+        assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0198"], "{c}: {d:?}");
+        assert!(d[0].message.contains(&format!("0x{elsewhere:08X}")), "{}", d[0].message);
+    }
 
     let fresh = placement_shipment("m0198_fresh", &entity(free), add);
     assert!(lint::placement_game_checks(&fresh.manifest, &fresh.root, &mut game).is_empty());
 
     let twice = format!(
-        "- {{ key: 0x{free:08X}, model: a, pos: [0, 0, 0] }}\n- {{ key: 0x{free:08X}, model: b, pos: [1, 0, 0] }}\n"
+        "- {{ key: \"0x{free:08X}\", model: a, pos: [0, 0, 0] }}\n- {{ key: \"0x{free:08X}\", model: b, pos: [1, 0, 0] }}\n"
     );
-    for c in [
-        add,
-        "  - kind: add_layer\n    name: vz_state_qm_w2_test\n    template: layers_static\n    entities: src/e.yaml\n",
-    ] {
+    for c in [add, new_layer] {
         let s = placement_shipment("m0198_twice", &twice, c);
         let d = lint::placement_game_checks(&s.manifest, &s.root, &mut game);
         assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0198"], "{c}: {d:?}");
         assert!(d[0].message.contains("two records"), "{}", d[0].message);
     }
+
+    // Two contributions adding one key: the second is M0198, naming the first.
+    let s = placement_shipment("m0198_two_adds", &entity(free), &format!("{add}{new_layer}"));
+    let d = lint::placement_game_checks(&s.manifest, &s.root, &mut game);
+    assert_eq!(d.iter().map(|d| (d.rule.code, d.at)).collect::<Vec<_>>(), vec![("M0198", Some(1))], "{d:?}");
+    assert!(d[0].message.contains("contributions[0]"), "{}", d[0].message);
 }
 
 /// An entity file that does not parse is handled as an `edit_world` edits file is: no lint reads it
@@ -4552,11 +4753,11 @@ fn m0198_refuses_a_key_already_placed() {
 #[test]
 fn an_unparseable_entity_file_is_refused_by_name() {
     let mut game = retail_game();
-    let bad = "key: 0x7F000001\nmodel: a\nposition: [0, 0, 0]\n";
+    let bad = "key: \"0x7F000001\"\nmodel: a\nposition: [0, 0, 0]\n";
     let s = placement_shipment(
         "entity_unknown_field",
         bad,
-        "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n",
+        "  - kind: add_placement\n    layer: vz_state_pmccon004\n    entity: src/e.yaml\n",
     );
     let d = mercs2_quartermaster::lint::placement_game_checks(&s.manifest, &s.root, &mut game);
     assert!(d.is_empty(), "{d:?}");
@@ -4572,21 +4773,123 @@ fn an_unparseable_entity_file_is_refused_by_name() {
 /// An `add_placement` with a fresh key builds, and the shipped layer block places it.
 #[test]
 fn an_add_placement_with_a_fresh_key_builds_and_places_it() {
+    use mercs2_formats::placement_build as pb;
+    use mercs2_formats::types::TYPE_HASH_LAYER;
     let mut game = retail_game();
     let (_, free) = placed_and_free_key(&mut game);
+    // A layer with all three COMPs, one with no ModelName COMP (its entities take their models from
+    // templates), and one of the nine with no COMP at all, named by its hash.
+    for layer in ["vz_state_pmc_livedin", "vz_state_pmccon004", "0x27B1EE81"] {
+        let hash = mercs2_quartermaster::manifest::asset_hash(layer);
+        let (base, entry) = game.layer_by_name(layer).unwrap().unwrap_or_else(|| panic!("{layer} is a retail layer"));
+        let s = placement_shipment(
+            "add_placement_fresh",
+            &format!("key: \"0x{free:08X}\"\nmodel: global_barrela\npos: [10, 2, 30]\nyaw: 90\n"),
+            &format!("  - kind: add_placement\n    layer: \"{layer}\"\n    entity: src/e.yaml\n"),
+        );
+        let report = build::build(&s, Some(&mut game), None, None, None, None).unwrap_or_else(|e| panic!("{layer}: {e}"));
+        let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+        let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
+        let built: Vec<Vec<u8>> = contents
+            .blocks
+            .iter()
+            .map(|b| mercs2_formats::sges::decompress_sges(&b.compressed_data).expect("sges"))
+            .filter(|d| pb::find_entry(d, hash, TYPE_HASH_LAYER).is_some())
+            .collect();
+        assert_eq!(built.len(), 1, "{layer}: one block holds the layer");
+        let block = &built[0];
+        // The block keeps its entries; only the layer's own container changed.
+        let (n, entries) = mercs2_formats::ucfx::parse_block_entry_table(block);
+        let (n0, base_entries) = mercs2_formats::ucfx::parse_block_entry_table(&base.block);
+        assert_eq!(n, n0, "{layer}: the block's entry count");
+        for (i, (e, b)) in entries.iter().zip(&base_entries).enumerate() {
+            assert_eq!((e.name_hash, e.type_hash), (b.name_hash, b.type_hash));
+            if i != entry {
+                assert_eq!(
+                    pb::find_entry(block, e.name_hash, e.type_hash).map(|x| x.1),
+                    pb::find_entry(&base.block, b.name_hash, b.type_hash).map(|x| x.1),
+                    "{layer}: entry {i} keeps its bytes"
+                );
+            }
+        }
+        let (_, container) = pb::find_entry(block, hash, TYPE_HASH_LAYER).unwrap();
+        let r = pb::read_layer_records(container).unwrap_or_else(|e| panic!("{layer}: {e}"));
+        let model = mercs2_quartermaster::manifest::asset_hash("global_barrela");
+        assert!(r.models.contains(&(free, model)), "{layer}: the ModelName record");
+        let t = r.transforms.iter().find(|t| t.0 == free).unwrap_or_else(|| panic!("{layer}: the Transform record"));
+        assert_eq!(t.1, [10.0, 2.0, 30.0]);
+        assert_eq!(r.flags.iter().find(|f| f.0 == free).map(|f| f.1), Some(pb::FLGS_MODEL_PLACEMENT), "{layer}");
+        // Every record the layer shipped is still there.
+        let (_, shipped) = pb::find_entry(&base.block, hash, TYPE_HASH_LAYER).unwrap();
+        let before = mercs2_formats::placement::entity_key_set(shipped);
+        let after = mercs2_formats::placement::entity_key_set(container);
+        assert!(before.iter().all(|k| after.contains(k)) && after.len() == before.len() + 1, "{layer}");
+    }
+
+    // A block path names no layer, and is refused.
     let s = placement_shipment(
-        "add_placement_fresh",
-        &format!("key: 0x{free:08X}\nmodel: al_prop_barrel_red\npos: [10, 2, 30]\nyaw: 90\n"),
+        "add_placement_block_path",
+        &format!("key: \"0x{free:08X}\"\nmodel: global_barrela\npos: [0, 0, 0]\n"),
         "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n",
     );
-    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a fresh key builds");
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(BuildError::Lower { kind: "add_placement", message, .. }) => {
+            assert!(message.contains("not the name of a layer"), "{message}")
+        }
+        Err(e) => panic!("expected the lowering to refuse a block path, got {e}"),
+        Ok(_) => panic!("a block path must not build"),
+    }
+}
+
+/// An `add_layer` builds the new layer beside the template's block's layers: the block gains one
+/// last entry, named for the layer, holding exactly the file's entities, and every shipped entry
+/// keeps its bytes.
+#[test]
+fn an_add_layer_is_a_new_last_entry_of_the_templates_block() {
+    use mercs2_formats::placement_build as pb;
+    use mercs2_formats::types::TYPE_HASH_LAYER;
+    let mut game = retail_game();
+    let (_, free) = placed_and_free_key(&mut game);
+    let base = game.layer_block_for_edit("vz_state_pmccon040").expect("vz_state_pmccon040");
+    let s = placement_shipment(
+        "add_layer_new",
+        &format!("- key: \"0x{free:08X}\"\n  model: global_barrela\n  pos: [1, 2, 3]\n- key: \"0x{:08X}\"\n  model: global_barrela\n  pos: [4, 5, 6]\n", free + 1),
+        "  - kind: add_layer\n    name: vz_state_qm_add_layer_test\n    template: vz_state_pmccon040\n    entities: src/e.yaml\n",
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).unwrap_or_else(|e| panic!("{e}"));
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
-    let placed = contents.blocks.iter().any(|b| {
-        let dec = mercs2_formats::sges::decompress_sges(&b.compressed_data).expect("sges");
-        mercs2_formats::placement::entity_key_set(&dec).contains(&free)
-    });
-    assert!(placed, "the shipped block places 0x{free:08X}");
+    let hash = mercs2_quartermaster::manifest::asset_hash("vz_state_qm_add_layer_test");
+    let block = contents
+        .blocks
+        .iter()
+        .map(|b| mercs2_formats::sges::decompress_sges(&b.compressed_data).expect("sges"))
+        .find(|d| pb::find_entry(d, hash, TYPE_HASH_LAYER).is_some())
+        .expect("a block holds the new layer");
+    let (n, entries) = mercs2_formats::ucfx::parse_block_entry_table(&block);
+    let (n0, base_entries) = mercs2_formats::ucfx::parse_block_entry_table(&base.block);
+    assert_eq!(n, n0 + 1);
+    assert_eq!((entries.last().unwrap().name_hash, entries.last().unwrap().type_hash), (hash, TYPE_HASH_LAYER));
+    for b in &base_entries {
+        assert_eq!(pb::find_entry(&block, b.name_hash, b.type_hash).map(|x| x.1), pb::find_entry(&base.block, b.name_hash, b.type_hash).map(|x| x.1));
+    }
+    let (_, c) = pb::find_entry(&block, hash, TYPE_HASH_LAYER).unwrap();
+    let r = pb::read_layer_records(c).unwrap();
+    assert_eq!(r.transforms.iter().map(|t| t.0).collect::<Vec<_>>(), [free, free + 1]);
+    assert_eq!(r.models.iter().map(|m| m.0).collect::<Vec<_>>(), [free, free + 1]);
+    assert!(r.flags.iter().all(|f| f.1 == pb::FLGS_MODEL_PLACEMENT) && r.flags.len() == 2);
+    assert_eq!(mercs2_formats::placement::entity_key_set(c).len(), 2, "the new layer holds only the file's entities");
+}
+
+/// The Name, ModelName and Transform scaffolding is one body each across every retail layer
+/// (`mercs2_probe layer-scaffold`): the game stack reads it without a disagreement.
+#[test]
+fn the_retail_layers_agree_on_the_placement_scaffolding() {
+    let mut game = retail_game();
+    let s = game.layer_scaffold().unwrap_or_else(|e| panic!("{e}"));
+    for (i, comp) in mercs2_formats::placement_build::PLACEMENT_COMPS.iter().enumerate() {
+        assert!(s.comps[i].0.starts_with(comp.as_bytes()), "{comp}");
+    }
 }
 
 /// The length of the LOD chain `(packed_block_ref, secondary_ref)` encode: `_P000` plus every rung up

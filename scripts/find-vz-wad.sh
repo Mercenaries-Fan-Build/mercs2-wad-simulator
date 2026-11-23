@@ -87,7 +87,7 @@ No PC vz.wad found.
 Searched \$MERCS2_VZ_WAD, this checkout's game-files/ and data/, and the usual install paths.
 Console bakes, if any, are listed above — they are readable but the builder cannot emit for
 them yet, so they are not selected here.
-Game-gated tests (`cargo xtask retail-test`) will FAIL until .mercs2-local.toml names one.
+Game-gated tests (\`cargo xtask retail-test\`) will FAIL until .mercs2-local.toml names one.
 To point at one explicitly:
 
     scripts/find-vz-wad.sh --write   # after setting MERCS2_VZ_WAD=/path/to/vz.wad

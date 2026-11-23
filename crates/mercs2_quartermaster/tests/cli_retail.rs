@@ -112,16 +112,40 @@ fn lint_with_game_reports_a_taken_script_name_and_entity_key() {
 
     let dir = scratch("lint-with-game");
     std::fs::write(dir.join("src/a.lua"), "return {}\n").unwrap();
-    std::fs::write(dir.join("src/e.yaml"), format!("key: 0x{placed:08X}\nmodel: al_prop_barrel_red\npos: [0, 0, 0]\n")).unwrap();
+    std::fs::write(dir.join("src/e.yaml"), format!("key: \"0x{placed:08X}\"\nmodel: global_barrela\npos: [0, 0, 0]\n")).unwrap();
     let s = shipment(
         &dir,
         "  - kind: add_script\n    name: mrxplayer\n    source: src/a.lua\n  \
-         - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n",
+         - kind: add_placement\n    layer: vz_state_pmccon004\n    entity: src/e.yaml\n",
     );
     let out = qm(&["lint", s.to_str().unwrap(), "--with-game", "--game", vz.to_str().unwrap()]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(code(&out), EXIT_FINDINGS, "stderr: {stderr}");
     assert!(stderr.contains("M0197") && stderr.contains("M0198"), "{stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// qm extract-tiny
+// ---------------------------------------------------------------------------
+
+/// `qm extract-tiny` writes the stand-in's model under `<out>/src/`; run again, it refuses the file
+/// now there (exit 2) and leaves it as it is.
+#[test]
+fn extract_tiny_never_writes_over_a_file() {
+    let vz = retail_vz_wad();
+    let dir = scratch("extract-tiny");
+    let model = "vz_state_pmc_pristine_tinygeometry_tgr15_tgc33_0x00143d9d";
+    let args = ["extract-tiny", model, "--out", dir.to_str().unwrap(), "--game", vz.to_str().unwrap()];
+    let out = qm(&args);
+    assert_eq!(code(&out), 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let glb = dir.join(format!("src/{model}.glb"));
+    assert!(std::fs::metadata(&glb).is_ok_and(|m| m.len() > 0), "{}", glb.display());
+    std::fs::write(&glb, b"by hand").unwrap();
+    let again = qm(&args);
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert_eq!(code(&again), 2, "stderr: {stderr}");
+    assert!(stderr.contains("exists; it is left as it is"), "{stderr}");
+    assert_eq!(std::fs::read(&glb).unwrap(), b"by hand");
 }
 
 // ---------------------------------------------------------------------------

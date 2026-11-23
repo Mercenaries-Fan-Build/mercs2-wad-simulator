@@ -10,27 +10,59 @@
 //! memory — so playing a clip is a single `seek` + `read` of its range, never a scan of the 798 MB
 //! file. The `.pws` is opened per-clip and dropped, so nothing holds the huge file resident.
 
+use mercs2_audio::wave::{decode_ima_mono, decode_ima_stereo, WaveData, WaveRecord, WavebankFile};
 use mercs2_engine::wad;
+use mercs2_formats::types::TYPE_HASH_WAVEBANK;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-/// The `vo_stream.english` wavebank's chunk type hash (`TYPE_ID_WAVEBANK` = 6).
-const TH_WAVEBANK: u32 = 0xF753_F6D0;
-/// Wavebank header/record layout (`mercs2_audio::wave` documents the same offsets).
-const REC_SIZE: usize = 36;
+/// One wavebank record's samples. An embedded record's are its bytes, PCM16. A streamed record's are
+/// its range of `pws`, the `.pws` its bank streams from, which the PC stores as IMA ADPCM (36-byte
+/// mono, 72-byte stereo blocks); its last block runs past the clip, so the decode is cut at the
+/// record's `+0x10`, which for a streamed record counts the decoded PCM16 bytes.
+pub fn record_pcm(rec: &WaveRecord, pws: Option<&Path>) -> Result<Pcm, String> {
+    if rec.sample_rate == 0 {
+        return Err(format!("record 0x{:08X} carries no sample rate", rec.clip_hash));
+    }
+    let channels = rec.channels;
+    let samples = match &rec.data {
+        WaveData::Embedded(bytes) => bytes.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes([b[0], b[1]])).collect(),
+        WaveData::Streamed { offset, size, .. } => {
+            let pws = pws.ok_or_else(|| format!("record 0x{:08X} streams from a .pws, and none was given", rec.clip_hash))?;
+            let mut f = std::fs::File::open(pws).map_err(|e| format!("open {}: {e}", pws.display()))?;
+            f.seek(SeekFrom::Start(u64::from(*offset))).map_err(|e| format!("{}: seek to {offset}: {e}", pws.display()))?;
+            let mut buf = vec![0u8; *size as usize];
+            f.read_exact(&mut buf).map_err(|e| format!("{}: {size} B at {offset}: {e}", pws.display()))?;
+            let mut pcm = if channels >= 2 { decode_ima_stereo(&buf) } else { decode_ima_mono(&buf) };
+            pcm.truncate(rec.frames as usize / 2);
+            pcm
+        }
+    };
+    Ok(Pcm { samples, rate: rec.sample_rate, channels })
+}
 
-/// One clip's location and format in the `.pws`.
-#[derive(Debug, Clone, Copy)]
-struct Rec {
-    offset: u64,
-    size: u32,
-    /// `+0x10`: decoded PCM16 bytes. A clip's last block runs past them.
-    decoded: u32,
-    rate: u32,
-    channels: u8,
-    /// The wavebank format byte at `+6`: `2` (bytes-per-sample) / `CODEC_PCM` = embedded PCM16. VO in
-    /// the `.pws` is PCM16; other codecs (XMA) are left unplayable rather than mis-decoded.
-    codec: u8,
+/// A record's length in seconds: an embedded record's `+0x10` counts frames, a streamed record's the
+/// decoded PCM16 bytes ([`record_pcm`]).
+pub fn record_seconds(rec: &WaveRecord) -> f32 {
+    let frames = match rec.data {
+        WaveData::Streamed { .. } => rec.frames / (2 * u32::from(rec.channels.max(1))),
+        WaveData::Embedded(_) => rec.frames,
+    };
+    frames as f32 / rec.sample_rate.max(1) as f32
+}
+
+/// The `.pws` a game wavebank streams from: the file named `stream` in the `Audios` folder beside
+/// `vz`, matched case-insensitively.
+pub fn game_pws(vz: &Path, stream: &str) -> Result<PathBuf, String> {
+    let dir = vz.parent().map(|d| d.join("Audios")).ok_or_else(|| format!("{} has no parent folder", vz.display()))?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    for e in entries {
+        let p = e.map_err(|e| format!("reading {}: {e}", dir.display()))?.path();
+        if p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(stream)) {
+            return Ok(p);
+        }
+    }
+    Err(format!("{stream} is not in {}", dir.display()))
 }
 
 /// Decoded PCM for one clip, ready to hand to an output stream.
@@ -53,7 +85,7 @@ impl Pcm {
 
 /// The parsed VO record index plus the path to the sample stream.
 pub struct VoStream {
-    records: Vec<Rec>,
+    records: Vec<WaveRecord>,
     pws: PathBuf,
 }
 
@@ -68,12 +100,12 @@ impl VoStream {
         let mut wad = wad::open(&english.to_string_lossy())
             .map_err(|e| format!("open {}: {e}", english.display()))?;
         let name_hash = mercs2_formats::hash::pandemic_hash_m2("vo_stream.english");
-        let container = wad::extract_container_typed(&mut wad, name_hash, TH_WAVEBANK)
+        let container = wad::extract_container_typed(&mut wad, name_hash, TYPE_HASH_WAVEBANK)
             .map_err(|e| format!("vo_stream.english wavebank: {e}"))?;
         // The wavebank asset is a UCFX container; the record table is its `data` chunk.
         let body = mercs2_formats::ucfx::extract_chunk_body(&container, b"data")
-            .unwrap_or(container);
-        let records = parse_records(&body)?;
+            .ok_or("the vo_stream.english wavebank's container has no data chunk")?;
+        let records = WavebankFile::parse(&body).map_err(|e| format!("vo_stream.english wavebank: {e}"))?.records;
         let pws = find_pws(game_dir).ok_or_else(|| {
             format!("vo_stream.english.pws not found under {} (data/Audios/)", game_dir.display())
         })?;
@@ -88,65 +120,15 @@ impl VoStream {
         self.records.is_empty()
     }
 
-    /// Decode one clip's PCM by its wave index — a single seek + read of its `.pws` range. Returns an
-    /// error for an out-of-range index, a non-PCM codec, or an I/O failure.
+    /// Decode one clip's PCM by its wave index — a single seek + read of its `.pws` range
+    /// ([`record_pcm`]). Returns an error for an out-of-range index or an I/O failure.
     pub fn clip_pcm(&self, wave_index: u32) -> Result<Pcm, String> {
         let rec = self
             .records
             .get(wave_index as usize)
             .ok_or_else(|| format!("wave index {wave_index} is past the {} records", self.records.len()))?;
-        // `4` = CODEC_STREAM: the samples live in the `.pws` and are PCM16 there (this is the whole
-        // streaming-VO bank). `1`/`2` are embedded PCM16. Anything else is a console codec (XMA) we do
-        // not decode on PC — say so rather than play noise.
-        if !matches!(rec.codec, 1 | 2 | 4) {
-            return Err(format!("clip {wave_index} is codec 0x{:02X}, not PC PCM16", rec.codec));
-        }
-        let mut f = std::fs::File::open(&self.pws).map_err(|e| format!("open {}: {e}", self.pws.display()))?;
-        f.seek(SeekFrom::Start(rec.offset)).map_err(|e| format!("seek: {e}"))?;
-        let mut buf = vec![0u8; rec.size as usize];
-        f.read_exact(&mut buf).map_err(|e| format!("read {} B at {}: {e}", rec.size, rec.offset))?;
-        // The PC `.pws` is raw IMA ADPCM (36-byte mono / 72-byte stereo blocks), NOT PCM16 — reading
-        // the bytes as PCM produces static at ~1/3.6 the true length. Decode with the game's own IMA
-        // decoders, the ones `vo_stream_extract` proved against the retail stream.
-        let channels = rec.channels.max(1);
-        let mut samples = if channels >= 2 {
-            mercs2_audio::wave::decode_ima_stereo(&buf)
-        } else {
-            mercs2_audio::wave::decode_ima_mono(&buf)
-        };
-        samples.truncate(rec.decoded as usize / 2);
-        let rate = if rec.rate == 0 { 44100 } else { rec.rate };
-        Ok(Pcm { samples, rate, channels })
+        record_pcm(rec, Some(&self.pws))
     }
-}
-
-/// Parse the wavebank body's record table. `+8` (`populated`) is the count — NOT the word at `+0`,
-/// which reads 29 on this bank while it holds 12,988 (the clamp bug `mercs2_audio::wave` documents).
-fn parse_records(body: &[u8]) -> Result<Vec<Rec>, String> {
-    if body.len() < 20 {
-        return Err("wavebank body too short".into());
-    }
-    let populated = u16::from_le_bytes([body[8], body[9]]) as usize;
-    let roff = u32::from_le_bytes([body[16], body[17], body[18], body[19]]) as usize;
-    let max_fit = body.len().saturating_sub(roff) / REC_SIZE;
-    let n = populated.min(max_fit);
-    let mut recs = Vec::with_capacity(n);
-    for i in 0..n {
-        let r = roff + i * REC_SIZE;
-        if r + REC_SIZE > body.len() {
-            break;
-        }
-        let rd = |o: usize| u32::from_le_bytes([body[r + o], body[r + o + 1], body[r + o + 2], body[r + o + 3]]);
-        recs.push(Rec {
-            channels: { let c = body[r + 5]; if c == 0 { 1 } else { c } },
-            codec: body[r + 6],
-            rate: rd(8),
-            size: rd(12),
-            decoded: rd(16),
-            offset: rd(32) as u64,
-        });
-    }
-    Ok(recs)
 }
 
 /// Locate `vo_stream.english.pws`. `game_dir` may be the install root (has `data/`) or the `data/`

@@ -201,6 +201,51 @@ pub fn bare_hash(reference: &str) -> Option<u32> {
     u32::from_str_radix(hex, 16).ok()
 }
 
+/// An entity key (a placement's GUID) as an authored file spells it: a quoted `"0xHHHHHHHH"`
+/// ([`bare_hash`]'s form, as a string). A number is refused, whatever its spelling — an unquoted
+/// `0x000B4E19` is a YAML integer — with the quoted spelling of its value. For
+/// `#[serde(with = "crate::manifest::entity_key")]`.
+pub mod entity_key {
+    use std::fmt;
+
+    pub fn serialize<S: serde::Serializer>(key: &u32, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("0x{key:08X}"))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+        d.deserialize_any(Key)
+    }
+
+    struct Key;
+
+    fn number<E: serde::de::Error>(v: impl fmt::Display + TryInto<u32> + Copy) -> E {
+        match v.try_into() {
+            Ok(k) => E::custom(format!("entity key {v} is a number; write it as quoted hex: \"0x{k:08X}\"")),
+            Err(_) => E::custom(format!("entity key {v} is a number, and not a 32-bit key; write a key as quoted hex, \"0xHHHHHHHH\"")),
+        }
+    }
+
+    impl<'de> serde::de::Visitor<'de> for Key {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an entity key as quoted hex, \"0xHHHHHHHH\"")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<u32, E> {
+            super::bare_hash(v).ok_or_else(|| E::custom(format!("entity key {v:?} is not \"0x\" and 1 to 8 hex digits")))
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u32, E> {
+            Err(number(v))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<u32, E> {
+            Err(number(v))
+        }
+    }
+}
+
 /// Resolve an asset reference to the hash the engine will look up.
 ///
 /// A bare `0x…` **is** the hash; anything else is a name and gets hashed. Both spellings are legal:
@@ -351,6 +396,23 @@ pub struct Retarget {
     /// correct for generic and Mixamo-style rigs and is reported as a warning for the rest.
     #[serde(default)]
     pub bones: Option<std::collections::BTreeMap<String, Option<String>>>,
+}
+
+/// One spawn-list call of a shipped script, set to another list (`set_spawn_lists`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpawnListSet {
+    /// The script's top-level function that makes the call, as the script writes it
+    /// (`SetupDangerousObjBuildings`, `Mod:Start`).
+    pub function: String,
+    /// The call's building: a global the function reads (`TallCommBuild`).
+    pub building: String,
+    /// The group of a `TweakAttachedSpawnersInGroup` call; left out for a `TweakAttachedSpawners`
+    /// call, which sets every group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The list the call sets instead (`Spawnlist (VZ Elite)`).
+    pub list: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1002,6 +1064,11 @@ pub enum Contribution {
     /// Script. A DECLARED MUTATION, not a finished block: the Quartermaster links `scripts_vz`
     /// across the installed set at deploy, so two Shipments patching Lua do not annihilate.
     PatchLua { target: String, append: PathBuf },
+    /// Script. Sets spawn-list calls of a shipped script to other lists. qm writes the Lua
+    /// ([`crate::spawn_lists::wrapper`]): one wrapper per function, which runs the shipped function
+    /// and then makes each call again with its new list, linked onto `target` as a `patch_lua`
+    /// append is. No rows, no Lua.
+    SetSpawnLists { target: String, lists: Vec<SpawnListSet> },
     /// Script. Mint a WHOLE NEW Lua module the engine can `import` / `dynamic_import` by NAME.
     ///
     /// Distinct from [`PatchLua`], which appends to an existing script; this one ships a fresh
@@ -1258,7 +1325,9 @@ pub enum Contribution {
         layer: String,
         /// The 200 m grid cell: `row` from z, `col` from x, each 0..40.
         cell: TinyCell,
-        /// The placement's entity key (GUID). No layer of the game may already use it.
+        /// The placement's entity key (GUID), quoted hex ([`entity_key`]). No layer of the game may
+        /// already use it.
+        #[serde(with = "entity_key")]
         key: u32,
         /// The world objects the stand-in draws, each a bare `0xGUID` or the name of a placement in
         /// `layer`. `_TINY_SLOT` indexes this list.
@@ -1642,6 +1711,7 @@ impl Contribution {
         "add_ui",
         "replace_texture",
         "patch_lua",
+        "set_spawn_lists",
         "add_script",
         "replace_lua",
         "replace_phy2",
@@ -1707,6 +1777,7 @@ impl Contribution {
             Contribution::AddUi { .. } => "add_ui",
             Contribution::ReplaceTexture { .. } => "replace_texture",
             Contribution::PatchLua { .. } => "patch_lua",
+            Contribution::SetSpawnLists { .. } => "set_spawn_lists",
             Contribution::AddScript { .. } => "add_script",
             Contribution::ReplaceLua { .. } => "replace_lua",
             Contribution::ReplacePhy2 { .. } => "replace_phy2",

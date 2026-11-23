@@ -854,6 +854,32 @@ impl GameFx {
     }
 }
 
+/// One Shipment's fx merged over the game ([`merge`], [`Scope::Build`]), and the atlas its sprites
+/// are drawn into: the game's effects, worldentity, fxdict and atlas ([`GameFx::read`]), the atlas the
+/// Shipment repaints or the game's ([`base_atlas`]), and the class layouts of its `level: vz` rows
+/// ([`level_schemas`]). `Err` when the game's tables cannot be read or a repaint does not encode; the
+/// merge's own refusal is the inner `Err`.
+pub fn merge_shipment(
+    manifest: &Manifest,
+    root: &Path,
+    game: &mut crate::game::GameStack,
+) -> Result<(Atlas, Result<Merged, Failure>), String> {
+    let base = GameFx::read(game)?;
+    let set = [FxShipment { manifest, root }];
+    let (atlas, repainted) = base_atlas(&base.atlas, &set)?;
+    let schemas = level_schemas(game, std::iter::once(manifest))?;
+    let fx_base = FxBase {
+        effects: &base.effects.entries,
+        worldentity: &base.worldentity,
+        fxdict: &base.fxdict,
+        atlas: &atlas,
+        repainted,
+        level_templates: LevelTemplates::main(schemas.as_ref()),
+    };
+    let merged = merge(&fx_base, &set, Scope::Build);
+    Ok((atlas, merged))
+}
+
 /// What the merge needs from the game.
 pub struct FxBase<'a> {
     /// The game's effects block, in block order.

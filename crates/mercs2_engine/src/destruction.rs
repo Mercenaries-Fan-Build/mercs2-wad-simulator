@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! destruction_system(world, assets)        // leaf: Health -> messages -> chosen -> Destructible.node_enable
-//!     -> sync_destruction_to_scene(...)    // engine: Destructible.node_enable -> Scene.entity_state[e]
+//!     -> sync_destruction_to_scene(...)    // engine: Destructible.node_enable -> Scene.entity_state[(scope, e)]
 //!     -> the draw gate reads RenderState   // clause 3
 //! ```
 //!
@@ -98,18 +98,25 @@ impl DestructionAssets for DestructionStore {
 ///
 /// Narrow on purpose. [`crate::scene::Scene`] owns a GPU device, so a function taking `&mut Scene`
 /// cannot be tested without one; taking this instead makes the sync a pure data operation with a
-/// two-line fake in tests, and `Scene` satisfies it with the accessors it already had.
+/// two-line fake in tests, and a `Scene` with the world's scope ([`ScopedScene`]) satisfies it with
+/// the accessors it already had.
 pub trait EntityRenderStates {
     fn render_state(&self, e: mercs2_core::Entity) -> Option<&crate::render_state::RenderState>;
     fn set_render_state(&mut self, e: mercs2_core::Entity, rs: crate::render_state::RenderState);
 }
 
-impl EntityRenderStates for crate::scene::Scene {
+/// A scene and the scope it keeps one world's entities under (`scene::WorldScope`).
+pub struct ScopedScene<'a> {
+    pub scene: &'a mut crate::scene::Scene,
+    pub scope: crate::scene::WorldScope,
+}
+
+impl EntityRenderStates for ScopedScene<'_> {
     fn render_state(&self, e: mercs2_core::Entity) -> Option<&crate::render_state::RenderState> {
-        self.entity_render_state(e)
+        self.scene.entity_render_state(self.scope, e)
     }
     fn set_render_state(&mut self, e: mercs2_core::Entity, rs: crate::render_state::RenderState) {
-        self.set_entity_render_state(e, rs);
+        self.scene.set_entity_render_state(self.scope, e, rs);
     }
 }
 

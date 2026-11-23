@@ -35,6 +35,8 @@ pub mod level;
 pub mod link;
 pub mod lint;
 pub mod loader;
+pub mod lossless;
+pub mod lua_source;
 pub mod manifest;
 pub mod menu_items;
 pub mod names;
@@ -47,6 +49,7 @@ pub mod shader;
 pub mod shader_import;
 pub mod shell_extras;
 pub mod sound;
+pub mod spawn_lists;
 pub mod sprite;
 pub mod states;
 pub mod template;
@@ -75,7 +78,8 @@ pub use names::{bare_hash_suggestions, BareHashSuggestion, NameTable};
 /// `manifest.*` in a Shipment root is an ambiguity error, never a silent pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// The preferred form. What the template scaffolds and what the Quartermaster WRITES.
+    /// The preferred form. What the template scaffolds and what the Quartermaster writes a new
+    /// manifest in.
     Yaml,
     /// First-class on read — the natural format for the JS half of the ecosystem.
     Json,
@@ -177,9 +181,29 @@ fn removed_kind(text: &str, format: Format) -> Option<(usize, &'static str, &'st
     })
 }
 
-/// Serialize a manifest as YAML — the one format the Quartermaster WRITES.
+/// Serialize a manifest as YAML — the format the Quartermaster writes a new manifest in.
 pub fn to_yaml(manifest: &Manifest) -> Result<String, String> {
     serde_norway::to_string(manifest).map_err(|e| e.to_string())
+}
+
+/// Serialize a manifest in `format`: the writer [`lossless::rewrite`] edits an existing manifest
+/// with.
+pub fn to_text(manifest: &Manifest, format: Format) -> Result<String, String> {
+    match format {
+        Format::Yaml => to_yaml(manifest),
+        Format::Json => serde_json::to_string_pretty(manifest).map_err(|e| e.to_string()),
+        Format::Toml => toml::to_string(manifest).map_err(|e| e.to_string()),
+    }
+}
+
+/// Parse a manifest without [`Manifest::validate`]: the reader an edit is checked with, since an
+/// edit may leave a manifest the linter then reports on.
+pub fn parse_unvalidated(text: &str, format: Format) -> Result<Manifest, String> {
+    match format {
+        Format::Yaml => serde_norway::from_str(text).map_err(|e| e.to_string()),
+        Format::Json => serde_json::from_str(text).map_err(|e| e.to_string()),
+        Format::Toml => toml::from_str(text).map_err(|e| e.to_string()),
+    }
 }
 
 /// Serialize ONE contribution as the YAML block a manifest embeds — the exact text that landing this

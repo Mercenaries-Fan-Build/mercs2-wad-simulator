@@ -146,6 +146,36 @@ layers_static declares 5 rows = `enum`, `flgt`, `flgs`, and 2 × `COMP` (Name + 
 sub-block 0 the `flgs` row's payload is **4 bytes**, and across vz_state it ranges 4–3,496 B. It is
 not, and never was, where placements live.*
 
+### 2.3a The shared rows, `flgt` and `flgs` (measured 2026-11-22)
+
+Over all 923 layer entries of PC retail `vz.wad` (`mercs2_probe layer-scaffold`, run with `VZ_WAD`
+set):
+
+- **Top level.** Every layer has `CHDR`, `enum`, `flgt` and `flgs`; 914 also have COMPs. No other
+  top-level tag occurs. Nine layers have no COMP at all (`[CHDR, enum, flgt, flgs]`:
+  `0x27B1EE81`, `0x3266AA18`, `0x6878F34B`, `0x74CBF0C3`, `0xA31B6BCE`, `0xBAE1BB0F`, `0xCAC803BC`,
+  `0xFDB0F5B2`, `0xFEFBC483`).
+- **One body each, game-wide.** `CHDR` (`00 00 38 00 02 00 00 00`), `enum` (10,868 bytes) and
+  `flgt` have one variant across all 923. The `Name`, `ModelName` and `Transform` COMPs, in the 914,
+  346 and 914 layers that have them, have one `info` body each (record count aside) and one `schm`
+  body each.
+- **`flgt`** is 4 bytes, `0xE9DABB4A`: the trailer of the worldentity's `flgt`
+  ([`worldentity_container_format.md`](worldentity_container_format.md) §2.4), with no class list.
+- **`flgs`** is `[u32 n][n × (u32 key, 32-byte bitset)]`, and its bits index the **worldentity's**
+  `flgt` classes: bit `i` is set when the key has a record in class `flgt[i]`, the worldentity's own
+  rule. 19,387 of 19,434 layer records match; the other 47 set the bit of `PointLocation`, in layers
+  with a `PointLocation` COMP whose records the probe does not split. `ModelName` is `flgt[111]`;
+  `Name` and `Transform` are not in `flgt`. So an entity with only `Name`, `ModelName` and
+  `Transform` records has bit 111 alone (byte 13 = `0x80`), as all 1,239 retail ones do.
+- **COMP order varies.** Only 265 of 923 layers list their COMPs in name order, `LightObject` repeats
+  within 4 layers, and `ModelName` follows `Name` (216 layers), `Label` (75), `HibernationControl`
+  (46), `LocalizedName` (6) or `MaterialMapping` (3). The installer `FUN_00654940` reads each COMP
+  through the deserializer its `info` class name selects
+  ([`worldentity_container_format.md`](worldentity_container_format.md) §3.1;
+  [`layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md) §2).
+- **No `ModelName`.** 577 layers have no `ModelName` COMP. Among them `vz_state_pmccon004` (hash
+  `0x0055E642`, 362 keys), whose entities take their models from templates.
+
 ### 2.4 COMP Component Types (VERIFIED)
 
 Each COMP block has an `info` child containing the component type name. Key types for placement:

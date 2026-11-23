@@ -153,7 +153,7 @@ contributions:
   - kind: add_tiny_geometry
     layer: vz_state_mar_city_pristine
     cell: { row: 28, col: 32 }
-    key: 1327103
+    key: "0x00143FFF"
     objects: ["0x00097FF3", mar_city_tower]
     model: src/tiny/tgr28_tgc32.glb
 
@@ -215,6 +215,17 @@ contributions:
   - kind: patch_lua
     target: wifpmcinterior
     append: src/scripts/my_append.lua
+
+  - kind: set_spawn_lists
+    target: gurcon002
+    lists:
+      - function: SetupDangerousObjBuildings
+        building: TallCommBuild
+        group: Rooftop
+        list: Spawnlist (VZ Elite)
+      - function: SetupDangerousObjBuildings
+        building: BarracksEast
+        list: Spawnlist (VZ Ground)
 
   - kind: native_hook
     target: retail
@@ -436,7 +447,7 @@ const JSON: &str = r#"
       "kind": "add_tiny_geometry",
       "layer": "vz_state_mar_city_pristine",
       "cell": { "row": 28, "col": 32 },
-      "key": 1327103,
+      "key": "0x00143FFF",
       "objects": ["0x00097FF3", "mar_city_tower"],
       "model": "src/tiny/tgr28_tgc32.glb"
     },
@@ -506,6 +517,14 @@ const JSON: &str = r#"
       "kind": "patch_lua",
       "target": "wifpmcinterior",
       "append": "src/scripts/my_append.lua"
+    },
+    {
+      "kind": "set_spawn_lists",
+      "target": "gurcon002",
+      "lists": [
+        { "function": "SetupDangerousObjBuildings", "building": "TallCommBuild", "group": "Rooftop", "list": "Spawnlist (VZ Elite)" },
+        { "function": "SetupDangerousObjBuildings", "building": "BarracksEast", "list": "Spawnlist (VZ Ground)" }
+      ]
     },
     {
       "kind": "native_hook",
@@ -752,7 +771,7 @@ edits = "src/world.yaml"
 kind = "add_tiny_geometry"
 layer = "vz_state_mar_city_pristine"
 cell = { row = 28, col = 32 }
-key = 1327103
+key = "0x00143FFF"
 objects = ["0x00097FF3", "mar_city_tower"]
 model = "src/tiny/tgr28_tgc32.glb"
 
@@ -822,6 +841,14 @@ movie = "src/ui/overlay.gfx"
 kind = "patch_lua"
 target = "wifpmcinterior"
 append = "src/scripts/my_append.lua"
+
+[[contributions]]
+kind = "set_spawn_lists"
+target = "gurcon002"
+lists = [
+  { function = "SetupDangerousObjBuildings", building = "TallCommBuild", group = "Rooftop", list = "Spawnlist (VZ Elite)" },
+  { function = "SetupDangerousObjBuildings", building = "BarracksEast", list = "Spawnlist (VZ Ground)" },
+]
 
 [[contributions]]
 kind = "native_hook"
@@ -1002,6 +1029,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_movie",
             "add_ui",
             "patch_lua",
+            "set_spawn_lists",
             "native_hook",
             "place_file",
             "add_runtime_dll",
@@ -1451,6 +1479,44 @@ fn mixed_key_objects_rejected_all_formats() {
     }
 }
 
+/// A stand-in's `key` is quoted hex in every format: a number is refused with the quoted spelling
+/// of its value — an unquoted `0x…` in YAML among them, which is an integer — and the quoted form
+/// writes back quoted.
+#[test]
+fn a_stand_in_key_is_quoted_hex_in_every_format() {
+    let tiny = |key: &str| {
+        format!(
+            "  - kind: add_tiny_geometry\n    layer: vz_l\n    cell: {{ row: 1, col: 2 }}\n    key: {key}\n    \
+             objects: [\"0x00000100\"]\n    model: src/t.glb\n"
+        )
+    };
+    let yaml = |key: &str| doc("s", "1.0.0", "").replace("contributions: []\n", &format!("contributions:\n{}", tiny(key)));
+    let json = r#"{"format":2,"shipment":{"name":"s","version":"1.0.0","target":"retail"},"contributions":[
+        {"kind":"add_tiny_geometry","layer":"vz_l","cell":{"row":1,"col":2},"key":1327103,"objects":["0x00000100"],"model":"src/t.glb"}]}"#;
+    let toml = "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                [[contributions]]\nkind = \"add_tiny_geometry\"\nlayer = \"vz_l\"\ncell = { row = 1, col = 2 }\n\
+                key = 1327103\nobjects = [\"0x00000100\"]\nmodel = \"src/t.glb\"\n";
+    for (text, fmt) in [
+        (yaml("0x00143FFF"), Format::Yaml),
+        (yaml("1327103"), Format::Yaml),
+        (json.to_string(), Format::Json),
+        (toml.to_string(), Format::Toml),
+    ] {
+        match from_str(&text, fmt) {
+            Err(mercs2_quartermaster::ReadError::Parse { message, .. }) => {
+                assert!(message.contains("is a number") && message.contains("\"0x00143FFF\""), "{fmt:?}: {message}")
+            }
+            other => panic!("{fmt:?}: expected a parse failure, got {other:?}"),
+        }
+    }
+    let m = from_str(&yaml("\"0x00143FFF\""), Format::Yaml).expect("a quoted key reads");
+    let Contribution::AddTinyGeometry { key, .. } = &m.contributions[0] else { panic!("{m:?}") };
+    assert_eq!(*key, 0x0014_3FFF);
+    let back = serde_norway::to_string(&m).unwrap();
+    assert!(back.contains("key: '0x00143FFF'") || back.contains("key: \"0x00143FFF\""), "{back}");
+    assert_eq!(from_str(&back, Format::Yaml).expect("written back, it reads"), m);
+}
+
 /// `supersedes` is a top-level field.
 #[test]
 fn supersedes_top_level_parses() {
@@ -1678,4 +1744,66 @@ fn fx_targets_spell_the_same_in_all_three_formats() {
     let plain = "format: 2\nshipment: { name: s, version: 1.0.0, target: retail }\n\
                  contributions:\n  - kind: replace_fx\n    target: x\n    edits: src/e.yaml\n";
     assert!(from_str(plain, Format::Yaml).is_err(), "a bare string says neither effect nor template");
+}
+
+/// Each format's writer gives back a manifest holding every kind that reads as the one written.
+#[test]
+fn every_format_writes_a_manifest_that_reads_back_as_itself() {
+    let m = from_str(YAML, Format::Yaml).expect("YAML parses");
+    for f in [Format::Yaml, Format::Json, Format::Toml] {
+        let text = mercs2_quartermaster::to_text(&m, f).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+        let back = from_str(&text, f).unwrap_or_else(|e| panic!("{f:?} does not read back: {e}\n{text}"));
+        assert_eq!(back, m, "{f:?}");
+    }
+}
+
+/// The fixture `text` with its version raised, its `add_texture` removed and its `replace_texture`
+/// moved to the front, written back in place.
+fn edited_fixture(text: &str, f: Format) -> Result<String, String> {
+    let mut m = from_str(text, f).expect("the fixture parses");
+    m.shipment.version = "1.1.0".into();
+    m.contributions.retain(|c| c.kind() != "add_texture");
+    let at = m.contributions.iter().position(|c| c.kind() == "replace_texture").expect("the fixture replaces a texture");
+    let moved = m.contributions.remove(at);
+    m.contributions.insert(0, moved);
+    mercs2_quartermaster::lossless::rewrite(
+        text,
+        f,
+        &m,
+        |t| mercs2_quartermaster::parse_unvalidated(t, f),
+        |m| mercs2_quartermaster::to_text(m, f),
+    )
+}
+
+/// A hand-written manifest edited in place: the edited line, the removed contribution and the moved
+/// one change; every other line, flow form and blank line is as the author wrote it.
+#[test]
+fn an_edit_to_a_hand_written_manifest_changes_only_what_it_edits() {
+    let replace = "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/boss/new_boss_ub.png\n\n";
+    let texture = "  - kind: add_texture\n    name: my_custom_decal\n    image: src/decals/decal.png\n    normal_map: false\n\n";
+    let want = YAML
+        .replace("  version: 1.0.0\n", "  version: 1.1.0\n")
+        .replace(replace, "")
+        .replace(texture, "")
+        .replace("contributions:\n", &format!("contributions:\n{replace}"));
+    assert_eq!(edited_fixture(YAML, Format::Yaml).unwrap_or_else(|e| panic!("YAML: {e}")), want);
+
+    let replace = "\n[[contributions]]\nkind = \"replace_texture\"\ntarget = \"al_hum_boss_ub\"\nimage = \"src/boss/new_boss_ub.png\"\n";
+    let texture = "\n[[contributions]]\nkind = \"add_texture\"\nname = \"my_custom_decal\"\nimage = \"src/decals/decal.png\"\nnormal_map = false\n";
+    let first = "\n[[contributions]]\nkind = \"add_outfit\"";
+    let want = TOML
+        .replace("version = \"1.0.0\"\n", "version = \"1.1.0\"\n")
+        .replace(replace, "")
+        .replace(texture, "")
+        .replace(first, &format!("{replace}{first}"));
+    assert_eq!(edited_fixture(TOML, Format::Toml).unwrap_or_else(|e| panic!("TOML: {e}")), want);
+
+    let replace = "    {\n      \"kind\": \"replace_texture\",\n      \"target\": \"al_hum_boss_ub\",\n      \"image\": \"src/boss/new_boss_ub.png\"\n    },\n";
+    let texture = "    {\n      \"kind\": \"add_texture\",\n      \"name\": \"my_custom_decal\",\n      \"image\": \"src/decals/decal.png\",\n      \"normal_map\": false\n    },\n";
+    let want = JSON
+        .replace("    \"version\": \"1.0.0\",\n", "    \"version\": \"1.1.0\",\n")
+        .replace(replace, "")
+        .replace(texture, "")
+        .replace("  \"contributions\": [\n", &format!("  \"contributions\": [\n{replace}"));
+    assert_eq!(edited_fixture(JSON, Format::Json).unwrap_or_else(|e| panic!("JSON: {e}")), want);
 }

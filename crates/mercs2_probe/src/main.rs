@@ -73,10 +73,12 @@ mod jc2_blockrt;
 mod jc2_script_probe;
 mod jc2_template_mint;
 mod layer;
+mod layer_scaffold;
 mod lettering;
 mod lod_neuter;
 mod lua_debug_live;
 mod lua_vehicle_hashes;
+mod model_chains;
 mod phy2_probe;
 mod place_forge;
 mod place_lift;
@@ -1094,6 +1096,20 @@ fn main() {
         }
         return;
     }
+    if cmd == "model-chains" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("model-chains: usage: mercs2_probe model-chains <vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        match model_chains::model_chains(std::path::Path::new(wad), std::path::Path::new(out)) {
+            Ok(true) => return,
+            Ok(false) => std::process::exit(1),
+            Err(e) => {
+                eprintln!("model-chains failed: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
     if cmd == "tex-rungs" {
         let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
             eprintln!("tex-rungs: usage: mercs2_probe tex-rungs <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> [--raw <dir> --hash <0xHASH>]");
@@ -1729,6 +1745,7 @@ fn main() {
                 run(layer::layer(&wadpath, hash, &overlays));
             }
         }
+        "layer-scaffold" => run(layer_scaffold::layer_scaffold(&wadpath)),
         "foliage" => run(dump_render::foliage_list(&wadpath)),
         "foliage-check" => match first_positional(&args) {
             Some(capture) => run(dump_render::foliage_check(&wadpath, &capture)),

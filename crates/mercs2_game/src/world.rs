@@ -1579,6 +1579,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // every spawn below land in the World that actually renders.
         self.script_host.borrow_mut().attach_world(ctx.world.clone());
         let scene = &mut *ctx.scene;
+        let scope = ctx.scope;
         // Re-apply the atmosphere now that the boot branch IS known (see `config`): a new game starts
         // outdoors at the opening contract and must not inherit the interior's sunless dark fog.
         let (fog, sun) = atmosphere_for(self.spawn_interior);
@@ -1616,11 +1617,12 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // terrain peak and the exterior would occlude it, so that boot keeps the exterior out of the
         // scene: its world steps headless during the boot and is not kept.
         let interior_only = std::env::args().any(|a| a == "--interior");
-        let (stream_terrain, stream) = data.streaming.into_streaming_world(self.guids.clone());
+        let (stream_terrain, stream) = data.streaming.into_streaming_world(self.guids.clone(), ctx.scope);
         let stream = Rc::new(RefCell::new(stream));
         self.script_host.borrow_mut().attach_stream(stream.clone());
         if !interior_only {
             scene.load_model(
+                scope,
                 stream_terrain.hash,
                 &stream_terrain.verts,
                 &stream_terrain.indices,
@@ -1632,7 +1634,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::IDENTITY,
                 ModelRef { model: stream_terrain.hash },
                 AnimState::default(),
-                SkinPalette { mats: scene.model_rest_palette(stream_terrain.hash) },
+                SkinPalette { mats: scene.model_rest_palette(scope, stream_terrain.hash) },
             ));
         }
         if let Some(sh) = &self.script {
@@ -1680,26 +1682,26 @@ impl mercs2_engine::app::Game for Mercs2Game {
 
         // Placement-marker DEBUG glyphs (`--markers`).
         if let (Some(pm), true) = (data.placements, std::env::args().any(|a| a == "--markers")) {
-            scene.load_model(pm.hash, &pm.verts, &pm.indices, &pm.draws, &pm.textures, &pm.skin);
+            scene.load_model(scope, pm.hash, &pm.verts, &pm.indices, &pm.draws, &pm.textures, &pm.skin);
             ctx.world.borrow_mut().spawn((
                 Transform::IDENTITY,
                 ModelRef { model: pm.hash },
                 AnimState::default(),
-                SkinPalette { mats: scene.model_rest_palette(pm.hash) },
+                SkinPalette { mats: scene.model_rest_palette(scope, pm.hash) },
             ));
         }
 
         // PMC-subset real geometry (`--placements`).
         for (m, pos, yaw) in data.pmc_models {
-            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            scene.load_model(scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             let mut t = Transform::from_translation(Vec3::new(pos[0], pos[1], pos[2]));
             t.rotation = Quat::from_rotation_y(yaw);
-            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(m.hash) }));
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(scope, m.hash) }));
         }
 
         // Hi-res c3 cell geometry (`--cells`) — collect world-space triangles for collision.
         for (m, off) in data.cells {
-            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            scene.load_model(scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             let tr = Vec3::new(off[0], off[1], off[2]);
             self.collision_tris.extend(mercs2_engine::worldutil::mesh_collision_tris(
                 &m.verts, &m.indices, off, [0.0, 0.0, 0.0, 1.0],
@@ -1708,13 +1710,13 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::from_translation(tr),
                 ModelRef { model: m.hash },
                 AnimState::default(),
-                SkinPalette { mats: scene.model_rest_palette(m.hash) },
+                SkinPalette { mats: scene.model_rest_palette(scope, m.hash) },
             ));
         }
 
         // PMC interior geometry (`--interior`) — shells are walls → collision.
         for (m, pos, quat) in data.interior {
-            scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            scene.load_model(scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             let tr = Vec3::new(pos[0], pos[1], pos[2]);
             let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
             let mut t = Transform::from_translation(tr);
@@ -1722,7 +1724,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             self.collision_tris.extend(mercs2_engine::worldutil::mesh_collision_tris(
                 &m.verts, &m.indices, pos, quat,
             ));
-            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(m.hash) }));
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(scope, m.hash) }));
         }
 
         // ModelName props (exterior + interior furniture) — each non-water instance blocks → collision.
@@ -1730,7 +1732,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         let mut prop_instances = 0usize;
         let mut prop_destructibles = 0usize;
         for (hash, m, instances) in data.props.into_iter().chain(data.interior_props) {
-            scene.load_model(hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+            scene.load_model(scope, hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             prop_meshes += 1;
             // Destruction: hand this model's state machine + HIER to the store, then give every
             // instance of a machine-bearing model the components that drive it. A prop WITHOUT a
@@ -1744,7 +1746,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             if destructible {
                 prop_destructibles += 1;
             }
-            let rest = scene.model_rest_palette(hash);
+            let rest = scene.model_rest_palette(scope, hash);
             for (pos, quat) in instances {
                 let tr = Vec3::new(pos[0], pos[1], pos[2]);
                 let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
@@ -1797,7 +1799,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     if sp > 0.1 { self.player.run_speed = sp; }
                 }
             }
-            scene.load_model(p.hash, &p.verts, &p.indices, &p.draws, &p.textures, &p.skin);
+            scene.load_model(scope, p.hash, &p.verts, &p.indices, &p.draws, &p.textures, &p.skin);
             let rig = p.skin.rig.clone();
             let bind = if rig.is_empty() {
                 vec![IDENTITY]
@@ -1844,11 +1846,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
             if let (Some(mut wm), Some(hb)) = (data.weapon, data.weapon_hand_bone) {
                 wm.skin.center = [0.0, 0.0, 0.0];
                 wm.skin.scale = 1.0;
-                scene.load_model(wm.hash, &wm.verts, &wm.indices, &wm.draws, &wm.textures, &wm.skin);
+                scene.load_model(scope, wm.hash, &wm.verts, &wm.indices, &wm.draws, &wm.textures, &wm.skin);
                 self.weapon_entity = Some(ctx.world.borrow_mut().spawn((
                     Transform::from_translation(self.player.pos),
                     ModelRef { model: wm.hash },
-                    SkinPalette { mats: scene.model_rest_palette(wm.hash) },
+                    SkinPalette { mats: scene.model_rest_palette(scope, wm.hash) },
                 )));
                 self.weapon_hand_bone = hb;
                 self.weapon_player_model = p.hash;
@@ -1868,7 +1870,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         for pm in data.population_models {
             let mercs2_engine::game_world::PopulationModel { model: m, units } = pm;
             let LoadedModel { hash, verts, indices, draws, textures, skin, clips, .. } = m;
-            scene.load_model(hash, &verts, &indices, &draws, &textures, &skin);
+            scene.load_model(scope, hash, &verts, &indices, &draws, &textures, &skin);
             let rig = skin.rig.clone();
             let bind = if rig.is_empty() {
                 vec![IDENTITY]
@@ -1993,20 +1995,20 @@ impl mercs2_engine::app::Game for Mercs2Game {
         {
             let cards = std::mem::take(&mut data.glow_cards);
             let glows = cards.len();
-            scene.set_glow_cards(&cards);
+            scene.set_glow_cards(scope, &cards);
             let mut started = 0usize;
             // Resolved at load (WAD open); started at their placements here on the render thread.
             if let Some((atlas, rects)) = data.fx_atlas.take() {
-                scene.fx_set_atlas(&atlas, &rects).unwrap_or_else(|e| panic!("{e}"));
+                scene.fx_set_atlas(scope, &atlas, &rects).unwrap_or_else(|e| panic!("{e}"));
             }
             for (effect, pos) in std::mem::take(&mut data.effects) {
                 scene
-                    .fx_start_effect(&effect, mercs2_engine::fx_sim::Starter::default(), pos, false)
+                    .fx_start_effect(scope, &effect, mercs2_engine::fx_sim::Starter::default(), pos, false)
                     .unwrap_or_else(|e| panic!("an effect placement at {pos:?}: {e}"));
                 started += 1;
             }
             for (desc, pos) in std::mem::take(&mut data.particle_fx) {
-                scene.fx_start_desc(desc, pos);
+                scene.fx_start_desc(scope, desc, pos);
                 started += 1;
             }
             if started + glows > 0 {
@@ -2464,7 +2466,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 mercs2_engine::combat::ImpactKind::Blood => None,
             };
             if let Some(d) = desc {
-                ctx.scene.fx_start_desc(d, imp.position.to_array());
+                ctx.scene.fx_start_desc(ctx.scope, d, imp.position.to_array());
             }
         }
         // Destruction side effects. The leaf crate RECORDS these (it can neither spawn entities nor
@@ -2481,6 +2483,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             match intent.kind {
                 mercs2_engine::destruction::IntentKind::StartEmitter => {
                     ctx.scene.fx_start_desc(
+                        ctx.scope,
                         mercs2_engine::particles::EmitterDesc::impact_fire(),
                         at.to_array(),
                     );
@@ -2493,7 +2496,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     // silently dropped, because "debris quietly missing" is exactly the kind of gap
                     // that reads as working.
                     match intent.template() {
-                        Some(tpl) if ctx.scene.has_model(tpl) => {
+                        Some(tpl) if ctx.scene.has_model(ctx.scope, tpl) => {
                             let t = Transform::from_translation(at);
                             ctx.world.borrow_mut().spawn((t, ModelRef { model: tpl }));
                         }

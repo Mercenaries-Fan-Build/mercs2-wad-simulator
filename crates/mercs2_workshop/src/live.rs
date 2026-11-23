@@ -178,7 +178,7 @@ impl Page {
     pub fn step_mirror(&mut self, scene: &mut mercs2_engine::scene::Scene, w: &mut crate::app::WadStack, wad: &str) {
         let live = self.link.snapshot();
         if !live.poses.is_empty() {
-            self.mirror.start(wad);
+            self.mirror.start(wad, scene);
         }
         if !self.assets_asked {
             self.assets_asked = true;

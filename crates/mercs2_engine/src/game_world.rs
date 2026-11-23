@@ -75,7 +75,21 @@ pub fn load_terrainmesh_tile(
 ) -> Result<LoadedModel, String> {
     let what = |e: String| format!("terrainmesh 0x{terrainmesh_hash:08X}: {e}");
     let container = wad::extract_container_typed(w, terrainmesh_hash, TERRAINMESH_TYPE_HASH).map_err(what)?;
-    let (verts, indices, draws) = mesh::build_terrain_cell(&container, pos, fade).map_err(what)?;
+    terrainmesh_from_container(w, terrainmesh_hash, &container, pos, fade, resident)
+}
+
+/// [`load_terrainmesh_tile`] of a cell's container bytes: the cell built at `pos` with `fade`, its
+/// textures read from `w` (those `resident` says are uploaded left out), as model `terrainmesh_hash`.
+pub fn terrainmesh_from_container(
+    w: &mut wad::Wad,
+    terrainmesh_hash: u32,
+    container: &[u8],
+    pos: [f32; 3],
+    fade: mercs2_formats::terrainmesh::TerrainFade,
+    resident: &dyn Fn(u32) -> bool,
+) -> Result<LoadedModel, String> {
+    let what = |e: String| format!("terrainmesh 0x{terrainmesh_hash:08X}: {e}");
+    let (verts, indices, draws) = mesh::build_terrain_cell(container, pos, fade).map_err(what)?;
     let mut textures: TexMap = std::collections::HashMap::new();
     for d in &draws {
         let wanted: Vec<u32> = match &d.ground {
@@ -1018,11 +1032,16 @@ impl StreamingWorldData {
     /// This is the K2-unification hand-off for a caller in ANOTHER crate: `mercs2_game`'s TPS boot holds
     /// the opaque `StreamingWorldData` and cannot read its crate-private fields, so this method does the
     /// same boot glue `FreeFlyGame::setup` does inline (upload terrain, take ownership of the streamer)
-    /// and returns the pieces the caller must wire into its own `Scene`/`World`.
-    pub fn into_streaming_world(self, guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>) -> (LoadedModel, StreamingWorld) {
+    /// and returns the pieces the caller must wire into its own `Scene`/`World`. `scope` is the one the
+    /// caller's scene keeps that `World`'s entities under.
+    pub fn into_streaming_world(
+        self,
+        guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>,
+        scope: crate::scene::WorldScope,
+    ) -> (LoadedModel, StreamingWorld) {
         let StreamingWorldData { wad, terrain, manager, templates, lowres_draw_by_cell, static_block_layers: _, trees } = self;
         let terrain_hash = terrain.hash;
-        let mut sw = StreamingWorld::new(wad, manager, templates, lowres_draw_by_cell, terrain_hash, guids);
+        let mut sw = StreamingWorld::new(wad, manager, templates, lowres_draw_by_cell, terrain_hash, guids, scope);
         sw.trees = trees;
         (terrain, sw)
     }
@@ -1717,6 +1736,8 @@ pub fn load_scrub(w: &mut wad::Wad, hash: u32, resident: &dyn Fn(u32) -> bool) -
 }
 
 pub struct StreamingWorld {
+    /// The scope the scene keeps this world's entities under (`scene::WorldScope`).
+    scope: crate::scene::WorldScope,
     wad: wad::Wad,
     /// Started by the first presented load; a headless step never loads.
     assets: Option<AssetThread>,
@@ -1807,6 +1828,7 @@ impl StreamingWorld {
         lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
         terrain_hash: u32,
         guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>,
+        scope: crate::scene::WorldScope,
     ) -> Self {
         {
             let gm = &mut *guids.borrow_mut();
@@ -1815,6 +1837,7 @@ impl StreamingWorld {
             }
         }
         StreamingWorld {
+            scope,
             wad,
             assets: None,
             manager,
@@ -2066,7 +2089,7 @@ impl StreamingWorld {
         let result = (|| {
             for s in &mut species {
                 if let Some((geometry, textures)) = s.billboard.take() {
-                    scene.load_trees(s.template, &geometry, &textures, s.trees.len());
+                    scene.load_trees(self.scope, s.template, &geometry, &textures, s.trees.len());
                 }
                 for (i, tree) in s.trees.iter().enumerate() {
                     let inside = Vec3::from(tree.position).distance_squared(viewer) < s.range * s.range;
@@ -2099,7 +2122,7 @@ impl StreamingWorld {
                         .filter(|(i, _)| !s.entities.get(i).is_some_and(|e| e.shown))
                         .map(|(_, t)| *t)
                         .collect();
-                    scene.set_trees(s.template, &drawn);
+                    scene.set_trees(self.scope, s.template, &drawn);
                 }
             }
             Ok(())
@@ -2243,7 +2266,7 @@ impl StreamingWorld {
     fn step_blocks(&mut self, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World, viewer: [f32; 3]) {
         use mercs2_core::glam::{Quat, Vec3};
         use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
-        let Self { wad, manager, block_ents, model_refs, phy2_local, collision_ops, coll_authored, coll_no_authored, .. } = self;
+        let Self { scope, wad, manager, block_ents, model_refs, phy2_local, collision_ops, coll_authored, coll_no_authored, .. } = self;
 
         let diff = manager.update(viewer);
         // Seam B — drive the RegionCache decision layer each tick (PgSysPopulation CacheIn/CacheOut).
@@ -2253,10 +2276,10 @@ impl StreamingWorld {
         for b in &diff.unload_blocks {
             if let Some(e) = block_ents.remove(b) {
                 if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
-                    dec_model_ref(model_refs, mr, scene);
+                    dec_model_ref(model_refs, mr, (scene, *scope));
                 }
                 let _ = world.despawn(e);
-                scene.forget_entity(e);
+                scene.forget_entity(*scope, e);
             }
             collision_ops.push(CollisionOp::Remove(block_key(*b)));
         }
@@ -2266,8 +2289,8 @@ impl StreamingWorld {
                 continue;
             }
             if let Some((m, off, phy2)) = load_one_c3_cell(wad, *b) {
-                if !scene.has_model(m.hash) {
-                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                if !scene.has_model(*scope, m.hash) {
+                    scene.load_model(*scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                 }
                 // Collision: AUTHORED PHY2 only (convex/box hulls + decoded static mesh), model-local,
                 // placed at `off` (identity rotation). `phy2 == Some` only for a COMPLETE authored
@@ -2288,7 +2311,7 @@ impl StreamingWorld {
                     Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
                     ModelRef { model: m.hash },
                     AnimState::default(),
-                    SkinPalette { mats: scene.model_rest_palette(m.hash) },
+                    SkinPalette { mats: scene.model_rest_palette(*scope, m.hash) },
                 ));
                 *model_refs.entry(m.hash).or_insert(0) += 1;
                 block_ents.insert(*b, e);
@@ -2323,13 +2346,13 @@ impl StreamingWorld {
     fn load_assets(&mut self, key: u32, scene: &crate::scene::Scene) -> Result<bool, String> {
         let o = *self.catalog.get(key).ok_or_else(|| format!("0x{key:08X}: not a placed entity"))?;
         let job = if let Some(hash) = o.terrain_mesh {
-            if scene.has_model(hash) {
+            if scene.has_model(self.scope, hash) {
                 return Ok(true);
             }
             let fade = self.templates.terrain_fade.get(&o.parent).copied().unwrap_or_default();
             AssetJob::Terrain { hash, pos: o.pos, fade }
         } else if let Some(hash) = o.scrub {
-            if scene.has_scrub(hash) {
+            if scene.has_scrub(self.scope, hash) {
                 return Ok(true);
             }
             if !wad::has_scrub(&self.wad, hash) {
@@ -2338,7 +2361,7 @@ impl StreamingWorld {
             AssetJob::Scrub { hash }
         } else {
             let Some(hash) = o.model else { return Ok(true) };
-            if scene.has_model(hash) {
+            if scene.has_model(self.scope, hash) {
                 return Ok(true);
             }
             if !wad::has_model(&self.wad, hash) {
@@ -2374,17 +2397,17 @@ impl StreamingWorld {
             match ready {
                 AssetReady::Terrain { model: m, tris } => {
                     thread.pending.remove(&m.hash);
-                    scene.load_terrain_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                    scene.load_terrain_model(self.scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                     self.local_tris.entry(m.hash).or_insert(tris);
                 }
                 AssetReady::Scrub { hash, geometry, textures } => {
                     thread.pending.remove(&hash);
-                    scene.load_scrub(hash, geometry, &textures);
+                    scene.load_scrub(self.scope, hash, geometry, &textures);
                 }
                 AssetReady::Model { model: m, collision, node, sphere } => {
                     let m = *m;
                     thread.pending.remove(&m.hash);
-                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                    scene.load_model(self.scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                     self.phy2_local.entry(m.hash).or_insert(collision);
                     self.node_spheres.remember(node, sphere);
                     // A rigged model that ships clips registers its rig + clips so the per-frame animation
@@ -2435,7 +2458,7 @@ impl StreamingWorld {
         let o = self.catalog.get(key).copied().expect("a catalogued key");
         // Ground cover has no gameplay side: no entity, no collision.
         if let Some(hash) = o.scrub {
-            scene.place_scrub(key, hash, o.pos);
+            scene.place_scrub(self.scope, key, hash, o.pos);
             self.scrub_placed.insert(key);
             return;
         }
@@ -2447,20 +2470,20 @@ impl StreamingWorld {
                     self.terrain_field.insert(key, grid);
                 }
             }
-            let e = world.spawn((Transform::IDENTITY, ModelRef { model: tm }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(tm) }));
+            let e = world.spawn((Transform::IDENTITY, ModelRef { model: tm }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(self.scope, tm) }));
             *self.model_refs.entry(tm).or_insert(0) += 1;
             self.prop_ents.insert(key, e);
             self.guids.borrow_mut().bind(key, e);
             // Hide the low-res tile beneath this hi-res tile (the LOD swap).
             if let Some(di) = pos_to_cell(o.pos).and_then(|c| self.lowres_draw_by_cell.get(&c)) {
-                scene.set_draw_hidden(self.terrain_hash, *di, true);
+                scene.set_draw_hidden(self.scope, self.terrain_hash, *di, true);
             }
             return;
         }
         let model = o.model.expect("sync_visual spawns only an entity with a model");
         let q = Quat::from_xyzw(o.quat[0], o.quat[1], o.quat[2], o.quat[3]);
         let p = Vec3::new(o.pos[0], o.pos[1], o.pos[2]);
-        let rest = scene.model_rest_palette(model);
+        let rest = scene.model_rest_palette(self.scope, model);
         let mut t = Transform::from_translation(p);
         t.rotation = q;
         // A runtime spawn of a vehicle or character template is its gameplay entity, which moves: no
@@ -2515,22 +2538,22 @@ impl StreamingWorld {
     fn despawn_visual(&mut self, key: u32, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World) {
         use mercs2_core::ModelRef;
         if self.scrub_placed.remove(&key) {
-            scene.remove_scrub(key);
+            scene.remove_scrub(self.scope, key);
             return;
         }
         let Some(e) = self.prop_ents.remove(&key) else { return };
         self.guids.borrow_mut().unbind(e);
         if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
-            dec_model_ref(&mut self.model_refs, mr, scene);
+            dec_model_ref(&mut self.model_refs, mr, (scene, self.scope));
         }
         let _ = world.despawn(e);
-        scene.forget_entity(e);
+        scene.forget_entity(self.scope, e);
         match self.catalog.get(key).copied() {
             Some(o) if o.terrain_mesh.is_some() => {
                 // A terrain tile un-hides its low-res tile and drops its heightfield; it never entered
                 // the broadphase.
                 if let Some(di) = pos_to_cell(o.pos).and_then(|c| self.lowres_draw_by_cell.get(&c)) {
-                    scene.set_draw_hidden(self.terrain_hash, *di, false);
+                    scene.set_draw_hidden(self.scope, self.terrain_hash, *di, false);
                 }
                 self.terrain_field.remove(key);
             }
@@ -2590,7 +2613,7 @@ pub async fn run_game_world(
     // GAME hook: once the streaming world's base geometry has loaded, the engine hands the game the
     // live World / Scene / Wad so the GAME can spawn its own entities (player, PMC interior, …). The
     // engine is asset-agnostic and knows nothing about that — game specifics live in `mercs2_game`.
-    populate: impl FnMut(&mut mercs2_core::World, &mut crate::scene::Scene, &mut crate::wad::Wad) + 'static,
+    populate: impl FnMut(&mut mercs2_core::World, (&mut crate::scene::Scene, crate::scene::WorldScope), &mut crate::wad::Wad) + 'static,
 ) {
     match spawn {
         Some(s) => eprintln!("[boot] spawn = ({:.1}, {:.1}, {:.1})  <- from --spawn (PMC interior via mercs2_game)", s[0], s[1], s[2]),
@@ -2651,7 +2674,7 @@ impl<P> FreeFlyGame<P> {
 
 impl<P> crate::app::Game for FreeFlyGame<P>
 where
-    P: FnMut(&mut mercs2_core::World, &mut crate::scene::Scene, &mut crate::wad::Wad) + 'static,
+    P: FnMut(&mut mercs2_core::World, (&mut crate::scene::Scene, crate::scene::WorldScope), &mut crate::wad::Wad) + 'static,
 {
     type LoadData = StreamingWorldData;
 
@@ -2702,6 +2725,7 @@ where
         let terrain = data.terrain;
         let terrain_hash = terrain.hash;
         ctx.scene.load_model(
+            ctx.scope,
             terrain.hash,
             &terrain.verts,
             &terrain.indices,
@@ -2715,13 +2739,13 @@ where
                 Transform::IDENTITY,
                 ModelRef { model: terrain.hash },
                 AnimState::default(),
-                SkinPalette { mats: ctx.scene.model_rest_palette(terrain.hash) },
+                SkinPalette { mats: ctx.scene.model_rest_palette(ctx.scope, terrain.hash) },
             ));
         }
         // GAME population hook: hand the game the live World/Scene/Wad so it can spawn its own entities.
         {
             let mut w = ctx.world.borrow_mut();
-            (self.populate)(&mut w, ctx.scene, &mut data.wad);
+            (self.populate)(&mut w, (ctx.scene, ctx.scope), &mut data.wad);
         }
         // This boot runs no level script, so it makes the layer requests the script would: the level's
         // base layer (`Sys.RequiredAsset("vz_base", "layer")`, `levelbootstrap.lua:14`), the static
@@ -2741,7 +2765,7 @@ where
             }
         }
         // Take ownership of the streaming state into the reusable executor.
-        let mut stream = StreamingWorld::new(data.wad, data.manager, data.templates, data.lowres_draw_by_cell, terrain_hash, guids);
+        let mut stream = StreamingWorld::new(data.wad, data.manager, data.templates, data.lowres_draw_by_cell, terrain_hash, guids, ctx.scope);
         stream.trees = data.trees;
         self.stream = Some(stream);
     }
@@ -2835,12 +2859,12 @@ where
 /// Decrement a model's live-reference count; free its GPU resources when it reaches zero (net-new
 /// UNLOAD path — nothing freed GPU before the streaming runtime). Shared meshes stay resident until
 /// the last referencing entity hibernates/unloads.
-fn dec_model_ref(refs: &mut std::collections::HashMap<u32, u32>, hash: u32, scene: &mut crate::scene::Scene) {
+fn dec_model_ref(refs: &mut std::collections::HashMap<u32, u32>, hash: u32, (scene, scope): (&mut crate::scene::Scene, crate::scene::WorldScope)) {
     if let Some(c) = refs.get_mut(&hash) {
         *c = c.saturating_sub(1);
         if *c == 0 {
             refs.remove(&hash);
-            scene.unload_model(hash);
+            scene.unload_model(scope, hash);
         }
     }
 }

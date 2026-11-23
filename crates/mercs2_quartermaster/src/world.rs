@@ -6,9 +6,9 @@
 //! Only the fields present on an edit are written — a bare `pos:` moves without touching rotation or
 //! model — so the file is a sparse patch over the extracted baseline, not a full re-authoring.
 //!
-//! An entity is addressed by its `key` (a bare `0xHHHHHHHH`, the `Transform` record key the extract
-//! prints) or by its `name` (matched against the layer's `Name` COMP). Key is unambiguous; name is
-//! the convenience.
+//! An entity is addressed by its `key` (a quoted `"0xHHHHHHHH"`, the `Transform` record key the
+//! extract prints) or by its `name` (matched against the layer's `Name` COMP). Key is unambiguous;
+//! name is the convenience.
 //!
 //! [`parse_entities`] reads the other placement file: the NEW entities an `add_placement` or
 //! `add_layer` places, closed to the fields a placement has.
@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One entity's edit. All change fields are optional; absent means "leave it".
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntityEdit {
     /// The target: a bare `0xKEY` (the Transform record key) or an entity name.
@@ -33,7 +33,7 @@ pub struct EntityEdit {
 }
 
 /// The whole `edits:` file.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorldDoc {
     pub edits: Vec<EntityEdit>,
@@ -44,38 +44,56 @@ pub fn parse(yaml: &str) -> Result<WorldDoc, String> {
     serde_norway::from_str(yaml).map_err(|e| format!("edit_world file is not valid YAML: {e}"))
 }
 
-/// One entity record of an `add_placement` / `add_layer` entity file: the key, the model, the
-/// position, an optional orientation (`quat` or `yaw`, never both) and an optional name. A field
-/// outside these is refused by name.
-#[derive(Debug, Clone, Deserialize)]
+/// One entity record of an `add_placement` / `add_layer` entity file, as written: the key, the
+/// model, the position, an optional orientation (`quat` or `yaw`, never both) and an optional name.
+/// A field outside these is refused by name.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EntityRecord {
-    key: u32,
-    model: String,
-    pos: [f32; 3],
+pub struct EntityRecord {
+    /// Quoted hex, `"0xHHHHHHHH"` ([`crate::manifest::entity_key`]).
+    #[serde(with = "crate::manifest::entity_key")]
+    pub key: u32,
+    pub model: String,
+    pub pos: [f32; 3],
     #[serde(default)]
-    quat: Option<[f32; 4]>,
+    pub quat: Option<[f32; 4]>,
     /// Degrees about Y.
     #[serde(default)]
-    yaw: Option<f32>,
+    pub yaw: Option<f32>,
     #[serde(default)]
-    name: Option<String>,
+    pub name: Option<String>,
+}
+
+/// An entity file as written: its records, and whether it is the one-record mapping form rather
+/// than a list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityFile {
+    pub single: bool,
+    pub records: Vec<EntityRecord>,
 }
 
 /// Read an `add_placement` / `add_layer` entity file: one [`EntityRecord`] mapping, or a list of
 /// them. Each record is read on its own, so a refused field is named with the record it is in. A
 /// record without an orientation is unrotated; one without a name is named `modent_<key>`.
 pub fn parse_entities(yaml: &str) -> Result<Vec<mercs2_formats::placement_build::NewEntity>, String> {
+    lower_entities(read_entities(yaml)?.records)
+}
+
+/// Read an entity file's records as written ([`parse_entities`] without the lowering).
+pub fn read_entities(yaml: &str) -> Result<EntityFile, String> {
     let doc: serde_norway::Value =
         serde_norway::from_str(yaml).map_err(|e| format!("entity file is not valid YAML: {e}"))?;
-    let records: Vec<EntityRecord> = match doc {
-        serde_norway::Value::Sequence(items) => items
-            .into_iter()
-            .enumerate()
-            .map(|(i, v)| serde_norway::from_value(v).map_err(|e| format!("entity {i}: {e}")))
-            .collect::<Result<_, _>>()?,
+    let (single, records): (bool, Vec<EntityRecord>) = match doc {
+        serde_norway::Value::Sequence(items) => (
+            false,
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| serde_norway::from_value(v).map_err(|e| format!("entity {i}: {e}")))
+                .collect::<Result<_, _>>()?,
+        ),
         serde_norway::Value::Mapping(_) => {
-            vec![serde_norway::from_value(doc).map_err(|e| format!("the entity: {e}"))?]
+            (true, vec![serde_norway::from_value(doc).map_err(|e| format!("the entity: {e}"))?])
         }
         _ => {
             return Err("an entity file is one entity record (a mapping) or a list of them".into());
@@ -84,6 +102,12 @@ pub fn parse_entities(yaml: &str) -> Result<Vec<mercs2_formats::placement_build:
     if records.is_empty() {
         return Err("the entity file lists no entities".into());
     }
+    Ok(EntityFile { single, records })
+}
+
+/// The entities `records` place: a record without an orientation unrotated, `yaw` turned about Y,
+/// one without a name named `modent_<key>`; `quat` and `yaw` together refused.
+pub fn lower_entities(records: Vec<EntityRecord>) -> Result<Vec<mercs2_formats::placement_build::NewEntity>, String> {
     records
         .into_iter()
         .enumerate()
@@ -114,6 +138,155 @@ pub fn parse_entities(yaml: &str) -> Result<Vec<mercs2_formats::placement_build:
         .collect()
 }
 
+/// Write an entity file: the one-record mapping form when `file.single`, else a list, each record's
+/// fields in the order `key, model, pos, quat, yaw, name`, a field the record leaves out not written.
+/// The text is checked to read back as `file` ([`read_entities`]); a value that cannot be written so
+/// it does is refused.
+pub fn write_entities(file: &EntityFile) -> Result<String, String> {
+    if file.records.is_empty() {
+        return Err("an entity file lists at least one entity".into());
+    }
+    if file.single && file.records.len() != 1 {
+        return Err(format!("the one-record form holds one entity, not {}", file.records.len()));
+    }
+    let mut out = String::new();
+    for (i, r) in file.records.iter().enumerate() {
+        let ctx = |m: String| format!("entity {i} (key 0x{:08X}): {m}", r.key);
+        let mut fields = vec![
+            format!("key: \"0x{:08X}\"", r.key),
+            format!("model: {}", Reader::Value.scalar(&r.model).map_err(ctx)?),
+            format!("pos: {}", floats(&r.pos).map_err(ctx)?),
+        ];
+        if let Some(q) = &r.quat {
+            fields.push(format!("quat: {}", floats(q).map_err(ctx)?));
+        }
+        if let Some(y) = r.yaw {
+            fields.push(format!("yaw: {}", float(y).map_err(ctx)?));
+        }
+        if let Some(n) = &r.name {
+            fields.push(format!("name: {}", Reader::Value.scalar(n).map_err(ctx)?));
+        }
+        for (j, f) in fields.iter().enumerate() {
+            let lead = match (file.single, j) {
+                (true, _) => "",
+                (false, 0) => "- ",
+                (false, _) => "  ",
+            };
+            out.push_str(lead);
+            out.push_str(f);
+            out.push('\n');
+        }
+    }
+    match read_entities(&out) {
+        Ok(back) if back == *file => Ok(out),
+        Ok(back) => Err(format!("the written entity file reads back as {back:?}, not {file:?}")),
+        Err(e) => Err(format!("the written entity file does not read back: {e}")),
+    }
+}
+
+/// The comment line an `edit_world` file starts with.
+pub const WORLD_HEADER: &str = "# edit_world baseline — edit any entity's pos / quat / model, drop the rest.";
+
+/// Write an `edit_world` file: [`WORLD_HEADER`], then each edit's `entity`, `pos`, `quat` and `model`,
+/// a field the edit leaves out not written. `note(entity)` is the comment written after an edit's
+/// `entity` line (the extract writes the entity's name there). The text is checked to read back as
+/// `doc` ([`parse`]); a value that cannot be written so it does is refused.
+pub fn write_world(doc: &WorldDoc, note: impl Fn(&str) -> Option<String>) -> Result<String, String> {
+    let mut out = format!("{WORLD_HEADER}\nedits:");
+    if doc.edits.is_empty() {
+        out.push_str(" []");
+    }
+    out.push('\n');
+    for (i, e) in doc.edits.iter().enumerate() {
+        let ctx = |m: String| format!("edit {i} ({}): {m}", e.entity);
+        // A key is quoted, as the extract has always written it.
+        let entity = match crate::manifest::bare_hash(&e.entity) {
+            Some(_) => Reader::Field.quoted(&e.entity).map_err(ctx)?,
+            None => Reader::Field.scalar(&e.entity).map_err(ctx)?,
+        };
+        out.push_str(&format!("  - entity: {entity}"));
+        if let Some(n) = note(&e.entity) {
+            if n.contains(['\n', '\r']) {
+                return Err(ctx(format!("the note {n:?} holds a line break, which a comment cannot")));
+            }
+            out.push_str(&format!("   # {n}"));
+        }
+        out.push('\n');
+        if let Some(p) = &e.pos {
+            out.push_str(&format!("    pos: {}\n", floats(p).map_err(ctx)?));
+        }
+        if let Some(q) = &e.quat {
+            out.push_str(&format!("    quat: {}\n", floats(q).map_err(ctx)?));
+        }
+        if let Some(m) = &e.model {
+            // A hash is quoted, as a key is.
+            let model = match crate::manifest::bare_hash(m) {
+                Some(_) => Reader::Field.quoted(m).map_err(ctx)?,
+                None => Reader::Field.scalar(m).map_err(ctx)?,
+            };
+            out.push_str(&format!("    model: {model}\n"));
+        }
+    }
+    match parse(&out) {
+        Ok(back) if back == *doc => Ok(out),
+        Ok(back) => Err(format!("the written edit_world file reads back as {back:?}, not {doc:?}")),
+        Err(e) => Err(format!("the written edit_world file does not read back: {e}")),
+    }
+}
+
+/// How a file's reader takes a string field: straight into the field ([`parse`]), or through a YAML
+/// value first ([`read_entities`]), where `0x86D7CF92` is an integer and `true` a bool.
+#[derive(Clone, Copy)]
+enum Reader {
+    Field,
+    Value,
+}
+
+impl Reader {
+    /// What `text`, as a YAML mapping value, reads as.
+    fn reads(self, text: &str) -> Option<String> {
+        let doc = format!("k: {text}\n");
+        match self {
+            Reader::Field => serde_norway::from_str::<std::collections::BTreeMap<String, String>>(&doc).ok()?.remove("k"),
+            Reader::Value => match serde_norway::from_str::<std::collections::BTreeMap<String, serde_norway::Value>>(&doc).ok()?.remove("k")? {
+                serde_norway::Value::String(s) => Some(s),
+                _ => None,
+            },
+        }
+    }
+
+    /// A string as a YAML mapping value: plain when this reader reads it back as itself, else
+    /// double-quoted.
+    fn scalar(self, s: &str) -> Result<String, String> {
+        if !s.is_empty() && !s.contains(['\n', '\r']) && self.reads(s).as_deref() == Some(s) {
+            return Ok(s.to_string());
+        }
+        self.quoted(s)
+    }
+
+    /// A string double-quoted, checked to read back as itself.
+    fn quoted(self, s: &str) -> Result<String, String> {
+        let q = serde_json::to_string(s).map_err(|e| format!("{s:?}: {e}"))?;
+        if self.reads(&q).as_deref() == Some(s) {
+            Ok(q)
+        } else {
+            Err(format!("{s:?} cannot be written as a YAML string that reads back as itself"))
+        }
+    }
+}
+
+fn float(v: f32) -> Result<String, String> {
+    if v.is_finite() {
+        Ok(fmt_f(v))
+    } else {
+        Err(format!("{v} is not a finite number"))
+    }
+}
+
+fn floats(v: &[f32]) -> Result<String, String> {
+    Ok(format!("[{}]", v.iter().map(|&x| float(x)).collect::<Result<Vec<_>, _>>()?.join(", ")))
+}
+
 /// A placement as the extractor sees it — enough to write a baseline the author edits.
 pub struct Placed {
     pub key: u32,
@@ -123,36 +296,27 @@ pub struct Placed {
     pub model: Option<u32>,
 }
 
-/// Dump a layer's placements to the editable baseline. `model_name` reverses a model hash to a name
-/// so the file reads in vocabulary; the entity `key` is always emitted as a bare hash (it is the
-/// stable address), with the entity name as a trailing comment.
-pub fn extract(places: &[Placed], model_name: impl Fn(u32) -> Option<String>) -> String {
-    let mut out = String::from("# edit_world baseline — edit any entity's pos / quat / model, drop the rest.\nedits:\n");
-    for p in places {
-        out.push_str(&format!("  - entity: \"0x{:08X}\"", p.key));
-        if let Some(n) = &p.name {
-            out.push_str(&format!("   # {n}"));
-        }
-        out.push('\n');
-        out.push_str(&format!(
-            "    pos: [{}, {}, {}]\n",
-            fmt_f(p.pos[0]),
-            fmt_f(p.pos[1]),
-            fmt_f(p.pos[2])
-        ));
-        out.push_str(&format!(
-            "    quat: [{}, {}, {}, {}]\n",
-            fmt_f(p.quat[0]),
-            fmt_f(p.quat[1]),
-            fmt_f(p.quat[2]),
-            fmt_f(p.quat[3])
-        ));
-        if let Some(m) = p.model {
-            let mv = model_name(m).unwrap_or_else(|| format!("0x{m:08X}"));
-            out.push_str(&format!("    model: {mv}\n"));
-        }
-    }
-    out
+/// Dump a layer's placements to the editable baseline ([`write_world`]). `model_name` reverses a
+/// model hash to a name so the file reads in vocabulary, and a model it does not reverse is its
+/// quoted hash; the entity `key` is always emitted as a quoted hash (it is the stable address), with
+/// the entity name as a trailing comment.
+pub fn extract(places: &[Placed], model_name: impl Fn(u32) -> Option<String>) -> Result<String, String> {
+    let doc = WorldDoc {
+        edits: places
+            .iter()
+            .map(|p| EntityEdit {
+                entity: format!("0x{:08X}", p.key),
+                pos: Some(p.pos),
+                quat: Some(p.quat),
+                model: p.model.map(|m| model_name(m).unwrap_or_else(|| format!("0x{m:08X}"))),
+            })
+            .collect(),
+    };
+    let names: std::collections::HashMap<u32, &str> =
+        places.iter().filter_map(|p| p.name.as_deref().map(|n| (p.key, n))).collect();
+    write_world(&doc, |entity| {
+        crate::manifest::bare_hash(entity).and_then(|k| names.get(&k)).map(|n| n.to_string())
+    })
 }
 
 /// Format an f32 without a trailing `.0`-less integer surprise, keeping YAML happy and diffs small.
@@ -183,17 +347,17 @@ mod tests {
     /// with no name is named by its key.
     #[test]
     fn an_entity_file_is_one_record_or_a_list() {
-        let one = parse_entities("key: 0x0F00A001\nmodel: al_prop_barrel_red\npos: [1, 2, 3]\n").unwrap();
+        let one = parse_entities("key: \"0x0F00A001\"\nmodel: global_barrela\npos: [1, 2, 3]\n").unwrap();
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].key, 0x0F00_A001);
-        assert_eq!(one[0].model_hash, crate::manifest::asset_hash("al_prop_barrel_red"));
+        assert_eq!(one[0].model_hash, crate::manifest::asset_hash("global_barrela"));
         assert_eq!(one[0].pos, [1.0, 2.0, 3.0]);
         assert_eq!(one[0].quat, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(one[0].name, "modent_0f00a001");
 
         let list = parse_entities(
-            "- { key: 1, model: a, pos: [0, 0, 0], yaw: 180, name: first }\n\
-             - { key: 2, model: b, pos: [0, 0, 0], quat: [0, 0, 1, 0] }\n",
+            "- { key: \"0x1\", model: a, pos: [0, 0, 0], yaw: 180, name: first }\n\
+             - { key: \"0x2\", model: b, pos: [0, 0, 0], quat: [0, 0, 1, 0] }\n",
         )
         .unwrap();
         assert_eq!(list.len(), 2);
@@ -206,9 +370,9 @@ mod tests {
     /// record and in a list — `position` / `orientation` are not fields.
     #[test]
     fn an_unknown_entity_field_is_refused_by_name() {
-        let e = parse_entities("key: 1\nmodel: a\npos: [0, 0, 0]\nposition: [0, 0, 0]\n").unwrap_err();
+        let e = parse_entities("key: \"0x1\"\nmodel: a\npos: [0, 0, 0]\nposition: [0, 0, 0]\n").unwrap_err();
         assert!(e.contains("unknown field `position`"), "{e}");
-        let e = parse_entities("- { key: 1, model: a, pos: [0, 0, 0] }\n- { key: 2, model: a, pos: [0, 0, 0], orientation: 9 }\n")
+        let e = parse_entities("- { key: \"0x1\", model: a, pos: [0, 0, 0] }\n- { key: \"0x2\", model: a, pos: [0, 0, 0], orientation: 9 }\n")
             .unwrap_err();
         assert!(e.starts_with("entity 1:") && e.contains("unknown field `orientation`"), "{e}");
     }
@@ -216,8 +380,23 @@ mod tests {
     /// `quat` and `yaw` together are refused rather than one silently winning.
     #[test]
     fn quat_and_yaw_together_are_refused() {
-        let e = parse_entities("key: 7\nmodel: a\npos: [0, 0, 0]\nquat: [0, 0, 0, 1]\nyaw: 90\n").unwrap_err();
+        let e = parse_entities("key: \"0x7\"\nmodel: a\npos: [0, 0, 0]\nquat: [0, 0, 0, 1]\nyaw: 90\n").unwrap_err();
         assert!(e.contains("both `quat` and `yaw`") && e.contains("0x00000007"), "{e}");
+    }
+
+    /// A key is quoted hex: a number, hex or decimal, is refused with the quoted spelling of its
+    /// value, and a string that is not hex is refused.
+    #[test]
+    fn a_key_is_quoted_hex() {
+        for (text, spelled) in [("0x0F00A001", "\"0x0F00A001\""), ("251699201", "\"0x0F00A001\"")] {
+            let e = parse_entities(&format!("key: {text}\nmodel: a\npos: [0, 0, 0]\n")).unwrap_err();
+            assert!(e.contains("is a number") && e.contains(spelled), "{text}: {e}");
+        }
+        let e = parse_entities("key: 0x1F00000000\nmodel: a\npos: [0, 0, 0]\n").unwrap_err();
+        assert!(e.contains("not a 32-bit key"), "{e}");
+        let e = parse_entities("key: \"crate\"\nmodel: a\npos: [0, 0, 0]\n").unwrap_err();
+        assert!(e.contains("\"crate\" is not \"0x\""), "{e}");
+        assert_eq!(parse_entities("key: \"0x1f\"\nmodel: a\npos: [0, 0, 0]\n").unwrap()[0].key, 0x1F);
     }
 
     /// A file that is not YAML, an empty list, and a scalar are refused.
@@ -226,7 +405,7 @@ mod tests {
         assert!(parse_entities("key: [\n").unwrap_err().contains("not valid YAML"));
         assert!(parse_entities("[]\n").unwrap_err().contains("no entities"));
         assert!(parse_entities("42\n").unwrap_err().contains("one entity record"));
-        assert!(parse_entities("key: 1\nmodel: a\n").unwrap_err().contains("missing field `pos`"));
+        assert!(parse_entities("key: \"0x1\"\nmodel: a\n").unwrap_err().contains("missing field `pos`"));
     }
 
     #[test]
@@ -235,11 +414,65 @@ mod tests {
             Placed { key: 0x000C_740D, name: Some("recruitjet 0x000c740d".into()), pos: [10.0, -3.5, 7.0], quat: [0.0, 0.0, 0.0, 1.0], model: Some(0x86D7_CF92) },
             Placed { key: 0x1111_2222, name: None, pos: [0.0, 0.0, 0.0], quat: [0.0, 0.0, 0.0, 1.0], model: None },
         ];
-        let yaml = extract(&places, |h| (h == 0x86D7_CF92).then(|| "recruitjet".to_string()));
+        let yaml = extract(&places, |h| (h == 0x86D7_CF92).then(|| "recruitjet".to_string())).unwrap();
         assert!(yaml.contains("0x000C740D") && yaml.contains("recruitjet"), "{yaml}");
         let d = parse(&yaml).unwrap();
         assert_eq!(d.edits.len(), 2);
         assert_eq!(d.edits[0].pos, Some([10.0, -3.5, 7.0]));
         assert_eq!(d.edits[0].model.as_deref(), Some("recruitjet"));
+    }
+
+    /// The extract's form: a key quoted, and a model the names do not reverse written as its quoted
+    /// hash, which reads back as the text `0x…` the lowering hashes.
+    #[test]
+    fn an_unnamed_model_extracts_as_its_quoted_hash() {
+        let places = vec![Placed { key: 1, name: None, pos: [0.0; 3], quat: [0.0, 0.0, 0.0, 1.0], model: Some(0x86D7_CF92) }];
+        let yaml = extract(&places, |_| None).unwrap();
+        assert_eq!(yaml, format!("{WORLD_HEADER}\nedits:\n  - entity: \"0x00000001\"\n    pos: [0.0, 0.0, 0.0]\n    quat: [0.0, 0.0, 0.0, 1.0]\n    model: \"0x86D7CF92\"\n"));
+        assert_eq!(parse(&yaml).unwrap().edits[0].model.as_deref(), Some("0x86D7CF92"));
+    }
+
+    /// The extract is what `write_world` writes: its own text, read and written again, is the same
+    /// bytes, and a sparse edit writes only its fields.
+    #[test]
+    fn an_edit_world_file_writes_back_as_it_was() {
+        let places = vec![
+            Placed { key: 0x000C_740D, name: Some("recruitjet 0x000c740d".into()), pos: [10.0, -3.5, 7.25], quat: [0.0, 0.70710677, 0.0, 0.70710677], model: Some(0x86D7_CF92) },
+            Placed { key: 2, name: None, pos: [0.0; 3], quat: [0.0, 0.0, 0.0, 1.0], model: None },
+        ];
+        let names: std::collections::HashMap<String, String> =
+            [("0x000C740D".to_string(), "recruitjet 0x000c740d".to_string())].into();
+        let yaml = extract(&places, |h| (h == 0x86D7_CF92).then(|| "recruitjet".to_string())).unwrap();
+        assert_eq!(write_world(&parse(&yaml).unwrap(), |e| names.get(e).cloned()).unwrap(), yaml);
+
+        let sparse = WorldDoc {
+            edits: vec![EntityEdit { entity: "guardpost".into(), pos: Some([1.0, 2.0, 3.0]), quat: None, model: None }],
+        };
+        let text = write_world(&sparse, |_| None).unwrap();
+        assert_eq!(text, format!("{WORLD_HEADER}\nedits:\n  - entity: guardpost\n    pos: [1.0, 2.0, 3.0]\n"));
+        assert_eq!(write_world(&WorldDoc::default(), |_| None).unwrap(), format!("{WORLD_HEADER}\nedits: []\n"));
+        assert!(write_world(&sparse, |_| Some("a\nb".into())).unwrap_err().contains("line break"));
+    }
+
+    /// Both forms write back as themselves; a name or model YAML would read as something else is
+    /// quoted; what cannot be written is refused.
+    #[test]
+    fn an_entity_file_writes_back_as_it_was() {
+        let one = "key: \"0x0F00A001\"\nmodel: global_barrela\npos: [1.0, 2.0, 3.5]\nyaw: 90.0\nname: first\n";
+        assert_eq!(write_entities(&read_entities(one).unwrap()).unwrap(), one);
+        // qm reads an entity file through a YAML value, so a hash model is quoted to stay a string.
+        let list = "- key: \"0x00000001\"\n  model: a\n  pos: [0.0, 0.0, 0.0]\n  quat: [0.0, 0.0, 1.0, 0.0]\n- key: \"0x00000002\"\n  model: \"0x86D7CF92\"\n  pos: [-1.5, 0.0, 2.0]\n  name: \"crate: east #2\"\n";
+        let bare = read_entities("key: \"0x1\"\nmodel: 0x86D7CF92\npos: [0, 0, 0]\n").unwrap_err();
+        assert!(bare.contains("invalid type: integer"), "{bare}");
+        let f = read_entities(list).unwrap();
+        assert!(!f.single && f.records[1].model == "0x86D7CF92" && f.records[1].name.as_deref() == Some("crate: east #2"));
+        assert_eq!(write_entities(&f).unwrap(), list);
+
+        let mut bad = read_entities(one).unwrap();
+        bad.records[0].pos[1] = f32::NAN;
+        assert!(write_entities(&bad).unwrap_err().contains("not a finite number"));
+        bad.records[0].pos[1] = 0.0;
+        bad.records.push(bad.records[0].clone());
+        assert!(write_entities(&bad).unwrap_err().contains("one-record form"));
     }
 }

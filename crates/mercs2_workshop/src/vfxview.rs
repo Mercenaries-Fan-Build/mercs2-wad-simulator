@@ -9,7 +9,7 @@ use crate::gui::theme;
 use glam::Vec3;
 use mercs2_engine::fx_sim::{EffectSim, Starter};
 use mercs2_engine::particles::EmitterId;
-use mercs2_engine::scene::Scene;
+use mercs2_engine::scene::{Scene, WorldScope};
 use mercs2_formats::fxdict::{attribute_name, Atrb, AtrbValue, EffectContainer, ForceKind, FxRect};
 use mercs2_formats::schema::FieldValue;
 use mercs2_formats::worldentity::{Value, WorldEntity};
@@ -133,6 +133,8 @@ pub struct VfxView {
     /// The template whose [`Starter`] it runs under; `None` runs it with none.
     pub chosen: Option<usize>,
     pub id: EmitterId,
+    /// The world it runs in.
+    pub scope: WorldScope,
     pub paused: bool,
     pub speed: f32,
     pub travel: f32,
@@ -146,14 +148,22 @@ pub struct VfxView {
 }
 
 impl VfxView {
-    /// Start `effect` at the origin.
-    pub fn open(hash: u32, label: String, effect: EffectContainer, started_by: Vec<StartedBy>, rects: &HashMap<u32, FxRect>, scene: &mut Scene) -> Result<VfxView, String> {
+    /// Start `effect` at the origin of world `scope`, under its first starter.
+    pub fn open(
+        scope: WorldScope,
+        hash: u32,
+        label: String,
+        effect: EffectContainer,
+        started_by: Vec<StartedBy>,
+        rects: &HashMap<u32, FxRect>,
+        scene: &mut Scene,
+    ) -> Result<VfxView, String> {
         let chosen = (!started_by.is_empty()).then_some(0);
         let starter = chosen.map_or(Starter::default(), |i| started_by[i].starter);
         let sim = EffectSim::new(&effect, rects, starter, Vec3::ZERO, glam::Quat::IDENTITY, 1)?;
         let m = measure(&sim);
-        let id = scene.fx_start_effect(&effect, starter, [0.0; 3], true)?;
-        Ok(VfxView { hash, label, effect, started_by, chosen, id, paused: false, speed: 1.0, travel: 0.0, along: 0.0, heading: 1.0, measure: m, time: 0.0, live: 0 })
+        let id = scene.fx_start_effect(scope, &effect, starter, [0.0; 3], true)?;
+        Ok(VfxView { hash, label, effect, started_by, chosen, id, scope, paused: false, speed: 1.0, travel: 0.0, along: 0.0, heading: 1.0, measure: m, time: 0.0, live: 0 })
     }
 
     /// The camera that frames it: target and distance.
@@ -204,7 +214,7 @@ impl VfxView {
                 scene.fx_remove_effect(self.id);
                 let sim = EffectSim::new(&self.effect, rects, starter, Vec3::ZERO, glam::Quat::IDENTITY, 1)?;
                 self.measure = measure(&sim);
-                self.id = scene.fx_start_effect(&self.effect, starter, [0.0; 3], true)?;
+                self.id = scene.fx_start_effect(self.scope, &self.effect, starter, [0.0; 3], true)?;
             }
         }
         Ok(())
@@ -275,6 +285,13 @@ fn frame_thumbs(ui: &mut egui::Ui, e: &mercs2_formats::fxdict::Emitter, rects: &
     });
 }
 
+/// The transport's scrub over `0..=span` seconds. It shows two decimals without rounding the value: a
+/// slider that rounds would report the clock's own time, unrounded, as a change on every frame, and
+/// the change seeks, which pauses.
+pub fn scrub_slider(t: &mut f32, span: f32) -> egui::Slider<'_> {
+    egui::Slider::new(t, 0.0..=span).suffix(" s").custom_formatter(|v, _| format!("{v:.2}"))
+}
+
 /// The effect's inspector.
 pub fn inspector(ui: &mut egui::Ui, view: &VfxView, rects: &HashMap<u32, FxRect>, atlas: Option<&egui::TextureHandle>) -> Vec<VfxAct> {
     let mut acts = Vec::new();
@@ -294,8 +311,7 @@ pub fn inspector(ui: &mut egui::Ui, view: &VfxView, rects: &HashMap<u32, FxRect>
         });
         let width = (ui.available_width() - SLIDER_VALUE_WIDTH).max(0.0);
         let mut t = view.time.min(view.measure.span);
-        let scrub = egui::Slider::new(&mut t, 0.0..=view.measure.span).suffix(" s").fixed_decimals(2);
-        if theme::scrub(ui, width, scrub).changed() {
+        if theme::scrub(ui, width, scrub_slider(&mut t, view.measure.span)).changed() {
             acts.push(VfxAct::Seek(t));
         }
         let mut speed = view.speed;
@@ -421,6 +437,34 @@ mod tests {
         let m = measure(&sim(&effect(50.0, 1.0, 1.0)));
         assert_eq!(m.span.round(), MEASURE_SECONDS);
         assert!(m.centre.y > 0.5 && m.radius > 1.0, "{m:?}");
+    }
+
+    /// The scrub, drawn at a clock time between its shown decimals, reports no change: one that did
+    /// would seek, and pause, every frame the effect runs.
+    #[test]
+    fn the_scrub_leaves_a_running_clock_alone() {
+        let ctx = egui::Context::default();
+        for t0 in [0.1316f32, 2.71836, 0.005] {
+            let mut t = t0;
+            let mut changed = false;
+            for _ in 0..2 {
+                ctx.run_ui(egui::RawInput::default(), |ui| {
+                    changed |= ui.add(scrub_slider(&mut t, 10.0)).changed();
+                })
+                .textures_delta
+                .clear();
+            }
+            assert!(!changed && t == t0, "{t0} became {t}");
+            // The slider the transport had: it rounds, and reports the clock as a change.
+            let mut r = t0;
+            let mut rounded = false;
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                rounded |= ui.add(egui::Slider::new(&mut r, 0.0..=10.0).fixed_decimals(2)).changed();
+            })
+            .textures_delta
+            .clear();
+            assert!(rounded, "{t0}: a rounding slider reports no change, so this test no longer shows the cause");
+        }
     }
 
     /// An effect that emits nothing still frames, and ends on the idle rule.

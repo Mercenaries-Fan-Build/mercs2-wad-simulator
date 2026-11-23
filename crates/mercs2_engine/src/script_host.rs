@@ -3238,7 +3238,7 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("{e}"));
             let statics = data.static_block_layers().to_vec();
-            let sw = Rc::new(RefCell::new(data.into_streaming_world(host.borrow().guids()).1));
+            let sw = Rc::new(RefCell::new(data.into_streaming_world(host.borrow().guids(), crate::scene::WorldScope::new()).1));
             host.borrow_mut().attach_stream(sw.clone());
             (sw, statics)
         }

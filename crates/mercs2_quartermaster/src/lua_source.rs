@@ -3,7 +3,8 @@
 //! Every token keeps its leading and trailing trivia (whitespace and comments), so printing the
 //! AST reproduces the source byte for byte. That is what lets the Blueprint write an edited
 //! function back while every byte of the script it did not touch stays exactly as it was read.
-//! The corpus gate in this module's tests holds the whole reference corpus to that.
+//! The Workshop's corpus gate (`blueprint.rs`, `every_corpus_script_round_trips_byte_identical`)
+//! holds the whole reference corpus to that.
 //!
 //! The grammar is Lua 5.2's, a superset of 5.1's syntax: the decompiled DLC scripts carry the
 //! `goto`/`::label::` unluac writes for control flow it cannot structure from debug-stripped
@@ -216,73 +217,6 @@ fn def(name: String, local: bool, first: &TokenReference, body: &FunctionBody) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
-
-    /// Every `.lua` under `dir`, sorted, so a failure names the same file run to run.
-    fn lua_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let entries = std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
-        for e in entries {
-            let p = e.unwrap_or_else(|e| panic!("{}: {e}", dir.display())).path();
-            if p.is_dir() {
-                lua_files(&p, out);
-            } else if p.extension().and_then(|x| x.to_str()) == Some("lua") {
-                out.push(p);
-            }
-        }
-        out.sort();
-    }
-
-    /// The gate: every script in the reference corpus parses and prints back byte-identical. The
-    /// bundle is required — a run without one fails, it does not pass on nothing — and the counts
-    /// pin the corpus to the release CI downloads, so a stale or shrunken bundle cannot pass either.
-    #[test]
-    fn every_corpus_script_round_trips_byte_identical() {
-        let home = crate::index::data_home().unwrap_or_else(|e| {
-            panic!("the round-trip gate runs over the reference bundle's lua/ and lua_dlc/ corpus: {e}")
-        });
-        let mut failures = Vec::new();
-        for (sub, expected) in crate::index::PINNED_CORPUS {
-            let mut files = Vec::new();
-            lua_files(&home.join(sub), &mut files);
-            assert_eq!(
-                files.len(),
-                expected,
-                "{sub}/ under {} holds {} scripts; the gates are pinned to the bundle CI downloads",
-                home.display(),
-                files.len()
-            );
-            for path in files {
-                let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                let src = match String::from_utf8(bytes) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        failures.push(format!("{}: not UTF-8: {e}", path.display()));
-                        continue;
-                    }
-                };
-                match Script::parse(&src) {
-                    Err(e) => failures.push(format!("{}: {e}", path.display())),
-                    Ok(script) => {
-                        let printed = script.ast().to_string();
-                        if printed != src {
-                            let at = printed
-                                .bytes()
-                                .zip(src.bytes())
-                                .position(|(a, b)| a != b)
-                                .unwrap_or(printed.len().min(src.len()));
-                            failures.push(format!(
-                                "{}: printed {} bytes from {}, first difference at byte {at}",
-                                path.display(),
-                                printed.len(),
-                                src.len()
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        assert!(failures.is_empty(), "{} scripts failed:\n{}", failures.len(), failures.join("\n"));
-    }
 
     #[test]
     fn a_parse_error_names_its_line_and_column() {

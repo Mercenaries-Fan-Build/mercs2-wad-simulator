@@ -793,6 +793,28 @@ fn session_sounds<'a>(
     Ok(out)
 }
 
+/// The hooks `session`'s loader loads its sounds at and unloads them at: gameplay's `world.begin` and
+/// `world.sound_exit` ([`qm_modloader_source`]), the front end's `shell.open` and `shell.sound_exit`
+/// ([`qm_shell_modloader_source`]).
+fn sound_hooks(session: crate::manifest::LoadSession) -> (&'static str, &'static str) {
+    match session {
+        crate::manifest::LoadSession::Gameplay => ("world.begin", "world.sound_exit"),
+        crate::manifest::LoadSession::FrontEnd => ("shell.open", "shell.sound_exit"),
+    }
+}
+
+/// The sound subscriptions `session`'s loader writes for `regs`: the session's banks in load `order`,
+/// then by bank name ([`session_sounds`]), at the session's hooks ([`sound_hooks`]). Both loaders write
+/// their sound lines through here.
+pub fn session_sound_subscriptions(
+    regs: &[SoundBankRegistration],
+    session: crate::manifest::LoadSession,
+    order: &[String],
+) -> Result<String, LinkError> {
+    let (load, unload) = sound_hooks(session);
+    Ok(sound_subscriptions(load, unload, &session_sounds(regs, session, order)?))
+}
+
 /// The hook subscriptions that load and unload `regs`' banks, at `load` and `unload`: the ONE
 /// generator both loaders use. Each bank's two handlers are subscribed under its Shipment's name, so a
 /// failure names the Shipment.
@@ -931,8 +953,7 @@ pub fn qm_modloader_source(
         )
     };
 
-    let sounds = session_sounds(sounds, crate::manifest::LoadSession::Gameplay, order)?;
-    if !sounds.is_empty() {
+    if !session_sounds(sounds, crate::manifest::LoadSession::Gameplay, order)?.is_empty() {
         imports.push_str("import(\"MrxSoundBanks\")\n");
     }
 
@@ -1034,7 +1055,7 @@ pub fn qm_modloader_source(
         subs.push_str(&once(&format!("{} support {}", r.shipment, r.id), &r.shipment, &body));
     }
 
-    subs.push_str(&sound_subscriptions("world.begin", "world.sound_exit", &sounds));
+    subs.push_str(&session_sound_subscriptions(sounds, crate::manifest::LoadSession::Gameplay, order)?);
 
     Ok(format!(
         "-- {name} — Quartermaster's expandable mod load space (generated; do not hand-edit).\n\
@@ -1059,7 +1080,6 @@ pub fn qm_modloader_source(
 /// `shell.sound_exit`, after retail's `ExitShellState` unloads them ([`sound_subscriptions`]). A
 /// contributor missing from `order` is [`LinkError::NotInOrder`].
 pub fn qm_shell_modloader_source(sounds: &[SoundBankRegistration], order: &[String]) -> Result<String, LinkError> {
-    let sounds = session_sounds(sounds, crate::manifest::LoadSession::FrontEnd, order)?;
     Ok(format!(
         "-- {name} — Quartermaster's front-end sound loader (generated; do not hand-edit).\n\
          --\n\
@@ -1070,7 +1090,7 @@ pub fn qm_shell_modloader_source(sounds: &[SoundBankRegistration], order: &[Stri
          QM.sounds = QM.sounds or {{}}\n\
          {subs}",
         name = QM_SHELL_MODLOADER_NAME,
-        subs = sound_subscriptions("shell.open", "shell.sound_exit", &sounds),
+        subs = session_sound_subscriptions(sounds, crate::manifest::LoadSession::FrontEnd, order)?,
     ))
 }
 

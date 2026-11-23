@@ -39,6 +39,9 @@ pub struct Settings {
     pub hero: Option<Hero>,
     /// The level Inspect lists, by name; absent is the base game's.
     pub level: Option<String>,
+    /// The Depot workspace: the one folder holding every Depot item, Draft and Ready
+    /// (`crate::depot`). Absent until the modder chooses one; nothing is discovered.
+    pub depot_dir: Option<PathBuf>,
 }
 
 /// A model chosen as the hero, by its catalog row: the model's hash and the row's label (a
@@ -149,4 +152,9 @@ pub fn pick_wad() -> Option<PathBuf> {
 /// Native "where is workshop_data?" picker. `None` if the user cancelled.
 pub fn pick_data_dir() -> Option<PathBuf> {
     rfd::FileDialog::new().set_title("Select the workshop_data folder").pick_folder()
+}
+
+/// Native "where do my Depot items live?" picker. `None` if the user cancelled.
+pub fn pick_depot_dir() -> Option<PathBuf> {
+    rfd::FileDialog::new().set_title("Select the Depot workspace folder").pick_folder()
 }

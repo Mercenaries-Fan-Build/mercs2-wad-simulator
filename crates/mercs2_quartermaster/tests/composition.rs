@@ -722,8 +722,8 @@ fn light_classes_sharing_a_stem_claim_it_once() {
 /// cannot compose with it: the stricter class wins.
 #[test]
 fn edit_world_and_add_placement_on_one_layer_conflict() {
-    let a = one("mod-a", "  - kind: edit_world\n    layer: layers_static\n    edits: src/w.yaml\n");
-    let b = one("mod-b", "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n");
+    let a = one("mod-a", "  - kind: edit_world\n    layer: vz_state_pmccon004\n    edits: src/w.yaml\n");
+    let b = one("mod-b", "  - kind: add_placement\n    layer: vz_state_pmccon004\n    entity: src/e.yaml\n");
     exclusive_conflict(&a, &b);
 }
 
@@ -991,7 +991,7 @@ fn a_bank_replaced_twice_conflicts() {
 
 fn tiny(layer: &str, row: u32, col: u32, key: u32) -> String {
     format!(
-        "  - kind: add_tiny_geometry\n    layer: {layer}\n    cell: {{ row: {row}, col: {col} }}\n    key: {key}\n    \
+        "  - kind: add_tiny_geometry\n    layer: {layer}\n    cell: {{ row: {row}, col: {col} }}\n    key: \"0x{key:08X}\"\n    \
          objects: [\"0x00097FF3\"]\n    model: src/t.glb\n"
     )
 }

@@ -80,6 +80,14 @@ enum Command {
         /// kinds read the stores only from here; required when any is present.
         #[arg(long, value_name = "DIR")]
         original_data: Option<PathBuf>,
+        /// The decompiled Lua corpus root: `set_spawn_lists` rows are checked against the shipped
+        /// scripts. Only meaningful with --with-game; required there when a row is present.
+        #[arg(long, value_name = "DIR")]
+        corpus: Option<PathBuf>,
+        /// The reference bundle whose `lua/` subtree is the corpus. Used only when --corpus is
+        /// absent. Env: MERCS2_WORKSHOP_DATA.
+        #[arg(long, value_name = "DIR")]
+        workshop_data: Option<PathBuf>,
     },
     /// Check version ranges with the same semver grammar qm applies to manifest ranges (M0172).
     /// Hermetic: no Shipment, no game, no network.
@@ -286,6 +294,8 @@ fn main() -> ExitCode {
             names,
             report,
             original_data,
+            corpus,
+            workshop_data,
         } => cmd_lint(
             &shipment,
             with_game,
@@ -293,6 +303,7 @@ fn main() -> ExitCode {
             names.as_deref(),
             report.as_deref(),
             original_data.as_deref(),
+            (corpus.as_deref(), workshop_data.as_deref()),
         ),
         Command::CheckRange { report, ranges } => cmd_check_range(&report, &ranges),
         Command::ManifestInfo { manifest } => cmd_manifest_info(&manifest),
@@ -496,6 +507,7 @@ fn cmd_lint(
     names_path: Option<&Path>,
     report_file: Option<&Path>,
     original_data: Option<&Path>,
+    (corpus, workshop_data): (Option<&Path>, Option<&Path>),
 ) -> ExitCode {
     // The stale report goes first, so every exit-2 path below leaves no report behind.
     if let Some(file) = report_file {
@@ -525,6 +537,25 @@ fn cmd_lint(
             }
         }
         found.extend(lint::placement_game_checks(&shipment.manifest, &shipment.root, &mut stack));
+        let sets_spawn_lists = shipment.manifest.contributions.iter().any(
+            |c| matches!(c, mercs2_quartermaster::Contribution::SetSpawnLists { lists, .. } if !lists.is_empty()),
+        );
+        if sets_spawn_lists {
+            match resolve_corpus(corpus, workshop_data) {
+                Ok(Some(c)) => found.extend(lint::spawn_list_source_checks(&shipment.manifest, &c)),
+                Ok(None) => {
+                    eprintln!(
+                        "error: set_spawn_lists rows are checked against the shipped scripts: pass \
+                         --corpus <dir> or --workshop-data <dir> (env MERCS2_WORKSHOP_DATA)"
+                    );
+                    return ExitCode::from(EXIT_UNUSABLE);
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(EXIT_UNUSABLE);
+                }
+            }
+        }
         if mercs2_quartermaster::shader::has_shader_kinds(&shipment.manifest) {
             let Some(original) = original_data else {
                 eprintln!(
@@ -815,14 +846,18 @@ fn cmd_extract_states(target: &str, game_dir: Option<&Path>, names_path: Option<
         Err(code) => return code,
     };
     let hash = mercs2_quartermaster::manifest::asset_hash(target);
-    let Some(inputs) = stack.model_container_for_edit(hash) else {
-        eprintln!(
-            "error: {target:?} (0x{hash:08X}) is not a model in the game stack (or its block has no \
-             primary container)"
-        );
-        return ExitCode::from(EXIT_UNUSABLE);
+    let chain = match stack.model_chain(hash) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            eprintln!("error: {target:?} (0x{hash:08X}) is not a model in the game stack");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+        Err(e) => {
+            eprintln!("error: {target:?}: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
     };
-    let Some(sm) = mercs2_formats::orchestrator::parse_state_machine(&inputs.container) else {
+    let Some(sm) = mercs2_formats::orchestrator::parse_state_machine(&chain.rungs[0].container) else {
         eprintln!("error: {target:?} is a model but carries no destruction state machine to extract");
         return ExitCode::from(EXIT_UNUSABLE);
     };
@@ -869,8 +904,16 @@ fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&P
         .collect();
     let names = resolve_names(names_path);
     let model_name = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
-    print!("{}", mercs2_quartermaster::world::extract(&dumped, model_name));
-    ExitCode::SUCCESS
+    match mercs2_quartermaster::world::extract(&dumped, model_name) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {layer:?}: {e}");
+            ExitCode::from(EXIT_UNUSABLE)
+        }
+    }
 }
 
 fn cmd_extract_tiny(model: &str, out: &Path, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
@@ -889,10 +932,12 @@ fn cmd_extract_tiny(model: &str, out: &Path, game_dir: Option<&Path>, names_path
         Err(code) => return code,
     };
     let hash = mercs2_quartermaster::manifest::asset_hash(model);
-    let Some(inputs) = stack.model_container_for_edit(hash) else {
-        return fail(format!("{model:?} (0x{hash:08X}) is not a model in the game stack"));
+    let chain = match stack.model_chain(hash) {
+        Ok(Some(c)) => c,
+        Ok(None) => return fail(format!("{model:?} (0x{hash:08X}) is not a model in the game stack")),
+        Err(e) => return fail(format!("{model:?}: {e}")),
     };
-    let decoded = match mercs2_formats::tiny_model::TinyModel::decode(&inputs.container) {
+    let decoded = match mercs2_formats::tiny_model::TinyModel::decode(&chain.rungs[0].container) {
         Ok(m) => m,
         Err(e) => return fail(format!("{model:?} is not a TINY container: {e}")),
     };
@@ -923,8 +968,16 @@ fn cmd_extract_tiny(model: &str, out: &Path, game_dir: Option<&Path>, names_path
     };
     let rel = format!("src/{model}.glb");
     let path = out.join(&rel);
-    if let Err(e) = std::fs::create_dir_all(out.join("src")).and_then(|_| std::fs::write(&path, &d.glb)) {
-        return fail(format!("{}: {e}", path.display()));
+    // A file already there is the author's: it is refused, never written over.
+    let written = std::fs::create_dir_all(out.join("src"))
+        .and_then(|_| std::fs::OpenOptions::new().write(true).create_new(true).open(&path))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, &d.glb));
+    match written {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return fail(format!("{} exists; it is left as it is. Move it, or give another --out", path.display()))
+        }
+        Err(e) => return fail(format!("{}: {e}", path.display())),
     }
     print!("{}", tiny::contribution_yaml(&layer, row, col, key, &d.objects, &rel));
     ExitCode::SUCCESS

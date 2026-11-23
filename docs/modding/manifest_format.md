@@ -18,8 +18,10 @@ not understand is a field it would silently drop.
 through the same model, so nothing is expressible in one and not the others. **Exactly one** — two
 manifests is an error rather than a precedence puzzle.
 
-YAML is preferred, and it is what `qm` writes, because this file is mostly prose-adjacent metadata
-that people read and review.
+YAML is preferred, and it is what `qm` writes a new manifest in, because this file is mostly
+prose-adjacent metadata that people read and review. An edit to an existing manifest (the Workshop's
+Shipment page) is written in that manifest's own format and rewrites only what the edit changed
+(`mercs2_quartermaster::lossless`), so comments, key order and layout stay.
 
 ```yaml
 format: 2
@@ -154,6 +156,7 @@ A link output's patch WAD merges last. The kinds are `Destination` in `mercs2_qu
 | `add_movie` | Data | `name`, `movie` |
 | `add_ui` | Data + Script | `name`, `movie` |
 | `patch_lua` | Script | `target`, `append` |
+| `set_spawn_lists` | Script | `target`, `lists` (each `function`, `building`, `list`; `group` optional) ([`set_spawn_lists`](#set_spawn_lists)) |
 | `add_script` | Script | `name`, `source` (`exports` optional) ([`add_script`](#add_script)) |
 | `edit_stringdb` | Data | `target`, `strings` |
 | `add_language` | Data (new base WAD `data/<name>.wad`) | `name`, `display`, `strings` (`base` optional) |
@@ -263,13 +266,18 @@ edits:
     pos: [1240.5, 12.0, -880.25]
     quat: [0, 0, 0, 1]
   - entity: crate_stack_03
-    model: al_prop_barrel_red
+    model: global_barrela
 ```
 
 The overlay is an **in-place patch**, not a regeneration: the layer block is shadowed with the base
 bytes and only the named records' transform/model words are overwritten, because the `Placement`
-parse drops the record's `+16` pad and `+36` tail and cannot round-trip a full rebuild. An edit that
-resolves to no change is a hard error — a no-op overlay would ship an identical block for nothing.
+parse drops the record's `+16` pad and `+36` tail and cannot round-trip a full rebuild. Each container
+an edit writes into gets its `CSUM` trailer recomputed (`placement::reseal`); every other byte is the
+base's. An edit that resolves to no change is a hard error — a no-op overlay would ship an identical
+block for nothing.
+
+`qm extract-world`'s text is what `world::write_world` writes, so a file it extracted reads and writes
+back byte for byte.
 Two Shipments editing one layer conflict (M0207): each overlay shadows the whole layer, so one
 Shipment's edits would be silently absent. An `add_placement` on the same layer conflicts with it
 too.
@@ -279,41 +287,59 @@ Scope and the step-0/1/2 proof are in
 
 ### `add_placement` and `add_layer`
 
-`add_placement` adds entities to a layer the game ships; `add_layer` mints a new layer, cloning the
-`Transform` / `ModelName` / `Name` scaffolding of a `template` layer:
+`add_placement` adds entities to a layer the game ships; `add_layer` mints a new layer in the block
+of a `template` layer:
 
 ```yaml
   - kind: add_placement
-    layer: layers_static            # a needle, matched like edit_world's
+    layer: vz_state_pmccon004       # one layer, by name
     entity: src/barrel.yaml
   - kind: add_layer
     name: vz_state_my_mission       # the new layer's name, hashed to its ASET key
-    template: layers_static         # the layer whose scaffolding is cloned
+    template: vz_state_pmccon040    # a needle, matched like edit_world's: the block the layer joins
     entities: src/my_mission.yaml
 ```
+
+`add_placement`'s `layer` names one layer, as `add_tiny_geometry`'s and `activate_layer`'s do; a
+block path such as `layers_static` names none and is a build error. The entities go into that layer
+itself, each with a record in its `Name`, `ModelName` and `Transform` COMPs and in its `flgs`; every
+other record keeps its bytes. A layer without one of those COMPs is given it: one with no
+`ModelName`, whose entities take their models from templates (`vz_state_pmccon004`), and one with
+no COMP at all (nine retail layers). The COMPs are built from the game's own layers, which all carry
+the same `info` and `schm` for each (`mercs2_probe layer-scaffold`).
+
+`add_layer` builds its layer on the shared rows (`CHDR`, `enum`, `flgt`) of the first layer of the
+template's block and appends it to that block as its last entry. A block that already holds a layer
+of that name is a build error.
 
 The entity file is one record, or a list of records:
 
 ```yaml
-- key: 0x0F00A001                   # the entity key, a u32
-  model: al_prop_barrel_red
+- key: "0x0F00A001"                 # the entity key, quoted hex
+  model: global_barrela
   pos: [1240.5, 12.0, -880.25]
   yaw: 90                           # degrees about Y; or quat: [x, y, z, w]
   name: my_barrel                   # optional; defaults to modent_<key, 8 hex digits>
 ```
 
-`key`, `model` and `pos` are required. A record gives `quat` or `yaw`, not both, and with neither
-it is unrotated. Any other field is refused by name. A file that does not read is a build error
-naming the file, as an `edit_world` edits file is.
+`key`, `model` and `pos` are required. `key` is quoted hex, `"0x"` and up to 8 hex digits: a
+number is refused, with the quoted spelling of its value, since an unquoted `0x0F00A001` is a YAML
+integer. A model named by its hash is quoted too (`model: "0x8FAE19F4"`). A record gives `quat` or
+`yaw`, not both, and with neither it is unrotated. Any other field is refused by name. A file that
+does not read is a build error naming the file, as an `edit_world` edits file is.
 
 Both kinds ship the whole block the layer (or the template) lives in, so each claims that layer:
 two Shipments adding to one layer, or minting from one template, conflict (M0207), and so do an
-`add_placement`, an `add_layer` and an `edit_world` naming one layer.
+`add_placement`, an `add_layer` and an `edit_world` naming one layer. Within one Shipment, every
+write to one block (its `edit_world`, `add_placement` and `add_layer` contributions and its
+`add_tiny_geometry` placements) is applied to that block in contribution order, and the block ships
+once.
 
 Retail places every entity key once: none of the 101,299 keys of `vz.wad`'s 923 layers is in two
 layers or twice in one (measured 2026-10-27 over every `type_id 9` layer entry's `Transform`,
-`ModelName` and `Name` records). An `add_placement` key the target layer's block already places, and
-a key two records of one entity file share, are **M0198**.
+`ModelName` and `Name` records). A key any layer of the game places, a key another `add_placement`,
+`add_layer` or `add_tiny_geometry` of the Shipment adds, and a key two records of one entity file
+share, are **M0198**.
 
 ### `add_tiny_geometry`
 
@@ -326,7 +352,7 @@ so a destroyed building shows its ruin from a distance too.
   - kind: add_tiny_geometry
     layer: vz_state_mar_city_pristine
     cell: { row: 28, col: 32 }
-    key: 1327103
+    key: "0x00143FFF"
     objects: ["0x00097FF3", mar_city_tower]
     model: src/tiny/tgr28_tgc32.glb
 ```
@@ -335,7 +361,7 @@ so a destroyed building shows its ruin from a distance too.
 |---|---|
 | `layer` | the layer the placement goes into, by name: its sub-block entry is `m2(layer)` |
 | `cell` | the cell, `row` from z and `col` from x, each 0 to 39: `col = floor((x + 4000) / 200)`, `row = floor((z + 4000) / 200)` |
-| `key` | the placement's entity key (GUID); no layer of the game may already use it (M0250) |
+| `key` | the placement's entity key (GUID), quoted hex as an entity file's is; no layer of the game may already use it (M0250) |
 | `objects` | the world objects the stand-in draws, each a bare `"0xGUID"` or the name of a placement in `layer` |
 | `model` | the stand-in's `.glb` / `.gltf` |
 
@@ -624,6 +650,31 @@ table, an engine callback it chains — each as a bare Lua identifier. A write t
 under it (`_G.<name>.<field>`) passes for a listed name; any other `_G` write, every `_MODULES` write,
 and an entry that is not a Lua identifier stay errors. Writes inside comments and strings are not
 writes.
+
+### `set_spawn_lists`
+
+Sets spawn-list calls of a shipped mission script to other lists.
+
+```yaml
+- kind: set_spawn_lists
+  target: gurcon002
+  lists:
+    - function: SetupDangerousObjBuildings
+      building: TallCommBuild
+      group: Rooftop          # leave out for a call that sets every group
+      list: Spawnlist (VZ Elite)
+```
+
+Each row names one call the target makes inside its top-level function `function`:
+`Ai.TweakAttachedSpawnersInGroup(building, "group", {SpawnList = "…"})`, or, with no `group`,
+`Ai.TweakAttachedSpawners(building, {SpawnList = "…"})`. qm writes the Lua: for each function, a
+wrapper that runs the shipped function and then makes each row's call again with the row's `list`.
+It is linked onto `target` as a `patch_lua` append is, so it merges with other Shipments' Lua. A
+`lists: []` writes no Lua and claims nothing.
+
+The wrapper reads the building by its name, so a row can name only a building that is a global: not
+a parameter of the function, and not a `local`, a `for` variable or a parameter of a function inside
+it. The rows are checked by [M0317](#m0317).
 
 ### `edit_stringdb`
 
@@ -2396,11 +2447,12 @@ Fix: rename the module.
 ### M0198
 
 **An entity key is already placed.** An `add_placement` or `add_layer` entity file lists one key in
-two records, or an `add_placement` key is a key the target layer's block already places in a
-`Transform`, `ModelName` or `Name` record. Retail places every key once
-([`add_placement` and `add_layer`](#add_placement-and-add_layer)).
+two records; adds a key a `Transform`, `ModelName` or `Name` record of any layer of the game
+places; or adds a key an earlier `add_placement`, `add_layer` or `add_tiny_geometry` of the
+Shipment adds (a stand-in that repeats an earlier entity file's key is reported at the stand-in).
+Retail places every key once ([`add_placement` and `add_layer`](#add_placement-and-add_layer)).
 
-Fix: a key no record of the layer's block uses, once per file.
+Fix: a key no layer of the game and no other placement of the Shipment uses, once per file.
 
 ### M0214
 
@@ -3022,5 +3074,17 @@ without the network:
 
 Fix: give each package one `id`, name it from the rows it supplies, and let `from:` replace the rows and
 streams it would write.
+
+### M0317
+
+**A `set_spawn_lists` row the wrapper cannot set** (error). `qm lint` checks the rows alone: a
+`function` that is not a function name, a `building` that is not a plain name, an empty `group` or
+`list`, two rows naming the same call. With the decompiled corpus (`qm lint --with-game` with
+`--corpus` or `--workshop-data`, `qm build`, `qm link`), each row is checked against the shipped
+scripts: `target`'s `function` makes no such call, the function holds the building as a parameter or
+local, or no `vz.wad` script sets the `list`.
+
+Fix: choose the row in the Depot's spawn table, which lists every call the target makes and the lists
+the scripts set.
 
 [template]: https://github.com/Mercenaries-Fan-Build/mercs2-shipment-template

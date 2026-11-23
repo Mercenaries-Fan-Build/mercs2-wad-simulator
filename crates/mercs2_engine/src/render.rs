@@ -590,6 +590,26 @@ pub struct ClipAnim {
     pub name_hash: u32,
 }
 
+impl ClipAnim {
+    /// A clip from the two files a Shipment ships it as — the Havok packfile and its `trnm` body —
+    /// bound to the rig whose HIER name-hashes are `hier`, under `name_hash`. Refused when the
+    /// clip does not decode, or the `trnm` does not bind exactly the clip's transform tracks.
+    pub fn from_sources(clip: &[u8], trnm: &[u8], hier: &[u32], name_hash: u32) -> Result<ClipAnim, String> {
+        use mercs2_formats::anim_container::trnm_bone_hashes;
+        use mercs2_formats::animgroup::AnimBinding;
+        let clip = mercs2_formats::anim::parse_anim(clip).map_err(|e| format!("the clip does not read: {e}"))?;
+        if !clip.decoded {
+            return Err(format!("the clip is a {:?} clip, which does not decode", clip.anim_type));
+        }
+        let bones = trnm_bone_hashes(trnm)?;
+        if bones.len() != clip.num_tracks {
+            return Err(format!("the trnm binds {} tracks; the clip has {}", bones.len(), clip.num_tracks));
+        }
+        let track_to_hier = AnimBinding { track_to_bone: Vec::new(), track_to_bone_hash: bones }.resolve_to_hier(hier);
+        Ok(ClipAnim { num_transform_tracks: clip.num_tracks, clip, track_to_hier, name_hash })
+    }
+}
+
 /// One dynamic point light, in the layout the forward shader's uniform array expects.
 ///
 /// Positions/radii are in the SAME world space as the entity `Transform`s the scene renders (native

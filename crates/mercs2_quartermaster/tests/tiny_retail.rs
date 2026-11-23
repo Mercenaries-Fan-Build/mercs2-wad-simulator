@@ -497,7 +497,7 @@ fn stand_in_gltf(dir: &Path, prims: &[(&str, u8)], texture: u32) {
 fn contribution(row: u32, col: u32, key: u32, objects: &[String]) -> String {
     let objects = objects.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(", ");
     format!(
-        "  - kind: add_tiny_geometry\n    layer: {LAYER}\n    cell: {{ row: {row}, col: {col} }}\n    key: {key}\n    \
+        "  - kind: add_tiny_geometry\n    layer: {LAYER}\n    cell: {{ row: {row}, col: {col} }}\n    key: \"0x{key:08X}\"\n    \
          objects: [{objects}]\n    model: src/t.gltf\n"
     )
 }
@@ -562,6 +562,50 @@ fn an_add_tiny_geometry_build_decodes_back() {
     assert_eq!(t.1, tiny::cell_centre(row, col));
     assert_eq!(t.2, [0.0, 0.0, 0.0, 1.0]);
     assert_eq!(l.flags.iter().find(|f| f.0 == key).map(|f| f.1), Some(FLGS_TINY_GEOMETRY_OBJECT));
+}
+
+/// A stand-in in one layer of `layers_static` and an `add_placement` into another layer of that
+/// block, in one Shipment, ship ONE copy of the block, carrying both: two copies would leave one
+/// write out (the registry keeps the first block's rows).
+#[test]
+fn a_stand_in_and_a_placement_in_one_block_ship_one_block_with_both() {
+    use mercs2_formats::types::TYPE_HASH_LAYER;
+    let (tiny_layer, other) = ("vz_pmc_tiny", "vz_merida_tiny");
+    // The qm-showcase stand-in's cell, which retail leaves empty, and two layers_static objects in it.
+    let (row, col, objs) = (15, 33, [0x000A_FFACu32, 0x0012_6427]);
+    let key = free_key();
+    let placed = (key + 1..).find(|k| !retail().world.placed.contains_key(k)).unwrap();
+    let mut game = retail_game();
+    let (base, _) = game.layer_by_name(tiny_layer).unwrap().expect("the stand-in's layer");
+    assert_eq!(game.layer_by_name(other).unwrap().expect("the placement's layer").0.path, base.path, "one block holds both layers");
+    let dir = scratch("tiny_and_placement");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    stand_in_gltf(&dir.join("src"), &[("intact", 0), ("intact", 1)], a_texture());
+    std::fs::write(dir.join("src/e.yaml"), format!("key: \"0x{placed:08X}\"\nmodel: global_barrela\npos: [0, 0, 0]\n")).unwrap();
+    let objects = format!("[\"0x{:08X}\", \"0x{:08X}\"]", objs[0], objs[1]);
+    let s = shipment(
+        &dir,
+        &format!(
+            "  - kind: add_placement\n    layer: {other}\n    entity: src/e.yaml\n  - kind: add_tiny_geometry\n    layer: {tiny_layer}\n    \
+             cell: {{ row: {row}, col: {col} }}\n    key: \"0x{key:08X}\"\n    objects: {objects}\n    model: src/t.gltf\n"
+        ),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = std::fs::read(report.wad.as_ref().expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).unwrap();
+    let copies: Vec<Vec<u8>> = contents
+        .blocks
+        .iter()
+        .filter(|b| b.path_string == base.path)
+        .map(|b| mercs2_formats::sges::decompress_sges(&b.compressed_data).unwrap())
+        .collect();
+    assert_eq!(copies.len(), 1, "one copy of {}", base.path);
+    let records = |layer: &str| {
+        let (_, c) = mercs2_formats::placement_build::find_entry(&copies[0], pandemic_hash_m2(layer), TYPE_HASH_LAYER).unwrap();
+        read_layer_records(c).unwrap()
+    };
+    assert!(records(tiny_layer).transforms.iter().any(|t| t.0 == key), "the stand-in's placement");
+    assert!(records(other).transforms.iter().any(|t| t.0 == placed), "the add_placement's entity");
 }
 
 // ── the rules that need the game ────────────────────────────────────────────────────────────────

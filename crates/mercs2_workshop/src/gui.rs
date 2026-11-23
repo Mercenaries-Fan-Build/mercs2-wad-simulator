@@ -1194,6 +1194,33 @@ pub mod theme {
         (avail * 0.5).max(60.0)
     }
 
+    /// A small button on its own row, starting at the value column where it fits there; a button
+    /// wider than the value column starts as far right as its measured width allows.
+    pub fn value_column_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+        let lw = field_label_w(ui.available_width());
+        ui.horizontal(|ui| {
+            let w = ui.painter().layout_no_wrap(text.to_string(), egui::TextStyle::Button.resolve(ui.style()), TX).size().x
+                + 2.0 * ui.spacing().button_padding.x;
+            ui.add_space((lw + 4.0).min(ui.available_width() - w).max(0.0));
+            ui.small_button(text)
+        })
+        .inner
+    }
+
+    /// The narrowest row a captionless [`vec3_field`] draws three cells showing `widest` across
+    /// without a cell overrunning: per cell the value's text in the drag-value face, the button
+    /// padding either side and `scrub_cell`'s 9 + 4 px inset; then the 12 px `vec3_field` keeps
+    /// for the gaps.
+    pub fn vec3_cells_width(ui: &egui::Ui, widest: &str) -> f32 {
+        let text = ui
+            .painter()
+            .layout_no_wrap(widest.to_string(), ui.style().drag_value_text_style.resolve(ui.style()), TX)
+            .size()
+            .x;
+        let value = (text + 2.0 * ui.spacing().button_padding.x).max(ui.spacing().interact_size.x);
+        3.0 * (value + 13.0) + 12.0
+    }
+
     /// A left-aligned caption cell of the shared width; truncates long text (full text on hover).
     pub fn field_label(ui: &mut egui::Ui, label: &str) {
         let lw = field_label_w(ui.available_width());
@@ -1553,7 +1580,22 @@ pub mod theme {
             if !label.is_empty() {
                 field_label(ui, label);
             }
-            let reserved = 62.0 + if clearable { 26.0 } else { 0.0 };
+            // The Choose… button's own width, measured: a fixed reserve narrower than the button let
+            // the row overrun the column, and each overrun widened every row drawn after it.
+            let choose_w = ui
+                .painter()
+                .layout_no_wrap("Choose\u{2026}".to_string(), egui::TextStyle::Button.resolve(ui.style()), TX)
+                .size()
+                .x
+                + 2.0 * ui.spacing().button_padding.x;
+            let choose_w = choose_w.max(62.0);
+            let clear_w = ui
+                .painter()
+                .layout_no_wrap("Clear".to_string(), egui::TextStyle::Button.resolve(ui.style()), TX)
+                .size()
+                .x
+                + 2.0 * ui.spacing().button_padding.x;
+            let reserved = choose_w + if clearable { clear_w + 4.0 } else { 0.0 };
             let w = (ui.available_width() - reserved - 8.0).max(60.0);
             let (rect, inner) = well(ui, w, 22.0, state);
 
@@ -1581,7 +1623,7 @@ pub mod theme {
                     .on_hover_text(root.join(&*value).display().to_string());
             }
 
-            if ui.add(egui::Button::new("Choose\u{2026}").min_size(egui::vec2(62.0, 22.0))).clicked() {
+            if ui.add(egui::Button::new("Choose\u{2026}").min_size(egui::vec2(choose_w, 22.0))).clicked() {
                 let mut d = rfd::FileDialog::new().set_title(format!("Choose {label}"));
                 if root.is_dir() {
                     d = d.set_directory(root);
@@ -1606,8 +1648,7 @@ pub mod theme {
             }
             if clearable
                 && ui
-                    .add(egui::Button::new("\u{2715}").min_size(egui::vec2(22.0, 22.0)))
-                    .on_hover_text("Clear")
+                    .add(egui::Button::new("Clear").min_size(egui::vec2(clear_w, 22.0)))
                     .clicked()
             {
                 cleared = true;
@@ -1669,10 +1710,13 @@ pub mod theme {
             FieldState::Bad => BAD,
         };
         let lw = field_label_w(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
+        // The text wraps inside the value column: in a wrapped row its second line would start back
+        // under the labels.
+        ui.horizontal(|ui| {
             ui.add_space(lw + 4.0);
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.label(egui::RichText::new(msg).small().color(colour));
+            ui.vertical(|ui| {
+                ui.add(egui::Label::new(egui::RichText::new(msg).small().color(colour)).wrap());
+            });
         });
     }
 
@@ -1704,6 +1748,8 @@ pub mod theme {
         Inspect,
         Mods,
         Skeleton,
+        /// The Depot: a storehouse — a pitched roof over a wall with a door.
+        Depot,
         Quartermaster,
         Settings,
         Log,
@@ -1739,6 +1785,18 @@ pub mod theme {
                 p.line_segment([c + vec2(6.0, 6.0), c + vec2(6.5, 3.5)], s);
             }
             // A crate, seen head-on with its banding — the Shipment.
+            RailIcon::Depot => {
+                // `RailLevel`'s DEPOT path: M-7 -2.5 L0 -6.5 L7 -2.5 V5.5 H-7Z M-7 -2.5 H7
+                // M-3 5.5 V1.5 H3 V5.5.
+                let pts = [vec2(-7.0, -2.5), vec2(0.0, -6.5), vec2(7.0, -2.5), vec2(7.0, 5.5), vec2(-7.0, 5.5)];
+                for k in 0..pts.len() {
+                    p.line_segment([c + pts[k], c + pts[(k + 1) % pts.len()]], s);
+                }
+                p.line_segment([c + vec2(-7.0, -2.5), c + vec2(7.0, -2.5)], s);
+                p.line_segment([c + vec2(-3.0, 5.5), c + vec2(-3.0, 1.5)], s);
+                p.line_segment([c + vec2(-3.0, 1.5), c + vec2(3.0, 1.5)], s);
+                p.line_segment([c + vec2(3.0, 1.5), c + vec2(3.0, 5.5)], s);
+            }
             RailIcon::Quartermaster => {
                 p.rect_stroke(
                     egui::Rect::from_center_size(c, vec2(15.0, 13.0)),
