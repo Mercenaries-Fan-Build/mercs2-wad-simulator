@@ -78,7 +78,7 @@ impl CameraPreset {
             yaw_offset: 0.0,
             zoom_offset: 0.0,
             blend_time: 0.4,
-            default_fov: 1.0472,      // 60°
+            default_fov: std::f32::consts::FRAC_PI_3, // 60°
             max_fov: 1.2217,          // 70°
             fov_max_speed: 30.0,
             look_height: 1.2,
