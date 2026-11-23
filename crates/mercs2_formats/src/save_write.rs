@@ -4,7 +4,7 @@
 //! Reconstructs the fixed **13,404-byte** container: a little-endian packed
 //! header, the zlib Lua payload at `0x468`, and a correct `ProfileHash` at
 //! `0x00`. Mirrors the engine save pipeline mapped in
-//! `docs/reverse_engineer/save_serialize_code_map.md`: the `SaveData` handler
+//! [`docs/reverse_engineer/save_serialize_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/save_serialize_code_map.md): the `SaveData` handler
 //! `FUN_005a4520` → hash-dispatched serializer `FUN_00874150` → zlib codec
 //! `FUN_0075b070`, sourced from the profile/economy singleton `[0x1176054]+0x470`.
 //!
