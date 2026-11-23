@@ -48,7 +48,7 @@ use full_moon::node::Node as AstNode;
 use full_moon::tokenizer::{Symbol, Token, TokenReference, TokenType};
 use full_moon::visitors::{VisitMut, VisitorMut};
 
-use crate::lua_source::{Script, MODULE_CALLS};
+use mercs2_quartermaster::lua_source::{Script, MODULE_CALLS};
 
 pub type NodeId = usize;
 
@@ -241,7 +241,7 @@ pub enum Member {
     Variable,
     /// Names given tables of literals, global paths and further such tables.
     Data,
-    /// A call of the module system ([`crate::lua_source::MODULE_CALLS`]), or a run of them.
+    /// A call of the module system ([`mercs2_quartermaster::lua_source::MODULE_CALLS`]), or a run of them.
     Import,
 }
 
@@ -3617,6 +3617,27 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The gate on the model the Blueprint edits: every script in the reference corpus parses and
+    /// prints back byte-identical. The bundle is required — a run without one fails, it does not
+    /// pass on nothing — and the counts pin the corpus to the release CI downloads.
+    #[test]
+    fn every_corpus_script_round_trips_byte_identical() {
+        let mut failures = Vec::new();
+        for (path, src) in corpus() {
+            match Script::parse(&src) {
+                Err(e) => failures.push(format!("{path}: {e}")),
+                Ok(script) => {
+                    let printed = script.ast().to_string();
+                    if printed != src {
+                        let at = printed.bytes().zip(src.bytes()).position(|(a, b)| a != b).unwrap_or(printed.len().min(src.len()));
+                        failures.push(format!("{path}: printed {} bytes from {}, first difference at byte {at}", printed.len(), src.len()));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{} scripts failed:\n{}", failures.len(), failures.join("\n"));
     }
 
     /// Every canvas, the chunk's and each function's, emits clean.
