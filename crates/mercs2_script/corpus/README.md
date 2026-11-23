@@ -21,8 +21,8 @@ consumers get the corpus with the dependency — no checkout of ours, no network
 Cost is small: the whole package is **682 KiB compressed** (Lua is text and compresses ~6:1), against
 crates.io's 10 MiB limit.
 
-Locate it in code with `mercs2_script::corpus::root()` / `::stubs()` / `::roots()`. **Do not hardcode a
-path to it.**
+Locate it in code with `mercs2_script::corpus::root()` / `::roots()` / `::dlc_root()`. **Do not
+hardcode a path to it.**
 
 ## Do not move this above `crates/`
 
@@ -40,18 +40,26 @@ Carried forward from the corpus's own README so the origin is not lost in the co
 | Blocks | `blocks\VZ\resident_P000_Q3.block` (idx 3185), `scripts_vz_P000_Q3.block` (idx 3197), `shell.wad` block 17; `vz_guilayouts/` from `blocks\VZ\guilayouts_P000_Q3.block` |
 | Decompiler | `unluac` on `lua51-mercs2` float bytecode |
 | Coverage | **370 / 382**. The 12 failures are the empty `all_*` stubs (`all_weapons`, `all_vehicles`, …) plus 2 goto-heavy scripts — no content lost |
+| Complete corpus | The research repo's later pass over every Lua chunk PC ships (commit `93719c0`, 2026-10-02, "complete-corpus Lua forensics") added `vz_missions/`, `vz_subtitles/`, `vz_hijacks/`, `english/`, `loading/` and 12 more `resident/` modules, and the PS3 DLC01 Lua in `mercs2-dlc-luacd/` |
 
 ## Layout
 
-- `mercs2-luacd/src/resident/` (228) — `Mrx*` engine/library modules + world-entity scripts
+`mercs2-luacd/src/` and `mercs2-dlc-luacd/src/` are byte-identical copies of the research repo's
+`docs/mercs2-luacd/src/` and `docs/mercs2-dlc-luacd/src/` (`diff -rq` clean).
+
+- `mercs2-luacd/src/resident/` (240) — `Mrx*` engine/library modules + world-entity scripts
 - `mercs2-luacd/src/vz/` (114) — contracts, jobs, tutorials, WIF data tables
+- `mercs2-luacd/src/vz_missions/` (222) — the per-mission scripts
+- `mercs2-luacd/src/vz_subtitles/` (36) — the `Subtitles_*` tables `MrxGuiCinematic.ShowMovie` imports,
+  and `technov`
+- `mercs2-luacd/src/vz_hijacks/` (29) — the vehicle hijack scripts
 - `mercs2-luacd/src/shell/` (28) — front-end menu / shell GUI
 - `mercs2-luacd/src/vz_guilayouts/` (4) — the HUD, binoculars, satellite and PDA layouts
-  `MrxGuiManager.CreateGui` imports; copied from the research repo's `docs/mercs2-luacd/src/vz_guilayouts/`
-  (sha256 equal)
-- `stubs/` — **ours, not the game's.** Stand-ins for shipped modules the 370/382 decompile lacks. This
-  root is searched *after* the corpus, so a module that later decompiles automatically shadows its
-  stand-in. Each file documents why it exists and what removes it.
+  `MrxGuiManager.CreateGui` imports
+- `mercs2-luacd/src/english/` (1), `mercs2-luacd/src/loading/` (1)
+- `mercs2-dlc-luacd/src/` — the console DLC levels' Lua, one folder per level: `dlc01/` (36),
+  `dlctest01/` (3). Not a module root of the retail script host ([`corpus::roots`] is the retail
+  corpus alone); read through `corpus::dlc_root()`.
 
 The category references that accompany this corpus (`01_support_economy_delivery.md` …
 `08_audio_presentation.md`) were not copied — they are documentation, not test input, and live with the
