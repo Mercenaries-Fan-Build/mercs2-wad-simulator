@@ -47,6 +47,8 @@ unicorn-engine = "2.1.5"
 # `qm_cycle_gate` links a live gate's Lua with qm's own link and WAD writer, reporting qm's import
 # findings instead of refusing on them; `template_form` prints templates as qm's template form.
 mercs2_quartermaster = { workspace = true }
+# `font-coverage` reads a font's character map (the same crate the engine draws text with).
+fontdue = "0.9"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
