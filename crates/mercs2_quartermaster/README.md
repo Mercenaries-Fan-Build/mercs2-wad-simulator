@@ -102,8 +102,17 @@ String tables work the same way. A Shipment's own build applies its `edit_string
 ships ONE edited copy of that table, so installed together the last mounted would drop the others'
 edits. `qm link` merges every Shipment's writes to one table into one
 link-owned table in load order, the later write winning: key edits by key hash, text replacements
-against the table as merged so far. The load plan's `link_block_paths` names every
+against the table as merged so far. Each copy of a table is written: `vz.wad`'s (gameplay) in the
+overlay, `shell.wad`'s (the front end: `english`, `french`, `german`, `italian`, `spanish`, `russian`)
+in the shell patch, at the same block path. The load plan's `link_block_paths` names every
 block the link re-emits, so a deploy step drops the per-Shipment copies of exactly those.
+
+Menu items work the same way. `add_menu_item` adds an item to a page of qm's menu catalogue
+(`data/menus.toml`; `shell.main`, the main menu). A Shipment's own build ships nothing for it; `qm link`
+composes every Shipment's items into one edit of the player's `SHELL` (`menu_items`), sets each label in
+the menu's stencil lettering (`label_art`, `data/lettering/`) into `shell_MAINMENU_qm_text` in each
+installed language's patch, and adds the dispatcher that runs each item's `Module.Function` to
+`qm_shell_modloader`.
 
 Effects and templates work the same way. The game ships every effect in one block,
 `blocks\VZ\effects_P000_Q3.block`, and every world template in one container, the `worldentity` in
