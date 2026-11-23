@@ -36,7 +36,7 @@ anim systems query. `mercs2_engine` re-exports it as `mercs2_engine::physics`.
 
 ## Where it comes from
 
-Provenance as recorded in the source (`docs/reverse_engineer/physics_code_map.md`):
+Provenance as recorded in the source ([`docs/reverse_engineer/physics_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/physics_code_map.md)):
 
 | Reimpl item | Retail oracle |
 | --- | --- |
