@@ -42,10 +42,10 @@ itself records:
 
 | Subsystem | Oracle |
 |---|---|
-| `render_graph` — per-viewport pass order | `FUN_00466d40`, the one shared scene-pass driver (`docs/reverse_engineer/render_core_code_map.md` §5/§11, `water_code_map.md` §2, `shadow_code_map.md` §4) |
+| `render_graph` — per-viewport pass order | `FUN_00466d40`, the one shared scene-pass driver ([`docs/reverse_engineer/render_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/render_core_code_map.md) §5/§11, `water_code_map.md` §2, `shadow_code_map.md` §4) |
 | `render_state` — the per-segment draw gate | `FUN_004722a0` (blob-shadow pass) / `FUN_00472a50` (main pass); `view_state` recomputed per frame from camera distance via `FUN_00470740` → `FUN_0047724e`. `docs/modernization/model_render_gate_spec.md` |
 | `registry` — chunk registry insert is **first-wins** | `FUN_004cc130`; the probe `FUN_008242b0` is `slot = key % size` with an 8-way unrolled linear scan (verified live) |
-| `camera` — mode-based rig + presets | `docs/reverse_engineer/camera_code_map.md`; `HumanCameraModifier` schema defaults from `FUN_0065eaf0`, `CameraCarPreset` from `FUN_0065e1d0`; on-foot offset from a live x32dbg capture; near/far from the game's own Lua (`Graphics.Camera.SetNearFar(0, 0.3, 500, 0)` in `wifpmcinterior.lua`) |
+| `camera` — mode-based rig + presets | [`docs/reverse_engineer/camera_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/camera_code_map.md); `HumanCameraModifier` schema defaults from `FUN_0065eaf0`, `CameraCarPreset` from `FUN_0065e1d0`; on-foot offset from a live x32dbg capture; near/far from the game's own Lua (`Graphics.Camera.SetNearFar(0, 0.3, 500, 0)` in `wifpmcinterior.lua`) |
 | `water` — the water-surface node | the exe's `FUN_00487540` / `FUN_00487dd0` slot |
 | `model` — cross-block LOD assembly | the `<model>_P00N_Q(3-N)` block chain; only the resident block ships `HIER`/`SEGM`/`MTRL`/`SWIT` |
 | `input` — action bindings | the retail `Mercs2.ini` (`[Actions1]`, `[Actions2]`, `[Mouse]`, `[Controller (XBOX 360 For Windows)]`) |
@@ -131,7 +131,7 @@ engine owns the window, loop and render; you supply the config, the loader, and 
 - **Placed entities arrive by layer loads.** `StreamingWorld` starts empty; the layer requests on the
   shared `GuidMap` (`Pg.LoadLayer` & co., `Sys.RequiredAsset` for `<level>_base`) instantiate each
   layer's own container — catalog, hibernation grid, SceneObject rows, names, LandingZone rows,
-  population regions, lights — per `docs/reverse_engineer/layer_load_code_map.md`. A headless
+  population regions, lights — per [`docs/reverse_engineer/layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md). A headless
   `step_headless` runs the same layers, grid and activations with no presentation (the boot tests,
   `mercs2_autoplay`).
 - **The two resolution rules run at once, in opposite directions.** Which *block* becomes resident for
