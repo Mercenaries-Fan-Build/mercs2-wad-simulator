@@ -200,6 +200,169 @@ pub fn copy(stream: &mut TagStream, line: Line, depth: u16, frame: usize, new_de
     Ok(())
 }
 
+/// The first tag of the instance at `depth` on stage in `frame`, decoded, and its index.
+fn first_place(tags: &[Tag], depth: u16, frame: usize) -> Result<(usize, PlaceTag, Vec<Track>), String> {
+    let all = tracks(tags)?;
+    let track = find(&all, depth, frame)?;
+    let i = track.tags[0];
+    let Some(Typed::Place(p)) = typed(&tags[i])? else { return Err(format!("tag #{i} does not place depth {depth}")) };
+    Ok((i, p, all))
+}
+
+/// Name the instance at `depth` on stage in `frame` `name`, on the tag that places it. Refused: a name
+/// another instance of the timeline carries.
+pub fn rename(stream: &mut TagStream, line: Line, depth: u16, frame: usize, name: &str) -> Result<(), String> {
+    let tags = timeline_mut(stream, line)?;
+    let (i, mut p, all) = first_place(tags, depth, frame)?;
+    if let Some(t) = all.iter().find(|t| t.name.as_deref() == Some(name) && t.depth != depth) {
+        return Err(format!("{name} already names the instance at depth {} from frame {}", t.depth, t.first));
+    }
+    p.name = Some(name.as_bytes().to_vec());
+    put(tags, i, &Typed::Place(p))
+}
+
+/// Show `character` in the instance at `depth` on stage in `frame`, from the tag that places it.
+pub fn recharacter(stream: &mut TagStream, line: Line, depth: u16, frame: usize, character: u16) -> Result<(), String> {
+    let tags = timeline_mut(stream, line)?;
+    let (i, mut p, _) = first_place(tags, depth, frame)?;
+    p.character = Some(character);
+    put(tags, i, &Typed::Place(p))
+}
+
+/// Every character id the movie takes: what it defines (sprites, shapes, morphs, texts, fonts, external
+/// images), what it imports, and its external gradients' ids.
+pub fn character_ids(stream: &TagStream) -> Result<std::collections::BTreeSet<u16>, String> {
+    let def = crate::gfx_def::MovieDef::decode(stream)?;
+    Ok(def.characters.keys().copied().chain(def.imports.iter().map(|(_, id, _)| *id)).chain(def.gradients.iter().map(|g| g.id)).collect())
+}
+
+/// Copy `DefineSprite` `id` as `new_id`, right after it. Refused: a `new_id` the movie already defines.
+pub fn clone_sprite(stream: &mut TagStream, id: u16, new_id: u16) -> Result<(), String> {
+    if character_ids(stream)?.contains(&new_id) {
+        return Err(format!("character {new_id} is already defined"));
+    }
+    let at = stream
+        .tags
+        .iter()
+        .position(|t| matches!(t.body, TagBody::Sprite { id: i, .. } if i == id))
+        .ok_or_else(|| format!("no sprite {id}"))?;
+    let mut copy = stream.tags[at].clone();
+    if let TagBody::Sprite { id: i, .. } = &mut copy.body {
+        *i = new_id;
+    }
+    stream.tags.insert(at + 1, copy);
+    Ok(())
+}
+
+/// The index in the root timeline of the tag that defines shape `id`.
+fn shape_tag(stream: &TagStream, id: u16) -> Result<usize, String> {
+    stream
+        .tags
+        .iter()
+        .position(|tag| gfx_tags::DEFINE_SHAPES.contains(&tag.code) && matches!(&tag.body, TagBody::Raw(body) if body.get(..2) == Some(&id.to_le_bytes()[..])))
+        .ok_or_else(|| format!("no shape {id}"))
+}
+
+/// Shape `id`, whose one fill style must be a bitmap.
+pub fn bitmap_shape(stream: &TagStream, id: u16) -> Result<gfx_tags::BitmapShape, String> {
+    let tag = &stream.tags[shape_tag(stream, id)?];
+    let TagBody::Raw(body) = &tag.body else { return Err(format!("shape {id} is not a plain tag")) };
+    gfx_tags::shape_bitmap_fill(tag.code, body)
+}
+
+/// External image `id`.
+pub fn external_image(stream: &TagStream, id: u16) -> Result<gfx_tags::ExternalImageTag, String> {
+    for tag in &stream.tags {
+        if let (gfx_tags::DEFINE_EXTERNAL_IMAGE, TagBody::Raw(body)) = (tag.code, &tag.body) {
+            let t = gfx_tags::external_image(body)?;
+            if t.id == id {
+                return Ok(t);
+            }
+        }
+    }
+    Err(format!("no external image {id}"))
+}
+
+/// Copy shape `id`, whose one fill style is a bitmap, as `new_id` with that fill changed by `edit`, right
+/// after it. Refused: a `new_id` the movie already takes.
+pub fn clone_bitmap_shape(stream: &mut TagStream, id: u16, new_id: u16, edit: impl FnOnce(&mut gfx_tags::BitmapFill)) -> Result<(), String> {
+    if character_ids(stream)?.contains(&new_id) {
+        return Err(format!("character {new_id} is already defined"));
+    }
+    let at = shape_tag(stream, id)?;
+    let tag = &stream.tags[at];
+    let TagBody::Raw(body) = &tag.body else { return Err(format!("shape {id} is not a plain tag")) };
+    let mut fill = gfx_tags::shape_bitmap_fill(tag.code, body)?.fill;
+    edit(&mut fill);
+    let copy = Tag { code: tag.code, long: tag.long, body: TagBody::Raw(gfx_tags::with_bitmap_fill(tag.code, body, new_id, &fill)?) };
+    stream.tags.insert(at + 1, copy);
+    Ok(())
+}
+
+/// Define external image `new_id`, `width` by `height` texels, named `name`, right after external image
+/// `like`: in `like`'s format, and, where `like` stores a file name, with the file name `name` plus the
+/// extension of `like`'s. Refused: a `new_id` the movie already takes.
+pub fn add_external_image(stream: &mut TagStream, like: u16, new_id: u16, width: u16, height: u16, name: &str) -> Result<(), String> {
+    if character_ids(stream)?.contains(&new_id) {
+        return Err(format!("character {new_id} is already defined"));
+    }
+    let like_tag = external_image(stream, like)?;
+    let at = stream
+        .tags
+        .iter()
+        .position(|t| t.code == gfx_tags::DEFINE_EXTERNAL_IMAGE && matches!(&t.body, TagBody::Raw(b) if b.get(..2) == Some(&like.to_le_bytes()[..])))
+        .ok_or_else(|| format!("no external image {like}"))?;
+    let file_name = match &like_tag.file_name {
+        Some(f) => {
+            let f = String::from_utf8_lossy(f);
+            let ext = f.rsplit_once('.').map(|(_, e)| e).ok_or_else(|| format!("image {like}'s file name {f:?} has no extension"))?;
+            Some(format!("{name}.{ext}").into_bytes())
+        }
+        None => None,
+    };
+    let t = gfx_tags::ExternalImageTag { id: new_id, format: like_tag.format, width, height, export_name: name.as_bytes().to_vec(), file_name };
+    let long = stream.tags[at].long;
+    stream.tags.insert(at + 1, Tag { code: gfx_tags::DEFINE_EXTERNAL_IMAGE, long, body: TagBody::Raw(t.encode()?) });
+    Ok(())
+}
+
+/// The `DoAction` bodies of frame `frame` (zero-based) of `line`, in tag order.
+pub fn do_actions(stream: &TagStream, line: Line, frame: usize) -> Result<Vec<&Vec<u8>>, String> {
+    let mut n = 0;
+    let mut out = Vec::new();
+    for tag in timeline(stream, line)? {
+        if n == frame {
+            if let TagBody::Raw(body) = &tag.body {
+                if tag.code == gfx_tags::DO_ACTION {
+                    out.push(body);
+                }
+            }
+        }
+        if tag.code == gfx_tags::SHOW_FRAME {
+            n += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// The `DoAction` bodies of frame `frame` of `line`, to edit in place.
+pub fn do_actions_mut(stream: &mut TagStream, line: Line, frame: usize) -> Result<Vec<&mut Vec<u8>>, String> {
+    let mut n = 0;
+    let mut out = Vec::new();
+    for tag in timeline_mut(stream, line)? {
+        let show = tag.code == gfx_tags::SHOW_FRAME;
+        if n == frame && tag.code == gfx_tags::DO_ACTION {
+            if let TagBody::Raw(body) = &mut tag.body {
+                out.push(body);
+            }
+        }
+        if show {
+            n += 1;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
