@@ -218,6 +218,14 @@ pub fn trnm_track_count(trnm: &[u8]) -> Result<u32, String> {
     Ok(count)
 }
 
+/// The per-track bone name-hashes of a `trnm` body: the `count` words after the count word and the
+/// leading word, track `t` driving the bone whose HIER name-hash is entry `t`
+/// ([`crate::animgroup::AnimBinding::track_to_bone_hash`]). Errors as [`trnm_track_count`].
+pub fn trnm_bone_hashes(trnm: &[u8]) -> Result<Vec<u32>, String> {
+    let count = trnm_track_count(trnm)? as usize;
+    Ok((0..count).map(|k| u32_at(trnm, 8 + k * 4).expect("the length is checked")).collect())
+}
+
 /// One event in an `evnt` chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnimEvent {
@@ -464,6 +472,17 @@ mod tests {
         assert_eq!(trnm_track_count(&t), Ok(3));
         t.push(0);
         assert!(trnm_track_count(&t).is_err());
+    }
+
+    /// The hashes start after the count word and the leading word.
+    #[test]
+    fn trnm_bone_hashes_skip_the_leading_word() {
+        let mut t = (2u32 | 0xFFFF_0000).to_le_bytes().to_vec();
+        for w in [0xDEAD_BEEFu32, 0x1111_1111, 0x2222_2222] {
+            t.extend_from_slice(&w.to_le_bytes());
+        }
+        assert_eq!(trnm_bone_hashes(&t), Ok(vec![0x1111_1111, 0x2222_2222]));
+        assert!(trnm_bone_hashes(&t[..t.len() - 1]).is_err());
     }
 
     #[test]
