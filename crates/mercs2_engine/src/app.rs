@@ -96,6 +96,9 @@ pub struct Camera {
 /// a re-borrowing hook reintroduces the "already borrowed" panic against that clone.
 pub struct Ctx<'a> {
     pub world: &'a Rc<RefCell<World>>,
+    /// The scope the scene keeps `world`'s entities under (`scene::WorldScope`): every per-entity
+    /// scene call for this world passes it.
+    pub scope: crate::scene::WorldScope,
     pub scene: &'a mut Scene,
     pub input: &'a Input<'a>,
     /// Keys that transitioned to pressed THIS frame (rising edges) — for menu nav + the Tab cam toggle.
@@ -330,6 +333,7 @@ fn open<G: Game + 'static>(mut game: G, event_loop: &ActiveEventLoop) -> impl Fn
     // The ECS World is the single source of truth, a shared single-threaded handle so a game's script
     // host can hold its own clone (see `Ctx`).
     let world = Rc::new(RefCell::new(World::new()));
+    let scope = crate::scene::WorldScope::new();
 
     let mut bindings = cfg.bindings;
     let grab_on_load = cfg.grab_cursor;
@@ -431,7 +435,7 @@ fn open<G: Game + 'static>(mut game: G, event_loop: &ActiveEventLoop) -> impl Fn
                     if layers.active() == LAYER_MENU {
                         let outcome = {
                             let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                            let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
+                            let mut ctx = Ctx { world: &world, scope, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
                             game.menu(&mut ctx)
                         };
                         if let Some(read) = game.take_bindings() {
@@ -490,7 +494,7 @@ fn open<G: Game + 'static>(mut game: G, event_loop: &ActiveEventLoop) -> impl Fn
                         if let Some(LayerTransition::Ascending(LAYER_GAME)) = layers.advance() {
                             let Some(data) = pending.take() else { continue };
                             let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                            let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
+                            let mut ctx = Ctx { world: &world, scope, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
                             game.setup(&mut ctx, data);
                         }
                     }
@@ -518,7 +522,7 @@ fn open<G: Game + 'static>(mut game: G, event_loop: &ActiveEventLoop) -> impl Fn
                     mouse_raw_acc = (0.0, 0.0);
 
                     let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                    let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta, time: &time, window: &window, dt: real_dt };
+                    let mut ctx = Ctx { world: &world, scope, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta, time: &time, window: &window, dt: real_dt };
                     let cam = game.update(&mut ctx);
                     for _ in 0..steps {
                         game.fixed_update(&mut ctx);
@@ -527,7 +531,7 @@ fn open<G: Game + 'static>(mut game: G, event_loop: &ActiveEventLoop) -> impl Fn
                     game.ui(&mut ctx);
 
                     scene.set_view(cam.view, cam.near, cam.far);
-                    match scene.render(&world.borrow()) {
+                    match scene.render(scope, &world.borrow()) {
                         Ok(()) => {}
                         Err(SurfaceError::Lost | SurfaceError::Outdated) => scene.resize(scene.size),
                         Err(SurfaceError::Occluded) => {}
