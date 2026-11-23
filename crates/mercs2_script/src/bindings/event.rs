@@ -2,7 +2,7 @@
 //!
 //! The engine's event system, script side. The game's entire mission/contract layer is
 //! `Event.Create`-driven (688 `Create` / 654 `Delete` call sites in the corpus), so this is the
-//! keystone for running the real Lua. Grounded in `docs/reverse_engineer/event_bus_code_map.md`
+//! keystone for running the real Lua. Grounded in [`docs/reverse_engineer/event_bus_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/event_bus_code_map.md)
 //! (name-hash subscriber registry + typed dispatch) and the actual corpus call patterns:
 //!
 //! ```lua
@@ -138,7 +138,7 @@ struct InSeatFilter {
 }
 
 /// An `Event.ObjectHibernation` condition (factory `0x5F2530`, parse `0x5F2300`, poll
-/// `FUN_005F2440`). The script update polls it every frame (`docs/reverse_engineer/hibernation_grid.md`
+/// `FUN_005F2440`). The script update polls it every frame ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md)
 /// §6a); it is not raised by a transition.
 #[derive(Debug, Clone, PartialEq)]
 enum HibernationSubject {
