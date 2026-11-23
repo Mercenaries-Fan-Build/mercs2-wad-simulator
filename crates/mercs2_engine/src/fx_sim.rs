@@ -1,7 +1,7 @@
 //! The retail particle simulation: what an effect (`mercs2_formats::fxdict::EffectContainer`) does
 //! once started. A port of the v1.0 spawn path (`FUN_0048f4f0`, `FUN_0048ae80`, `FUN_00488770`), the
 //! integrator (`FUN_00876840`) and the render copy (`FUN_00724570`, `FUN_00493660`). Units, operators
-//! and evidence: `docs/reverse_engineer/particle_sim_units.md`.
+//! and evidence: [`docs/reverse_engineer/particle_sim_units.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/particle_sim_units.md).
 //!
 //! An instance steps once a frame by a variable `dt` in seconds, with no substeps. There is no
 //! looping flag in an effect: it emits while its `rate` is above 0, a linear curve holding its last
