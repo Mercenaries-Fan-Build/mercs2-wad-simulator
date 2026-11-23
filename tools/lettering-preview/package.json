@@ -1,0 +1,12 @@
+{
+  "name": "lettering-preview",
+  "private": true,
+  "type": "module",
+  "description": "Live preview of the main-menu stencil lettering SVGs (crates/mercs2_quartermaster/data/lettering).",
+  "scripts": {
+    "dev": "vite"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
+  }
+}
