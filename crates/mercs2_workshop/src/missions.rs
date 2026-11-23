@@ -27,7 +27,7 @@ use crate::blueprint::{
     ENTRY,
 };
 use crate::gui::theme;
-use crate::lua_source::Script;
+use mercs2_quartermaster::lua_source::Script;
 use crate::missions_debug::{Debug, LineRun, LinkState};
 use mercs2_formats::lua_debug::Step;
 
@@ -163,6 +163,29 @@ pub struct ShipmentRequest {
     pub source: String,
 }
 
+/// Write `source` as `file`, a script Add to Shipment stages. `written` is what this page last wrote
+/// to each file: a file that exists is written over only when it still holds that text (or already
+/// holds `source`); any other text is someone's, and the file is left as it is. Records the write.
+pub fn write_staged(written: &mut std::collections::HashMap<std::path::PathBuf, String>, file: &std::path::Path, source: &str) -> Result<(), String> {
+    match std::fs::read_to_string(file) {
+        Ok(now) if now == source || written.get(file) == Some(&now) => {}
+        Ok(_) => {
+            return Err(format!(
+                "{} holds a script this page did not write; it is left as it is. Move it to stage this one",
+                file.display()
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("{}: {e}", file.display())),
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    std::fs::write(file, source).map_err(|e| format!("{}: {e}", file.display()))?;
+    written.insert(file.to_path_buf(), source.to_string());
+    Ok(())
+}
+
 pub struct Panel {
     reference: Option<Reference>,
     catalog: Vec<MissionEntry>,
@@ -180,6 +203,8 @@ pub struct Panel {
     pub pending_save_open: bool,
     /// Set by `apply` on Add to Shipment; drained by the host, which owns the Quartermaster.
     pub pending_shipment: Option<ShipmentRequest>,
+    /// What Add to Shipment last wrote to each file ([`write_staged`]).
+    pub staged: std::collections::HashMap<std::path::PathBuf, String>,
     /// The script list's height in the navigator, as the user dragged the divider.
     script_pane: f32,
     lower: Lower,
@@ -201,6 +226,7 @@ impl Default for Panel {
             pending_lua_open: None,
             pending_save_open: false,
             pending_shipment: None,
+            staged: std::collections::HashMap::new(),
             script_pane: SCRIPT_PANE_DEFAULT,
             lower: Lower::Script,
             member_filter: String::new(),
@@ -3498,6 +3524,28 @@ fn canvas_counts(o: &Open, g: &Graph) -> Counts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Add to Shipment writes a new file and writes over what it wrote itself, but leaves a file
+    /// holding anything else as it is.
+    #[test]
+    fn staging_writes_only_over_its_own_script() {
+        let dir = std::env::temp_dir().join(format!("missions-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("src/gurcon002.lua");
+        let mut written = std::collections::HashMap::new();
+        write_staged(&mut written, &file, "-- one\n").unwrap();
+        write_staged(&mut written, &file, "-- two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- two\n");
+        std::fs::write(&file, "-- by hand\n").unwrap();
+        let e = write_staged(&mut written, &file, "-- three\n").unwrap_err();
+        assert!(e.contains("did not write"), "{e}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "-- by hand\n");
+        // A page that never wrote it (a new session) leaves it too, unless it already holds the script.
+        let mut fresh = std::collections::HashMap::new();
+        assert!(write_staged(&mut fresh, &file, "-- three\n").is_err());
+        write_staged(&mut fresh, &file, "-- by hand\n").unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn encode_lua_string_escapes_quotes_and_backslashes() {
