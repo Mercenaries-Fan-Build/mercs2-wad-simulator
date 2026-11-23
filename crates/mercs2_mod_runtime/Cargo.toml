@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_mod_runtime"
-version = "0.6.3"
+version = "0.6.4"
 description = "m2-sdk.dll: the one runtime every Mercenaries 2 mod shares in the game process"
 edition = "2024"
 license = "MIT"
@@ -17,10 +17,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # 6.0.4: `mod_runtime::namespace_add_refused` (lua_host.rs) arrived in it.
-mercs2_formats = "6.0.4"
+mercs2_formats = "7.0.0"
 # The Lua debugger names engine bindings from the game's own luaL_Reg registry (`luareg`) and labels the
 # running build from the catalogue.
-mercs2_exemap = "1.1"
+mercs2_exemap = "1.1.3"
 # The debugger's `debug.host` build: the running executable's sha256.
 sha2 = "0.10"
 windows-sys = { version = "0.61", features = [
@@ -40,7 +40,7 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 cc = "1.2"
 # The C header of the load ladder the DLL matches against (`load_ladder::c_header`).
-mercs2_formats = "6.0.4"
+mercs2_formats = "7.0.0"
 
 [profile.release]
 panic = "abort"
