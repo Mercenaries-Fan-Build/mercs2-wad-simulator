@@ -1,6 +1,6 @@
 //! `mercs2_water` — Water: the engine-owned water *mechanism*.
 //!
-//! **Code map:** `docs/reverse_engineer/water_code_map.md` (the sky/decal/water PC code maps), with
+//! **Code map:** [`docs/reverse_engineer/water_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/water_code_map.md) (the sky/decal/water PC code maps), with
 //! `docs/watermap_format.md` for the static watermap layout and `vehicle_code_map.md` §3/§5 for the
 //! boat buoyancy tunables. **Scope:** the water-and-swimming scope
 //! ([[water-and-swimming-scope]]).
