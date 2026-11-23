@@ -511,7 +511,9 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 // Same hash as the shipped asset — a replacement, not an addition.
                 push(Access::Write, Claim::asset(target), Intent::Replace);
             }
-            Contribution::PatchLua { target, .. } => {
+            // An empty `set_spawn_lists` writes no Lua, so it claims nothing.
+            Contribution::SetSpawnLists { lists, .. } if lists.is_empty() => {}
+            Contribution::PatchLua { target, .. } | Contribution::SetSpawnLists { target, .. } => {
                 push(
                     Access::Write,
                     bare(Claim::Script {
