@@ -23,7 +23,7 @@ const RETAIL_FIXTURE_PS3: &[u8] = include_bytes!(concat!(
 const RETAIL_FIXTURE_PS3_SHA256: &str = "e9d8967c91c953700a327d9e307eacf7b994cc5f093ebd6b7937cae075fc66a1";
 
 /// A DLC streamed bank's header as it ships, big-endian, with `vo_stream_DLCTest.pws` in the 32-byte
-/// slot (`docs/_descriptor_walker_rejected_bodies.md`, class C), and one record.
+/// slot ([`docs/_descriptor_walker_rejected_bodies.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_rejected_bodies.md), class C), and one record.
 fn dlc_streamed_body() -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&0x1Du32.to_le_bytes());
