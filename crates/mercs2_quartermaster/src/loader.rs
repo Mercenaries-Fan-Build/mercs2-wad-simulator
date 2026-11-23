@@ -18,7 +18,9 @@
 //! * `_QM.saved` (gameplay): the save table the world loaded from ([`prologue`]).
 //! * `_QM.load(name, owner)`: `dynamic_import`s a library. The engine runs its body and calls back
 //!   with its env, or with `nil` when it cannot load it, and logs nothing either way (memory
-//!   `lua-import-never-executes-module`). `nil` goes to `_QM.fail`; an env marks the library ready.
+//!   `lua-import-never-executes-module`). `nil` goes to `_QM.fail`; an env marks the library ready and
+//!   is kept as `_QM.libraries[name]`, where qm's own code reaches the library's functions (an added
+//!   menu item's action).
 //!
 //! The prologue is defined in each host because a hook can fire before the session's loader entry
 //! runs: `levelbootstrap.LoadLevel` runs before the `vz` master's chunk. A hook reaches the dispatcher
@@ -151,6 +153,7 @@ if QM.fire == nil then\n\
   QM.requested = {{}}\n\
   QM.settling = {{}}\n\
   QM.ready = {{}}\n\
+  QM.libraries = {{}}\n\
   QM.failed = false\n\
   QM.settle = {settle}\n\
   function QM.pack(...)\n\
@@ -245,6 +248,7 @@ if QM.fire == nil then\n\
         QM.fail(owner, \"load \" .. name, \"the engine could not load module \" .. name)\n\
       else\n\
         QM.ready[name] = true\n\
+        QM.libraries[name] = env\n\
         print(\"[qm] library \" .. name .. \": ready\")\n\
       end\n\
     end\n\
