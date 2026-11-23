@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -370.370 1629.630 1592.593" width="1629.630" height="1592.593">
+  <!-- U+0057 W: the main-menu stencil, drafted from the parts of retail's shell_MAINMENU_text. The cap is y 0 to 1000 (27 texels on the menu); the view has 10 texels' room above it and 6 below. -->
+  <path fill="black" fill-rule="evenodd" d="M0.0 0.0 L296.3 0.0 L592.6 1000.0 L296.3 1000.0 Z"/>
+  <path fill="black" fill-rule="evenodd" d="M888.9 0.0 L617.7 915.3 L478.8 446.5 L611.1 0.0 Z"/>
+  <path fill="black" fill-rule="evenodd" d="M666.7 0.0 L944.4 0.0 L1296.3 1000.0 L1000.0 1000.0 Z"/>
+  <path fill="black" fill-rule="evenodd" d="M1629.6 0.0 L1330.2 951.2 L1173.8 506.8 L1333.3 0.0 Z"/>
+</svg>
