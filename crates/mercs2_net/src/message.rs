@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn float_arg_is_bit_exact() {
-        let m = NetMessage::new(7, 0, vec![NetArg::Float(3.14159)]);
+        let m = NetMessage::new(7, 0, vec![NetArg::Float(std::f32::consts::PI)]);
         let back = NetMessage::unmarshal(&m.marshal().unwrap()).unwrap();
-        assert_eq!(back.args[0], NetArg::Float(3.14159));
+        assert_eq!(back.args[0], NetArg::Float(std::f32::consts::PI));
     }
 }
