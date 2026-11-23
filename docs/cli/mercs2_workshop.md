@@ -67,7 +67,7 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--block-strings <blk>` | block index | No | Prints printable ASCII runs (≥5 chars) from a decompressed block — pairs with `--hash-file` for hash-hunting names embedded in game data. Unparseable `blk` becomes `0`. Opens the overlay stack but decompresses **only the base WAD (`wads[0]`)**. |
 | `--hash <names…>` | one or more | consumes rest | m2-hashes every following argument and prints `0xHASH  name`. Consumes ALL remaining args. Does not open the WAD (but WAD resolution must still succeed — see `--wad`). |
 | `--hash-file <file>` | one file | No | m2-hashes every non-empty line of `file`. Same WAD-resolution caveat as `--hash`. |
-| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and `audio_manifest.json`, `NotoSansJP-Regular.otf` and `NotoSansJP-OFL.txt`, committed in the repo's `workshop_data/`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from: names come from the committed `crates/mercs2_workshop/data/production_names.json` (with no such file, from the raw corpora, including the name fragments committed beside it), and `audio_manifest.json` from the committed `workshop_data/` (packing into that folder leaves it in place); a missing one fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Runs before an archive is required: the WAD (and overlays) is read only on the raw-corpora path, to trim `names.bin` to the referenced hashes; with no archive found that path writes an untrimmed `names.bin`. |
+| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and `audio_manifest.json`, `NotoSansJP-Regular.otf` and `NotoSansJP-OFL.txt`, committed in the repo's `workshop_data/`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. Every source is read from the checkout the binary was built from: names come from the committed `crates/mercs2_workshop/data/production_names.json` (with no such file, from the raw corpora: the name fragments and registry rows committed beside it, the repo's `docs/data/aset_block_strings.json`, and the files named by the `rainbow_table`, `jul08_strings` and `bone_name_candidates` keys of `.mercs2-local.toml`), the registry CSVs and ECS schemas from that crate's `data/`, the decompiled Lua from `mercs2_script`'s `corpus/`, and `audio_manifest.json` from the committed `workshop_data/` (packing into that folder leaves it in place). A missing key or source file fails before anything is written. Runs before an archive is required: the WAD (and overlays) is read only on the raw-corpora path, to trim `names.bin` to the referenced hashes; with no archive found that path writes an untrimmed `names.bin`. |
 | *(no mode flag)* | — | — | Opens the GUI window (`app::run`). `--shipment <dir>` opens that Shipment in it, on the Shipment page. When the game archive or the reference data has no answer, the window opens on Settings with that chain in red and every other page locked; fixing it there loads the game without a restart. |
 
 ### Environment variables
@@ -234,12 +234,13 @@ mercs2_workshop --wad D:/mercs2/vz.wad --pack-data workshop_data
 - **`--block-strings <blk>: <err>` / `--hash-file <f>: <err>`** — block decompression failed, or the
   hash-file could not be read. Note an unparseable block index silently becomes block `0` rather than
   erroring.
-- **`--pack-data: <err>`** — a `.mercs2-local.toml` key the pack needs (`notes_docs_dir`, and
-  `rainbow_table` / `jul08_strings` when `crates/mercs2_workshop/data/production_names.json` is absent) is missing, names a
-  path that does not exist, or one of the source files under it is missing or unreadable; or
-  `audio_manifest.json`, `NotoSansJP-Regular.otf` or `NotoSansJP-OFL.txt`, committed in the repo's
-  `workshop_data/`, is missing from the checkout the binary was built from. The error names the key
-  or the file; nothing is written.
+- **`--pack-data: <err>`** — a source committed in the checkout the binary was built from is missing
+  or unreadable (this crate's `data/` registry rows, templates and `mercs2-ecs/`, `mercs2_script`'s
+  `corpus/`, or `audio_manifest.json`, `NotoSansJP-Regular.otf` or `NotoSansJP-OFL.txt` in the repo's
+  `workshop_data/`); or, when `crates/mercs2_workshop/data/production_names.json` is absent, a
+  `.mercs2-local.toml` key the raw-names merge needs (`rainbow_table`, `jul08_strings`,
+  `bone_name_candidates`) is missing or names a path that does not exist. The error names the key or
+  the file; nothing is written.
 - **No reference bundle** — no complete `workshop_data/` was found and the download failed, or the
   archive's sha256 did not match the pin (the error gives both digests; nothing was installed). The
   error gives the pinned `mercs2-workshop-data.zip` URL, its sha256 and the folder to unpack it into.
