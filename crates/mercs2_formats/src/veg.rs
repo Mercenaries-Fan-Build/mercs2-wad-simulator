@@ -1,5 +1,5 @@
 //! Vegetation classifier — the "is this an instanceable vegetation mesh" predicate for the
-//! foliage-instancing project (`docs/reverse_engineer/foliage_instancing_plan.md` §7).
+//! foliage-instancing project ([`docs/reverse_engineer/foliage_instancing_plan.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/foliage_instancing_plan.md) §7).
 //!
 //! Core rule: classify on the **descriptor token**, never the region prefix. `jungle_env_*` also
 //! names `jungle_env_rock02`, so a prefix match sweeps in rocks. Exclusions (shadow-blob decals,
