@@ -287,11 +287,12 @@ fn has_front_end(sound_regs: &[link::SoundBankRegistration], additions: &[link::
     sound_regs.iter().any(|r| r.sessions.contains(&fe)) || additions.iter().any(|a| a.load.as_ref().is_some_and(|l| l.sessions.contains(&fe)))
 }
 
-/// What a set gives qm's front-end link: its sound registrations, the levels the Extras page lists, and
-/// its `add_script` additions.
+/// What a set gives qm's front-end link: its sound registrations, the levels the Extras page lists, the
+/// menu items it adds, and its `add_script` additions.
 struct FrontEndSet<'a> {
     sound_regs: &'a [link::SoundBankRegistration],
     levels: &'a [link::LevelEntry],
+    items: &'a [link::MenuItemEntry],
     additions: &'a [link::ScriptAddition],
 }
 
@@ -308,8 +309,8 @@ fn link_shell_loader(
     kind: &'static str,
     log: &mut Vec<String>,
 ) -> Result<(Vec<PatchBlock>, Vec<link::LinkedModule>, Vec<crate::imports::ImportFinding>), BuildError> {
-    let FrontEndSet { sound_regs, levels, additions } = set;
-    if hooks == link::QmHooks::ForLibraries && !has_front_end(sound_regs, additions) && levels.is_empty() {
+    let FrontEndSet { sound_regs, levels, items, additions } = set;
+    if hooks == link::QmHooks::ForLibraries && !has_front_end(sound_regs, additions) && levels.is_empty() && items.is_empty() {
         return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     let fail = |message: String| BuildError::Lower { index: 0, kind, message };
@@ -319,7 +320,7 @@ fn link_shell_loader(
         .iter_mut()
         .map(|lb| link::TargetBlock { path: lb.path.clone(), block: &mut lb.block })
         .collect();
-    let linked = link::link_front_end(&mut targets, sound_regs, levels, additions, order, hooks).map_err(|e| fail(e.to_string()))?;
+    let linked = link::link_front_end(&mut targets, sound_regs, levels, items, additions, order, hooks).map_err(|e| fail(e.to_string()))?;
     drop(targets);
     for l in &linked.scripts {
         log.push(format!(
@@ -1799,6 +1800,12 @@ fn build_texture_from_rgba(
         TexFormat::Bc3 => texture_encode::mip_chain(w, h, 4, &pixels, texture_encode::encode_bc3),
     };
 
+    resident_texture_block(asset_name, w, h, format, &body).map_err(|e| err(format!("{label}: {e}")))
+}
+
+/// Texture `asset_name`, `w` by `h`, of mip chain `body` in `format`, as a patch block of its own with
+/// its ASET row, and the asset's hash.
+pub fn resident_texture_block(asset_name: &str, w: usize, h: usize, format: TexFormat, body: &[u8]) -> Result<(PatchBlock, u32), String> {
     let to = crate::manifest::asset_hash(asset_name);
     // Ship the FULLY-RESIDENT container shape the engine's texture binder actually reads —
     // NAME / INFO / BODY with the `0xFFFF` sentinel at INFO@32 and INFO[26..32]=0. The old
@@ -1806,9 +1813,7 @@ fn build_texture_from_rgba(
     // never BOUND: the injected model sampled it black. This is the obama skin recipe — ship a texture
     // block shaped like a real resident texture. `build_resident_texture` enforces the exact mip-chain
     // length too (a short body hangs the world load), so it validates `body` on the way through.
-    let container =
-        mercs2_formats::texture::build_resident_texture(asset_name, w as u32, h as u32, format, &body)
-            .map_err(|e| err(format!("{label}: {e}")))?;
+    let container = mercs2_formats::texture::build_resident_texture(asset_name, w as u32, h as u32, format, body)?;
     let mut block_bytes = Vec::with_capacity(20 + container.len());
     block_bytes.extend_from_slice(&1u32.to_le_bytes()); // flags/version
     block_bytes.extend_from_slice(&to.to_le_bytes()); // asset name hash
@@ -1822,8 +1827,7 @@ fn build_texture_from_rgba(
         format!("blocks\\VZ\\mod_{to:08x}.block"),
         vec![aset],
         None,
-    )
-    .map_err(err)?;
+    )?;
     Ok((block, to))
 }
 
@@ -4386,6 +4390,10 @@ fn lower(
         // Compiled with its `add_level`.
         Contribution::LevelAsset { .. } => Ok(Lowering::Nothing),
 
+        // Composed by `qm link` with every installed Shipment's items into one edit of the page's movie
+        // ([`crate::menu_items`]); a Shipment's own build ships nothing for it.
+        Contribution::AddMenuItem { .. } => Ok(Lowering::Nothing),
+
         // Resolved by `package::materialize` before the build; `build` refuses one that is not.
         Contribution::FetchPackage { .. } => Err(BuildError::Lower {
             index,
@@ -4874,7 +4882,9 @@ pub fn build(
         );
     }
     // String tables: every edit_stringdb / add_stringdb_keys / replace_stringdb_text of this
-    // Shipment, per table, in contribution order — the same code `qm link` merges a set with.
+    // Shipment, per table, in contribution order — the same code `qm link` merges a set with. The
+    // gameplay copies go in the overlay, the front end's (shell.wad's) in the shell patch.
+    let mut shell_tables: Vec<PatchBlock> = Vec::new();
     if let Some((index, c)) = manifest.contributions.iter().enumerate().find(|(_, c)| {
         matches!(
             c,
@@ -4889,7 +4899,9 @@ pub fn build(
                 kind: c.kind(),
             });
         };
-        blocks.extend(merge_string_tables(&[shipment], game, StringMerge::Strict, &mut log)?);
+        let tables = merge_string_tables(&[shipment], game, StringMerge::Strict, &mut log)?;
+        blocks.extend(tables.overlay);
+        shell_tables = tables.shell.into_iter().map(|(_, _, b)| b).collect();
     }
     // Sound: every add_sound, replace_sound_bank and replace_sound_cue of this Shipment
     // (`sound::lower_shipment_sound`). The blocks go to the level of each session that loads them —
@@ -4901,6 +4913,7 @@ pub fn build(
     blocks.extend(lowered.overlay);
     let mut shell_blocks: Vec<PatchBlock> = lowered.shell;
     shell_blocks.extend(shell_movies);
+    shell_blocks.extend(shell_tables);
     let language_blocks = lowered.language;
     let sound_regs = lowered.registrations;
     let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
@@ -5055,7 +5068,7 @@ pub fn build(
         // The Extras page lists the levels of the installed set: `qm link`'s, never one Shipment's build.
         let (front_end, _modules, findings) = link_shell_loader(
             game,
-            FrontEndSet { sound_regs: &sound_regs, levels: &[], additions: &additions },
+            FrontEndSet { sound_regs: &sound_regs, levels: &[], items: &[], additions: &additions },
             &solo_order,
             link::QmHooks::ForLibraries,
             "front-end loader",
@@ -5599,8 +5612,8 @@ pub fn merged_string_tables<'a>(
 /// merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`]; one path
 /// for the bank in every WAD that carries it; for a bank the engine loads, the block carries its
 /// sounddb and wavebank too), then — when any Shipment has an `add_fx` or a `replace_fx` — the
-/// effects block ([`crate::fx::EFFECTS_BLOCK`]), then — when any Shipment has an `add_level` — the
-/// block of qm's edited SHELL ([`crate::shell_extras`]).
+/// effects block ([`crate::fx::EFFECTS_BLOCK`]), then — when any Shipment has an `add_level` or an
+/// `add_menu_item` — the block of qm's edited SHELL ([`crate::shell_extras`], [`crate::menu_items`]).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
 /// the set-wide version of each. The rungs, and the banks a `replace_sound_wave` reaches, are read
 /// from `game`.
@@ -5620,13 +5633,189 @@ pub fn link_block_paths<'a>(
         .chain(merged_string_tables(manifests.iter().copied()).into_iter().map(stringdb_block_path))
         .chain(sound.into_iter().map(crate::sound::block_path))
         .chain(fx.then(|| crate::fx::EFFECTS_BLOCK.1.to_string()))
-        .chain(manifests.iter().any(|m| has_level(m)).then(|| movie_block_path(crate::manifest::asset_hash(crate::shell_extras::SHELL))))
+        .chain(
+            manifests
+                .iter()
+                .any(|m| has_level(m) || has_menu_item(m))
+                .then(|| movie_block_path(crate::manifest::asset_hash(crate::shell_extras::SHELL))),
+        )
         .collect())
 }
 
 /// Whether `manifest` adds a level.
 fn has_level(manifest: &crate::manifest::Manifest) -> bool {
     manifest.contributions.iter().any(|c| matches!(c, Contribution::AddLevel { .. }))
+}
+
+/// Whether `manifest` adds a menu item.
+fn has_menu_item(manifest: &crate::manifest::Manifest) -> bool {
+    manifest.contributions.iter().any(|c| matches!(c, Contribution::AddMenuItem { .. }))
+}
+
+/// One `add_menu_item` of a set: its Shipment and contribution index, and its fields.
+struct SetItem<'a> {
+    shipment: &'a str,
+    index: usize,
+    menu: &'a str,
+    label: &'a str,
+    after: &'a str,
+    help: Option<&'a str>,
+    action: &'a str,
+}
+
+/// Every `add_menu_item` of `shipments`, in their order, then each one's contribution order.
+fn menu_items_of<'a>(shipments: &[&'a LoadedShipment]) -> Vec<SetItem<'a>> {
+    let mut out = Vec::new();
+    for s in shipments {
+        for (index, c) in s.manifest.contributions.iter().enumerate() {
+            if let Contribution::AddMenuItem { menu, label, after, help, action } = c {
+                out.push(SetItem {
+                    shipment: &s.manifest.shipment.name,
+                    index,
+                    menu,
+                    label,
+                    after,
+                    help: help.as_deref(),
+                    action,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Each item's `action` names a function of a library the set loads in the front end (an `add_script`
+/// whose `load:` includes `front_end`): the dispatcher finds the module among the loaded ones by name,
+/// ignoring case, as `QM.module` does.
+fn check_item_actions(items: &[SetItem<'_>], additions: &[link::ScriptAddition]) -> Result<(), BuildError> {
+    let fe = crate::manifest::LoadSession::FrontEnd;
+    for i in items {
+        let fail = |message: String| BuildError::Lower { index: i.index, kind: "add_menu_item", message: format!("{}: menu item {}: {message}", i.shipment, i.label) };
+        let (module, function) = i.action.split_once('.').ok_or_else(|| fail(format!("action {:?} is not Module.Function", i.action)))?;
+        if function.is_empty() {
+            return Err(fail(format!("action {:?} names no function", i.action)));
+        }
+        let loaded = additions.iter().any(|a| a.name.eq_ignore_ascii_case(module) && a.load.as_ref().is_some_and(|l| l.sessions.contains(&fe)));
+        if !loaded {
+            return Err(fail(format!(
+                "action {:?}: no add_script of the installed set named {module} loads in the front end (load: in: [front_end])",
+                i.action
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `movie` (SHELL) with `items` added, page by page in the catalogue's order, each page's items in the
+/// set's order; and each page's label art with its items.
+fn compose_menu_items<'a, 'b>(
+    items: &'b [SetItem<'a>],
+    movie: &[u8],
+) -> Result<(Vec<u8>, Vec<(crate::menu_items::LabelArt, Vec<&'b SetItem<'a>>)>), String> {
+    let pages = crate::menu_items::pages()?;
+    for i in items {
+        if !pages.iter().any(|p| p.id == i.menu) {
+            return Err(format!("{}: menu item {} is on {:?}, which is no page of qm's menu catalogue", i.shipment, i.label, i.menu));
+        }
+    }
+    let mut out = movie.to_vec();
+    let mut arts = Vec::new();
+    for page in &pages {
+        let on_page: Vec<&SetItem<'_>> = items.iter().filter(|i| i.menu == page.id).collect();
+        if on_page.is_empty() {
+            continue;
+        }
+        if page.movie != crate::shell_extras::SHELL {
+            return Err(format!("menu page {} is in movie {}, and qm link composes items into SHELL only", page.id, page.movie));
+        }
+        if on_page.len() > page.capacity() {
+            return Err(format!(
+                "menu page {} takes {} added item(s), and the installed set adds {}: {}",
+                page.id,
+                page.capacity(),
+                on_page.len(),
+                on_page.iter().map(|i| format!("{} ({})", i.label, i.shipment)).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let new: Vec<crate::menu_items::NewItem> = on_page
+            .iter()
+            .map(|i| crate::menu_items::NewItem {
+                label: i.label.to_string(),
+                help: i.help.map(str::to_string),
+                event: i.label.to_string(),
+                after: i.after.to_string(),
+            })
+            .collect();
+        let (edited, art) = crate::menu_items::add_items(page, &out, &new)?;
+        out = edited;
+        arts.push((art, on_page));
+    }
+    Ok((out, arts))
+}
+
+/// Each page's label texture, set in every installed language (`<language>.wad` beside `vz.wad`): each
+/// item's label text from that language's front-end string table (`shell_tables`, the link's merged
+/// copy, else `shell.wad`'s own), retail's art for the grain and outline from `shell.wad` with the
+/// language's WAD over it, split into letters by retail's own labels' text as `shell.wad` ships it. A
+/// label or help key with no text in an installed language fails, every one named. Each texture goes in
+/// the language's patch.
+fn menu_label_textures(
+    arts: &[(crate::menu_items::LabelArt, Vec<&SetItem<'_>>)],
+    game: &GameStack,
+    shell_tables: &[(u32, Vec<u8>)],
+    shell: &mut GameStack,
+    log: &mut Vec<String>,
+) -> Result<Vec<(crate::manifest::Language, PatchBlock)>, String> {
+    use crate::menu_items::{key_hash, label_texture, label_texture_block};
+    let present = game.present_side_wads()?;
+    let base = game.paths().first().map(|p| p.to_path_buf()).ok_or("the game stack is empty")?;
+    let shell_path = crate::sound::sibling_wad(&base, "shell.wad")?;
+    let mut missing: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for language in crate::manifest::Language::ALL {
+        let file = format!("{}.wad", language.token());
+        let Some(wad) = present.iter().find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&file))) else {
+            continue;
+        };
+        let table = crate::manifest::asset_hash(language.token());
+        // Retail's own labels are read from shell.wad's table as shipped: the art was drawn from that
+        // text, whatever a Shipment of the set writes over it. The added labels are read from the
+        // table as the link merged it.
+        let shipped = shell
+            .container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+            .ok_or_else(|| format!("{file} is installed, and shell.wad has no {} string table for the front end", language.token()))?;
+        let merged = shell_tables.iter().find(|(t, _)| *t == table).map_or_else(|| shipped.clone(), |(_, c)| c.clone());
+        let retail_db = mercs2_formats::stringdb::read_container(&shipped)?;
+        let db = mercs2_formats::stringdb::read_container(&merged)?;
+        let retail_text = |key: u32| retail_db.entries.iter().find(|e| e.key_hash == key).map(|e| e.text.clone());
+        let text = |key: u32| db.entries.iter().find(|e| e.key_hash == key).map(|e| e.text.clone());
+        let mut stack = GameStack::open(&[shell_path.clone(), wad.clone()]).map_err(|e| e.to_string())?;
+        for (art, items) in arts {
+            let mut texts = Vec::with_capacity(items.len());
+            for i in items {
+                for key in std::iter::once(i.label).chain(i.help) {
+                    if text(key_hash(key)).is_none() {
+                        missing.push(format!("{} contributions[{}]: {key} in {}", i.shipment, i.index, language.token()));
+                    }
+                }
+                texts.push(text(key_hash(i.label)).unwrap_or_default());
+            }
+            if !missing.is_empty() {
+                continue;
+            }
+            let retail = crate::label_art::read(&mut stack, &art.retail)?;
+            let image = label_texture(art, &retail, &retail_text, &texts).map_err(|e| format!("{}: {e}", language.token()))?;
+            log.push(format!("{} {}x{} in {}: {} label(s)", art.name, art.size[0], art.size[1], language.token(), texts.len()));
+            out.push((language, label_texture_block(art, &image)?));
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "a menu item's label or help key has no text in an installed language's front-end string table: {}. Add it with add_stringdb_keys (target: the language)",
+            missing.join("; ")
+        ));
+    }
+    Ok(out)
 }
 
 /// The blocks `qm link` carries with the scripts blocks it re-emits, so their rows keep their LOD
@@ -5701,13 +5890,16 @@ enum TableWrite {
 ///   ([`mercs2_formats::stringdb::StringDb::replace_exact_text`]), and matching nothing is an error
 ///   naming the Shipment, the table and the text, in both modes.
 ///
-/// A later write wins. One block per table comes back ([`stringdb_block`]).
+/// A later write wins. Each copy of a table is merged on its own: the gameplay one in `game` (shipped
+/// in the overlay) and the front end's in the `shell.wad` beside it (shipped in the shell patch), each
+/// present one, so a key reaches the front end as well as gameplay; a table in neither is an error.
+/// One block per copy comes back ([`stringdb_block`]), both at the table's one path.
 fn merge_string_tables(
     shipments: &[&LoadedShipment],
     game: &mut GameStack,
     mode: StringMerge,
     log: &mut Vec<String>,
-) -> Result<Vec<PatchBlock>, BuildError> {
+) -> Result<MergedTables, BuildError> {
     let stage: &'static str = match mode {
         StringMerge::Strict => "string tables",
         StringMerge::Upsert => "link",
@@ -5775,19 +5967,60 @@ fn merge_string_tables(
             }
         }
     }
-    let mut blocks = Vec::with_capacity(by_table.len());
+    let mut out = MergedTables::default();
+    let mut shell = if by_table.is_empty() { None } else { Some(game.open_sibling("shell.wad").map_err(fail)?) };
     for (table, (target, writes, contributors)) in by_table {
-        let container = game
-            .container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
-            .ok_or_else(|| {
-                fail(format!(
-                    "{target:?} (0x{table:08X}) is not a string table in the game stack — check the \
-                     spelling; there is no base table for {} to edit",
-                    contributors.join(", ")
-                ))
-            })?;
-        let merged = mercs2_formats::stringdb::apply_container(&container, |db| {
-            for w in &writes {
+        // The gameplay copy (vz.wad's stack) and the front end's (shell.wad); each one present is edited.
+        let copies: Vec<(&'static str, Vec<u8>)> = [
+            ("vz", game.container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)),
+            ("shell", shell.as_mut().and_then(|s| s.container_for_asset(table, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB))),
+        ]
+        .into_iter()
+        .filter_map(|(at, c)| c.map(|c| (at, c)))
+        .collect();
+        if copies.is_empty() {
+            return Err(fail(format!(
+                "{target:?} (0x{table:08X}) is a string table in neither vz.wad's stack nor shell.wad — check \
+                 the spelling; there is no base table for {} to edit",
+                contributors.join(", ")
+            )));
+        }
+        for (at, container) in copies {
+            let merged = merge_table(&container, table, &target, &writes, &contributors, mode, log).map_err(&fail)?;
+            let block = stringdb_block(table, &merged).map_err(&fail)?;
+            match at {
+                "vz" => out.overlay.push(block),
+                _ => out.shell.push((table, merged, block)),
+            }
+        }
+        out.paths.push(stringdb_block_path(table));
+    }
+    Ok(out)
+}
+
+/// The string tables a set's writes were merged into: each table's block for the gameplay overlay (its
+/// copy in vz.wad's stack) and for the shell patch (its copy in shell.wad, with the merged container),
+/// and every table's block path once, in table order.
+#[derive(Default)]
+struct MergedTables {
+    overlay: Vec<PatchBlock>,
+    shell: Vec<(u32, Vec<u8>, PatchBlock)>,
+    paths: Vec<String>,
+}
+
+/// `writes` applied to `container`, one copy of table `target`, in order.
+fn merge_table(
+    container: &[u8],
+    table: u32,
+    target: &str,
+    writes: &[TableWrite],
+    contributors: &[String],
+    mode: StringMerge,
+    log: &mut Vec<String>,
+) -> Result<Vec<u8>, String> {
+    {
+        let merged = mercs2_formats::stringdb::apply_container(container, |db| {
+            for w in writes {
                 match w {
                     TableWrite::Key { key, label, text, write, who } => {
                         let exists = db.set_by_hash(*key, text);
@@ -5814,14 +6047,14 @@ fn merge_string_tables(
                     }
                     TableWrite::Text { old, new, who } => {
                         if db.replace_exact_text(old, new) == 0 {
-                            return Err(text_misses_message(who, &target, &[old]));
+                            return Err(text_misses_message(who, target, &[old]));
                         }
                     }
                 }
             }
             Ok(())
         })
-        .map_err(|m| fail(format!("{target:?} (0x{table:08X}): {m}")))?;
+        .map_err(|m| format!("{target:?} (0x{table:08X}): {m}"))?;
         log.push(format!(
             "string table {target} 0x{table:08X}: {} write(s) from {} applied in order, container \
              {} -> {} bytes",
@@ -5830,9 +6063,8 @@ fn merge_string_tables(
             container.len(),
             merged.len()
         ));
-        blocks.push(stringdb_block(table, &merged).map_err(fail)?);
+        Ok(merged)
     }
-    Ok(blocks)
 }
 
 /// What the set's link compiles, handed to [`link_level`] for each level.
@@ -6398,7 +6630,7 @@ pub fn link_installed(
     // one atlas.
     let fx = shipments.iter().any(|s| crate::fx::merges_fx(&s.manifest));
     let levels = crate::level::levels_of(&shipments);
-    // Every level is on the Extras page ([`link::extras_page_source`]).
+    // Every level is on the Extras page ([`link::shell_pages_source`]).
     let mut level_entries = Vec::with_capacity(levels.len());
     for l in &levels {
         let date = l.date.map(crate::level::parse_level_date).transpose().map_err(|m| BuildError::Lower {
@@ -6545,18 +6777,22 @@ pub fn link_installed(
         })
         .cloned()
         .collect();
-    let emitted: Vec<String> = table_blocks.iter().map(|b| b.path_string.clone()).collect();
-    if promised != emitted {
+    if promised != table_blocks.paths {
         return Err(BuildError::Lower {
             index: 0,
             kind: "link",
             message: format!(
                 "internal error: the plan promised the string-table blocks {promised:?}, and the \
-                 link merged {emitted:?}"
+                 link merged {:?}",
+                table_blocks.paths
             ),
         });
     }
-    patches.extend(table_blocks);
+    patches.extend(table_blocks.overlay);
+    // The front end's copies of the merged tables, in the link's shell patch; their containers are the
+    // text an added menu item's label is set from.
+    let shell_tables: Vec<(u32, Vec<u8>)> = table_blocks.shell.iter().map(|(t, c, _)| (*t, c.clone())).collect();
+    let mut shell_table_blocks: Vec<PatchBlock> = table_blocks.shell.into_iter().map(|(_, _, b)| b).collect();
 
     // The merged sound banks: one soundbank per bank a replace_sound_cue targets, carrying every
     // Shipment's cue overrides, in each WAD that carries the bank; for a bank the engine loads, with
@@ -6596,6 +6832,16 @@ pub fn link_installed(
         shell_blocks = lowered.shell;
         language_blocks = lowered.language;
     }
+    shell_blocks.append(&mut shell_table_blocks);
+
+    // The set's menu items, in load order, then each Shipment's contribution order; each runs a function
+    // of a library the set loads in the front end.
+    let set_items = menu_items_of(&shipments);
+    check_item_actions(&set_items, &additions)?;
+    let item_entries: Vec<link::MenuItemEntry> = set_items
+        .iter()
+        .map(|i| link::MenuItemEntry { shipment: i.shipment.to_string(), label: i.label.to_string(), action: i.action.to_string() })
+        .collect();
 
     // The front end's hooks and loader, on every deploy (W-a): every Shipment's front-end banks in one
     // `qm_shell_modloader` and every front-end library, linked into `shell.wad`'s scripts block and
@@ -6603,7 +6849,7 @@ pub fn link_installed(
     let (front_end, front_end_modules, front_end_found) =
         link_shell_loader(
             game,
-            FrontEndSet { sound_regs: &sound_regs, levels: &level_entries, additions: &additions },
+            FrontEndSet { sound_regs: &sound_regs, levels: &level_entries, items: &item_entries, additions: &additions },
             &order,
             link::QmHooks::Always,
             "link",
@@ -6612,8 +6858,9 @@ pub fn link_installed(
     import_found.extend(front_end_found);
     shell_blocks.extend(front_end);
     // The Extras page is reachable on PC, and its hero pick starts the level chosen, only in qm's edit of
-    // SHELL, so it ships whenever the set has a level, and no Shipment may replace SHELL itself.
-    if !level_entries.is_empty() {
+    // SHELL, and the menu items are qm's edit of it too, so it ships whenever the set has a level or a menu
+    // item, and no Shipment may replace SHELL itself.
+    if !level_entries.is_empty() || !set_items.is_empty() {
         let shell_hash = crate::manifest::asset_hash(crate::shell_extras::SHELL);
         for s in &shipments {
             for (index, c) in s.manifest.contributions.iter().enumerate() {
@@ -6623,9 +6870,10 @@ pub fn link_installed(
                         index,
                         kind: c.kind(),
                         message: format!(
-                            "{}: replaces {name}, and qm edits SHELL itself when the set has a level (the Extras page lists {})",
+                            "{}: replaces {name}, and qm edits SHELL itself when the set has a level or a menu item (the Extras page lists {}; menu items: {})",
                             s.manifest.shipment.name,
-                            level_entries.iter().map(|l| l.level.as_str()).collect::<Vec<_>>().join(", ")
+                            if level_entries.is_empty() { "none".to_string() } else { level_entries.iter().map(|l| l.level.as_str()).collect::<Vec<_>>().join(", ") },
+                            if set_items.is_empty() { "none".to_string() } else { set_items.iter().map(|i| i.label).collect::<Vec<_>>().join(", ") }
                         ),
                     });
                 }
@@ -6637,14 +6885,20 @@ pub fn link_installed(
             .container_for_asset(shell_hash, mercs2_formats::types::TYPE_HASH_CFX_PACK, TYPE_ID_CFX_PACK)
             .ok_or_else(|| fail("shell.wad holds no SHELL movie".into()))?;
         let retail = mercs2_formats::gfx::cfx_pack_movie(&container, "shell.wad SHELL").map_err(fail)?;
-        let edited = crate::shell_extras::edit(&retail).map_err(fail)?;
-        log.push(format!(
-            "SHELL: qm's Extras edit, {} → {} bytes, for {} level(s)",
-            retail.len(),
-            edited.len(),
-            level_entries.len()
-        ));
-        shell_blocks.push(movie_block(shell_hash, &mercs2_formats::gfx::build_cfx_pack_block(shell_hash, &edited)).map_err(fail)?);
+        let mut movie = retail.clone();
+        if !level_entries.is_empty() {
+            movie = crate::shell_extras::edit(&retail).map_err(fail)?;
+            log.push(format!("SHELL: qm's Extras edit, {} → {} bytes, for {} level(s)", retail.len(), movie.len(), level_entries.len()));
+        }
+        if !set_items.is_empty() {
+            let (edited, arts) = compose_menu_items(&set_items, &movie).map_err(fail)?;
+            log.push(format!("SHELL: {} menu item(s) added, {} → {} bytes", set_items.len(), movie.len(), edited.len()));
+            movie = edited;
+            for (language, block) in menu_label_textures(&arts, game, &shell_tables, &mut shell, &mut log).map_err(fail)? {
+                language_blocks.entry(language).or_default().push(block);
+            }
+        }
+        shell_blocks.push(movie_block(shell_hash, &mercs2_formats::gfx::build_cfx_pack_block(shell_hash, &movie)).map_err(fail)?);
     }
     // The loaders load only what the set's builds ship, level by level.
     check_sound_loaders(
