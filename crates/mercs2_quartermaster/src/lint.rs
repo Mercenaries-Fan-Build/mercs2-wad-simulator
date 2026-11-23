@@ -49,20 +49,19 @@ pub enum Severity {
 
 /// Where the modding docs are published.
 ///
-/// Diagnostics print a URL rather than a path. The paths in [`Rule::doc`] resolve against a checkout
-/// of the notes repo, which a modder reading `qm lint` output in CI does not have and has no reason
-/// to — so `— see docs/aset_format.md` was an instruction to go find a file that, for them, does not
-/// exist anywhere.
-pub const DOC_BASE: &str =
-    "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/";
+/// Diagnostics print a URL rather than a path: a modder reading `qm lint` output in CI has no checkout to
+/// resolve `docs/aset_format.md` against. The rule docs are this repository's `docs/`, linked at the
+/// commit this qm is built from (`QM_DOC_REV`, set by `build.rs`), so each qm links the write-ups that
+/// describe its own rules.
+pub const DOC_BASE: &str = concat!("https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator/blob/", env!("QM_DOC_REV"), "/");
 
 /// A rule: stable code, one-line title, and where the trap is written up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rule {
     pub code: &'static str,
     pub title: &'static str,
-    /// Path within the notes repo, with an optional `#anchor`. Use [`Rule::url`] to show it to
-    /// anyone — the raw path is only meaningful to someone who has that repo checked out.
+    /// Path within this repository, with an optional `#anchor`. Use [`Rule::url`] to show it to
+    /// anyone — the raw path is only meaningful to someone who has the repository checked out.
     pub doc: &'static str,
 }
 
@@ -179,21 +178,26 @@ pub const M0211_RESERVED_NAME: Rule = Rule {
 pub const M0190_MOVIE_CARRIES_AS3: Rule = Rule {
     code: "M0190",
     title: "an added movie carries AS3 bytecode, which the GFx 2.0.48 runtime cannot execute",
-    doc: "docs/reverse_engineer/scaleform_gfx_class_map.md#1-sdk-version--settled",
+    doc: "docs/modding/manifest_format.md#add_movie",
 };
 
-/// String tables retail serves from BOTH `shell.wad` and `vz.wad`, per
-/// `docs/fixpack/wad_duplicate_inventory.md` §C. The language tables carry the shared UI chrome
-/// (button prompts, options, PDA), so editing one copy is a half-fix. A DLC module table
-/// (`english_dlc01`) lives in one place and is not on this list.
-pub const SHARED_STRING_TABLES: &[&str] = &[
-    "english", "french", "german", "italian", "spanish", "japanese",
-];
-
-pub const M0191_SHARED_STRING_TABLE: Rule = Rule {
-    code: "M0191",
-    title: "editing one copy of a string table shared between shell.wad and vz.wad is a half-fix",
-    doc: "docs/modding/manifest_format.md#edit_stringdb",
+/// M0320: an `add_menu_item`'s `menu` is no page of qm's menu catalogue (`data/menus.toml`).
+pub const M0320_MENU_PAGE_UNKNOWN: Rule = Rule {
+    code: "M0320",
+    title: "an add_menu_item's menu is no page of qm's menu catalogue",
+    doc: "docs/modding/manifest_format.md#add_menu_item",
+};
+/// M0321: an `add_menu_item`'s `action` is not `Module.Function`.
+pub const M0321_MENU_ACTION_FORM: Rule = Rule {
+    code: "M0321",
+    title: "an add_menu_item's action is not Module.Function",
+    doc: "docs/modding/manifest_format.md#add_menu_item",
+};
+/// M0322: an `add_menu_item`'s `label`, `after` or `help` is an empty key.
+pub const M0322_MENU_KEY_EMPTY: Rule = Rule {
+    code: "M0322",
+    title: "an add_menu_item names an empty string key",
+    doc: "docs/modding/manifest_format.md#add_menu_item",
 };
 pub const M0192_MOVIE_UNREFERENCED: Rule = Rule {
     code: "M0192",
@@ -342,7 +346,7 @@ pub const M0199_SIGNATURE_GUARD: Rule = Rule {
 /// An `add_script` whose Lua registers itself as a mission (its `name` appears as an
 /// `sModuleName = "…"` in a `tMissionData` row shipped by this Shipment, or a hook it emits) but
 /// whose top-level does not `inherit("MrxTask…")`. The engine's `_ModuleLoaded`
-/// ([mrxtask.lua:294](../mercs2-luacd/src/resident/mrxtask.lua)) replaces `oMission`'s metatable
+/// (`crates/mercs2_script/corpus/mercs2-luacd/src/resident/mrxtask.lua:294`) replaces `oMission`'s metatable
 /// with `{__index = <this module>}` at contract activation; missing inherit → `oMission:IsActive`,
 /// `:Configure`, `:SaveInstance`, `:Cleanup` all resolve to nil, `RefreshAllPdaMissionDetails`
 /// crashes on the first `:IsActive()`, the containing pcall unwinds, and the game degrades
@@ -368,7 +372,7 @@ pub const M0301_BARE_EVENT_CREATE: Rule = Rule {
 /// A Shipment's Lua writes to `_G.<name>` or `_MODULES[<name>]` at file scope — either directly
 /// pollutes the global environment or reaches into another module's namespace. Both surface as
 /// silent breakage: the engine's own writes to `_G` (via `dynamic_import`) crash a `__newindex`
-/// meta-hook at `0x0059C82A` (`docs/dlc_mission_loading.md`), and a module clobbered through
+/// meta-hook at `0x0059C82A` ([`docs/dlc_mission_loading.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/dlc_mission_loading.md)), and a module clobbered through
 /// `_MODULES` continues to be `import`ed but with unpredictable state. See
 /// `docs/modding/lua_engine_seam_hardening.md#qm--compile-time-correct-by-construction`.
 pub const M0302_GLOBAL_SHADOWING: Rule = Rule {
@@ -381,7 +385,7 @@ pub const M0302_GLOBAL_SHADOWING: Rule = Rule {
 /// `<Faction3><Con|Job><NN+>` naming shape (e.g. `PmcCon001`, `OilJob004`). The instant the player
 /// selects such a briefing from a starter root menu, `MrxUtil.ExplodeMissionName` returns
 /// `nNumber=nil`, and `GetSpielFileName` at
-/// [`mrxbriefing.lua:2849`](../../tools/wad_simulator/workshop_data/lua/resident/mrxbriefing.lua#L2849)
+/// `crates/mercs2_script/corpus/mercs2-luacd/src/resident/mrxbriefing.lua:2849`
 /// unconditionally does `string.format("%02d", nil)` → runtime error. The error propagates out of
 /// the dialog-selection handler before `_End` reaches `_Fade(false, _EndBegin)`; the UI tears
 /// down partially (`_ClientMenuBox` stays `true`, briefing camera stays locked). See F12 in
@@ -873,7 +877,7 @@ pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
 pub const M0009_NO_PRIMARY_ROW: Rule = Rule {
     code: "M0009",
     title: "replacing a texture that has no primary ASET row mints one, capturing every sharer",
-    doc: "docs/modernization/texture_extraction_notes.md",
+    doc: "docs/modding/manifest_format.md#replace_texture",
 };
 
 /// Every hermetic rule this build implements.
@@ -897,7 +901,6 @@ pub const RULES: &[Rule] = &[
     M0173_SELF_REFERENCE,
     M0178_DLL_NOT_LOADABLE,
     M0190_MOVIE_CARRIES_AS3,
-    M0191_SHARED_STRING_TABLE,
     M0197_SCRIPT_NAME_TAKEN,
     M0199_SIGNATURE_GUARD,
     M0200_LANGUAGE_NAME_UNUSABLE,
@@ -938,6 +941,9 @@ pub const RULES: &[Rule] = &[
     M0312_LIBRARY_LOAD_UNUSABLE,
     M0315_PCALL_IMPORT,
     M0316_FETCH_PACKAGE,
+    M0320_MENU_PAGE_UNKNOWN,
+    M0321_MENU_ACTION_FORM,
+    M0322_MENU_KEY_EMPTY,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -1002,7 +1008,7 @@ pub const PENDING: &[Rule] = &[
     Rule {
         code: "M0008",
         title: "small / non-square texture may hit the open page_count buffer-sizing livelock",
-        doc: "docs/reverse_engineer/render_core_code_map.md",
+        doc: "docs/modding/field_guide.md#trap-8--you-edited-a-block-and-now-the-heap-is-corrupt-the-packed_field-bug",
     },
 ];
 
@@ -1337,11 +1343,11 @@ pub const M0004_NO_ASET_ROW: Rule = Rule {
     doc: "docs/modding/field_guide.md#trap-1--your-mod-didnt-load-and-there-is-no-error",
 };
 
-/// M0180: a hash claimed by two blocks. Not HANG-class — the registry is first-writer-wins, so the
-/// outcome is defined — but one of the two contributions silently does nothing.
+/// M0180: an asset (a hash of one type) claimed by two blocks. Not HANG-class — the registry is
+/// first-writer-wins, so the outcome is defined — but one of the two contributions silently does nothing.
 pub const M0180_DUPLICATE_PRIMARY: Rule = Rule {
     code: "M0180",
-    title: "two blocks claim one asset hash — the later one is silently dropped",
+    title: "two blocks claim one asset (hash and type) — the later one is silently dropped",
     doc: "docs/modding/manifest_format.md#composition",
 };
 
@@ -2320,6 +2326,31 @@ fn display_dest(dest: crate::manifest::PlaceIn) -> String {
     }
 }
 
+/// M0320, M0321 and M0322 for one `add_menu_item`: its page is in qm's menu catalogue, its action is
+/// `Module.Function` (identifiers, as the dispatcher matches them), and no key it names is empty.
+fn menu_item_checks(index: usize, menu: &str, label: &str, after: &str, help: Option<&str>, action: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let error = |rule: Rule, message: String| Diagnostic { rule, severity: Severity::Error, message, at: Some(index), fix: None };
+    match crate::menu_items::pages() {
+        Ok(pages) if pages.iter().any(|p| p.id == menu) => {}
+        Ok(pages) => out.push(error(
+            M0320_MENU_PAGE_UNKNOWN,
+            format!("menu {menu:?} is no page of qm's menu catalogue; the pages are {}", pages.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", ")),
+        )),
+        Err(e) => out.push(error(M0320_MENU_PAGE_UNKNOWN, format!("qm's menu catalogue does not read: {e}"))),
+    }
+    let ident = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !action.split_once('.').is_some_and(|(m, f)| ident(m) && ident(f)) {
+        out.push(error(M0321_MENU_ACTION_FORM, format!("action {action:?} is not Module.Function (letters, digits and _ on either side of one dot)")));
+    }
+    for (field, key) in [("label", Some(label)), ("after", Some(after)), ("help", help)] {
+        if key.is_some_and(|k| mercs2_formats::stringdb::key_name(k).is_empty()) {
+            out.push(error(M0322_MENU_KEY_EMPTY, format!("{field} is an empty string key")));
+        }
+    }
+    out
+}
+
 /// M0252, M0253 and M0255 for one `add_fx`: the effect form lowers, the template name is one the
 /// engine's string reader holds, and the template declares exactly one `RedEffectComponent`. The
 /// effect form is read only with a `root`, and not when its path is already an error.
@@ -2739,31 +2770,12 @@ pub fn lint(
             }
             // `add_ui` ships the same movie an `add_movie` does. A movie path that is already an
             // error (M0110 / M0111) is not read: an escaping one would be read outside the Shipment.
+            Contribution::AddMenuItem { menu, label, after, help, action } => {
+                out.extend(menu_item_checks(index, menu, label, after, help.as_deref(), action));
+            }
             Contribution::AddMovie { name, movie } | Contribution::AddUi { name, movie } => {
                 if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
                     out.extend(movie_checks(index, name, root, movie));
-                }
-            }
-            Contribution::EditStringDb { target, .. } => {
-                // The shared UI tables are served from BOTH shell.wad (front end) and vz.wad
-                // (gameplay); an overlay reaches only one mount point, so a shared-string edit that
-                // ships as a single Shipment overlay is a half-fix. Advisory — the fix is a deploy
-                // question (mount last in every session, or ship a shell copy too), not a defect in
-                // the manifest — so amber, never red.
-                let t = target.to_ascii_lowercase();
-                if SHARED_STRING_TABLES.iter().any(|s| t == *s) {
-                    out.push(Diagnostic {
-                        rule: M0191_SHARED_STRING_TABLE,
-                        severity: Severity::Warning,
-                        message: format!(
-                            "`{target}` is served from BOTH shell.wad (front end) and vz.wad \
-                             (gameplay). One overlay reaches one mount point, so a shared UI string \
-                             edited here may show in only one. Deploy it to mount last in every \
-                             session, or ship a shell copy too."
-                        ),
-                        at: Some(index),
-                        fix: None,
-                    });
                 }
             }
             Contribution::AddFx { effect, template, .. } => {
@@ -3412,7 +3424,7 @@ pub fn blocks_build(diagnostics: &[Diagnostic]) -> bool {
 /// The MrxTask class family. An `add_script` that registers as a mission (its name is an
 /// `sModuleName` in this Shipment's Lua) must `inherit` one of these — every retail contract
 /// and job script does, from `pmccon001` (`inherit("MrxTaskContract")`) through the outpost /
-/// verify-set / destroy-set / destroy-type variants (`docs/mercs2-luacd/03_contracts_jobs.md`).
+/// verify-set / destroy-set / destroy-type variants ([`docs/mercs2-luacd/03_contracts_jobs.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-luacd/03_contracts_jobs.md)).
 /// A missing inherit is the [[custom-mission-inherit-mrxtask-required]] failure.
 const MRXTASK_BASES: &[&str] = &[
     "MrxTask",
@@ -3454,7 +3466,7 @@ fn inherits_mrxtask(source: &str) -> bool {
 /// that must inherit MrxTask.
 ///
 /// Simple character-walking scan: no regex dependency, and the field name is distinctive enough
-/// to have no false-positive class in shipped Lua (verified across `docs/mercs2-luacd/`).
+/// to have no false-positive class in shipped Lua (verified across `crates/mercs2_script/corpus/mercs2-luacd/src/`).
 fn scan_module_names(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = source.as_bytes();
@@ -3601,7 +3613,7 @@ fn enclosing_function_has_self(source: &str, at: usize) -> bool {
 ///
 /// `_G.<name> = …` writes to the global environment, competing with the engine's own globals
 /// and, worse, tripping the `__newindex` crash at `0x0059C82A` if a mod later installs one
-/// (`docs/dlc_mission_loading.md`). `_MODULES[<name>] = …` overwrites another module's table,
+/// ([`docs/dlc_mission_loading.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/dlc_mission_loading.md)). `_MODULES[<name>] = …` overwrites another module's table,
 /// bypassing every `import()`er of that module.
 fn scan_global_writes(source: &str) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
