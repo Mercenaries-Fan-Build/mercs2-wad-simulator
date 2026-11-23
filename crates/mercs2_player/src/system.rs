@@ -8,7 +8,7 @@
 //! | `0x004C9861` | `FUN_0062E810` | roster pass A |
 //! | `0x004C9869` | `FUN_0041FE20` | a per-player world **probe** — *not* a roster tick (§9.2) |
 //! | `0x004C9900` | `FUN_0062E7B0` | roster pass B |
-//! | `0x004c990c` | `FUN_00532f80` | the vehicle-control pump — **`vehicle_code_map.md:122`**, corroborated by `docs/data/vehicle_code_map.json` |
+//! | `0x004c990c` | `FUN_00532f80` | the vehicle-control pump — **`vehicle_code_map.md:122`**, corroborated by [`docs/data/vehicle_code_map.json`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/data/vehicle_code_map.json) |
 //!
 //! **Ordering, and a recorded tension.** `player_code_map.md` §1's *diagram* lists the vehicle pump
 //! *before* the roster passes, but publishes no address for it; the three roster/probe addresses it
