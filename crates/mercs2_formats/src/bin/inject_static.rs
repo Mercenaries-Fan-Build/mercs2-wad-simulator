@@ -3,7 +3,7 @@
 //! rejects → 0x004CC064). Replaces one drawing group's geometry with the mesh,
 //! encoded into the TEMPLATE's own vertex decl, and neutralises the other groups;
 //! decl/material/shader/chunk-layout are preserved. See
-//! docs/reverse_engineer/valid_model_structure_map.md.
+//! [`docs/reverse_engineer/valid_model_structure_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/valid_model_structure_map.md).
 //!
 //! Input template is a RAW UCFX container (as produced by `smuggler
 //! --dump-container`). Output is a RAW UCFX container ready for `smuggler
