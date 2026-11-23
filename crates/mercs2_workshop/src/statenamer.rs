@@ -1,11 +1,9 @@
 //! Naming the table values a clip is selected by — its Stance, Action and the other cells its
 //! label shows as hex — while the clip plays.
 //!
-//! **Homes.** A cracked name is written to both committed homes of cracked names: the notes repo's
-//! `docs/data/aset_discovered_names.json` (`notes_docs_dir` in `.mercs2-local.toml`, searched upward
-//! from this crate's checkout) and this crate's `data/aset_discovered_names.json`. The two are kept
-//! byte-identical: [`NameHomes::load`] and [`NameHomes::append`] refuse when they differ. Both live in
-//! a checkout, so a released binary has no homes and [`StateNamer::open`] says so.
+//! **Home.** A cracked name is written to the committed home of cracked names, this crate's
+//! `data/aset_discovered_names.json` ([`NameHome`]). It lives in a checkout, so a released binary has
+//! no home and [`StateNamer::open`] returns `None`.
 //!
 //! **Append** ([`append_entry`]). The name's `pandemic_hash_m2` is its key (`0x%08X`); the entry is
 //! added after the last one, in the file's `indent=2` layout, and the file keeps ending in `}` with
@@ -16,71 +14,54 @@
 //! nothing and with `_` in the order typed and, up to [`MAX_WORDS`] words, in every other order. The
 //! hash folds case, so case does not matter. Only an exact hash match is ever shown ([`matches`]).
 //!
-//! **Context** ([`Consumers`]). The notes repo's `docs/data/hash_candidates_by_consumer.tsv`
+//! **Context** ([`Consumers`]). This repository's `docs/data/hash_candidates_by_consumer.tsv`
 //! (written by `exemap hash-join`): for a value, the consumers that hold it and their known names.
 //!
-//! **Proposals** ([`Proposals`]). The notes repo's `docs/data/clip_name_proposals.tsv` (written by
+//! **Proposals** ([`Proposals`]). This repository's `docs/data/clip_name_proposals.tsv` (written by
 //! `mercs2_probe clip-names`): for a clip, the names its table rows crack to, each with its evidence.
-//! A proposal is only a candidate until Accept writes it to the homes.
+//! A proposal is only a candidate until Accept writes it to the home.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use mercs2_formats::hash::pandemic_hash_m2_bytes;
 
-/// The file both homes hold.
+/// The file the home is.
 pub const NAMES_FILE: &str = "aset_discovered_names.json";
-/// The consumer summary in the notes repo's `docs/data/`.
+/// The consumer summary in this repository's `docs/data/`.
 pub const CONSUMERS_FILE: &str = "hash_candidates_by_consumer.tsv";
-/// The clip-name proposals in the notes repo's `docs/data/`.
+/// The clip-name proposals in this repository's `docs/data/`.
 pub const PROPOSALS_FILE: &str = "clip_name_proposals.tsv";
 /// The most words [`word_orders`] permutes (5! × 2 = 240 candidates); more are tried as typed only.
 pub const MAX_WORDS: usize = 5;
 
-/// The two committed homes of cracked names.
+/// The committed home of cracked names.
 #[derive(Clone, Debug)]
-pub struct NameHomes {
-    pub docs: PathBuf,
-    pub krate: PathBuf,
+pub struct NameHome {
+    pub path: PathBuf,
 }
 
-impl NameHomes {
-    /// Both homes, found from the checkout at `start`. An error naming what is missing.
-    pub fn locate(start: &Path) -> Result<NameHomes, String> {
-        let notes_docs = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?;
-        let docs = crate::index::notes_data_file(&notes_docs, NAMES_FILE)?;
-        let krate = crate::index::crate_data_file(NAMES_FILE)?;
-        Ok(NameHomes { docs, krate })
+impl NameHome {
+    /// This crate's `data/aset_discovered_names.json` in the checkout this binary was built from. An
+    /// error naming it when it is missing.
+    pub fn locate() -> Result<NameHome, String> {
+        Ok(NameHome { path: crate::index::crate_data_file(NAMES_FILE)? })
     }
 
-    /// The text both homes hold; an error when they differ or either cannot be read.
     fn text(&self) -> Result<String, String> {
-        let a = std::fs::read_to_string(&self.docs).map_err(|e| format!("{}: {e}", self.docs.display()))?;
-        let b = std::fs::read_to_string(&self.krate).map_err(|e| format!("{}: {e}", self.krate.display()))?;
-        if a != b {
-            return Err(format!(
-                "{} and {} differ; they are kept identical, so reconcile them before naming",
-                self.docs.display(),
-                self.krate.display()
-            ));
-        }
-        Ok(a)
+        std::fs::read_to_string(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))
     }
 
-    /// Every name the homes hold, by hash.
+    /// Every name the home holds, by hash.
     pub fn load(&self) -> Result<HashMap<u32, String>, String> {
-        let text = self.text()?;
-        parse_names(&text, &self.docs.display().to_string())
+        parse_names(&self.text()?, &self.path.display().to_string())
     }
 
-    /// Add `name` to both homes; returns its hash.
+    /// Add `name` to the home; returns its hash.
     pub fn append(&self, name: &str) -> Result<u32, String> {
-        let text = self.text()?;
         let hash = pandemic_hash_m2_bytes(name.as_bytes());
-        let out = append_entry(&text, hash, name)?;
-        for p in [&self.docs, &self.krate] {
-            std::fs::write(p, &out).map_err(|e| format!("{}: {e}", p.display()))?;
-        }
+        let out = append_entry(&self.text()?, hash, name)?;
+        std::fs::write(&self.path, &out).map_err(|e| format!("{}: {e}", self.path.display()))?;
         Ok(hash)
     }
 }
@@ -273,31 +254,39 @@ impl Consumers {
     }
 }
 
-/// What the clip panel names with: the homes it writes, the consumer context it shows, and the clip
+/// What the clip panel names with: the home it writes, the consumer context it shows, and the clip
 /// names proposed for review (or why there are none).
 pub struct StateNamer {
-    pub homes: NameHomes,
+    pub home: NameHome,
     pub consumers: Consumers,
     pub proposals: Result<Proposals, String>,
 }
 
 impl StateNamer {
-    /// Open from this crate's checkout; returns the namer and the names its homes already hold.
-    pub fn open() -> Result<(StateNamer, HashMap<u32, String>), String> {
-        let start = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let homes = NameHomes::locate(start)?;
-        let names = homes.load()?;
-        let notes_docs = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?;
-        let tsv = crate::index::notes_data_file(&notes_docs, CONSUMERS_FILE)?;
+    /// What [`StateNamer::open`]'s `None` means, for the clip panel to show.
+    pub fn no_checkout() -> String {
+        format!("{} is not on this machine", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    /// Open from this crate's checkout; returns the namer and the names its home already holds.
+    /// `None` when the checkout this binary was built from is not on this machine (a released
+    /// binary); an error when the checkout is here and a file the namer reads is missing or bad.
+    pub fn open() -> Result<Option<(StateNamer, HashMap<u32, String>)>, String> {
+        if !std::path::Path::new(env!("CARGO_MANIFEST_DIR")).is_dir() {
+            return Ok(None);
+        }
+        let home = NameHome::locate()?;
+        let names = home.load()?;
+        let tsv = crate::index::repo_data_file(CONSUMERS_FILE)?;
         let text = std::fs::read_to_string(&tsv).map_err(|e| format!("{}: {e}", tsv.display()))?;
         let consumers = Consumers::parse(&text, &tsv.display().to_string())?;
-        let proposals = crate::index::notes_data_file(&notes_docs, PROPOSALS_FILE)
+        let proposals = crate::index::repo_data_file(PROPOSALS_FILE)
             .map_err(|e| format!("{e}; `mercs2_probe clip-names <that path>` writes it"))
             .and_then(|p| {
                 let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
                 Proposals::parse(&text, &p.display().to_string())
             });
-        Ok((StateNamer { homes, consumers, proposals }, names))
+        Ok(Some((StateNamer { home, consumers, proposals }, names)))
     }
 }
 
@@ -332,19 +321,27 @@ mod tests {
     }
 
     #[test]
-    fn diverged_homes_are_refused() {
+    fn an_appended_name_is_read_back_from_the_home() {
         let dir = std::env::temp_dir().join(format!("statenamer_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let homes = NameHomes { docs: dir.join("a.json"), krate: dir.join("b.json") };
-        std::fs::write(&homes.docs, FILE).unwrap();
-        std::fs::write(&homes.krate, FILE).unwrap();
-        assert_eq!(homes.append("exit").unwrap(), pandemic_hash_m2_bytes(b"exit"));
-        assert_eq!(std::fs::read(&homes.docs).unwrap(), std::fs::read(&homes.krate).unwrap());
-        std::fs::write(&homes.krate, FILE).unwrap();
-        let before = std::fs::read(&homes.docs).unwrap();
-        assert!(homes.append("pause").unwrap_err().contains("differ"));
-        assert_eq!(std::fs::read(&homes.docs).unwrap(), before, "nothing is written when the homes differ");
+        let home = NameHome { path: dir.join("names.json") };
+        std::fs::write(&home.path, FILE).unwrap();
+        let h = home.append("exit").unwrap();
+        assert_eq!(h, pandemic_hash_m2_bytes(b"exit"));
+        assert_eq!(home.load().unwrap()[&h], "exit");
+        let before = std::fs::read(&home.path).unwrap();
+        assert!(home.append("exit").unwrap_err().contains("already named"));
+        assert_eq!(std::fs::read(&home.path).unwrap(), before, "nothing is written when a name is refused");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The namer opens from the checkout with no local configuration: the home, the consumer
+    /// summary and the proposals are all committed in this repository.
+    #[test]
+    fn the_namer_opens_from_the_checkout() {
+        let (namer, names) = StateNamer::open().unwrap().expect("the tests run from the checkout");
+        assert!(!names.is_empty());
+        assert!(namer.proposals.is_ok(), "{:?}", namer.proposals.as_ref().err());
     }
 
     #[test]
