@@ -37,21 +37,26 @@ fn usable_level(td: &TextureData) -> u32 {
 pub fn decode_bc(td: &TextureData) -> (u32, u32, Vec<u8>) {
     let level = usable_level(td);
     let (w, h) = ((td.width >> level).max(1) as usize, (td.height >> level).max(1) as usize);
+    (w as u32, h as u32, decode_surface(&td.mip0, w, h, td.format))
+}
+
+/// One `w`×`h` surface of `data` to straight-alpha RGBA8; a block past the end of `data` stays zero.
+fn decode_surface(data: &[u8], w: usize, h: usize, format: TexFormat) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 4];
     let bw = w.div_ceil(4);
     let bh = h.div_ceil(4);
-    let block_bytes = match td.format {
+    let block_bytes = match format {
         TexFormat::Bc1 => 8,
         TexFormat::Bc3 => 16,
     };
     for by in 0..bh {
         for bx in 0..bw {
             let off = (by * bw + bx) * block_bytes;
-            if off + block_bytes > td.mip0.len() {
+            if off + block_bytes > data.len() {
                 continue;
             }
-            let block = &td.mip0[off..off + block_bytes];
-            let texels = match td.format {
+            let block = &data[off..off + block_bytes];
+            let texels = match format {
                 TexFormat::Bc1 => decode_bc1_block(block, true),
                 TexFormat::Bc3 => decode_bc3_block(block),
             };
@@ -66,7 +71,34 @@ pub fn decode_bc(td: &TextureData) -> (u32, u32, Vec<u8>) {
             }
         }
     }
-    (w as u32, h as u32, out)
+    out
+}
+
+/// One decoded mip level: its level number, size and straight-alpha RGBA8.
+pub struct Level {
+    pub level: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Every mip level `td.all_mips` holds whole, finest first: from the finest level its data covers
+/// ([`usable_level`] of the chain), each surface after the last, below the `mip_count` levels the
+/// container declares (`texture_encode::mip_count`: the chain stops at 4×4) and until the bytes end.
+pub fn decode_levels(td: &TextureData) -> Vec<Level> {
+    let chain = TextureData { mip0: td.all_mips.clone(), ..td.clone() };
+    let mut level = usable_level(&chain);
+    let mut at = 0usize;
+    let mut out = Vec::new();
+    while level < td.mip_count.max(1) {
+        let (w, h) = ((td.width >> level).max(1) as usize, (td.height >> level).max(1) as usize);
+        let len = surface_bytes(w, h, td.format);
+        let Some(data) = td.all_mips.get(at..at + len) else { break };
+        out.push(Level { level, width: w as u32, height: h as u32, rgba: decode_surface(data, w, h, td.format) });
+        at += len;
+        level += 1;
+    }
+    out
 }
 
 /// Mean of the blue channel of an RGBA8 buffer. A real tangent-space normal map is blue-dominant
