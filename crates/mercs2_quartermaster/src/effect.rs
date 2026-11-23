@@ -816,6 +816,27 @@ mod tests {
         }
     }
 
+    /// A form spelled otherwise than `express` writes it (a frame by its name, the authored order and
+    /// values) takes an edit to the effect it builds in place: the edited value's line changes and
+    /// every other line stays as the author wrote it.
+    #[test]
+    fn a_form_spelled_by_hand_takes_an_edit_in_place() {
+        for format in [Format::Yaml, Format::Toml] {
+            let text = to_string(&form(), format).unwrap();
+            assert_ne!(text, to_string(&EffectForm::express(&form().build().unwrap()), format).unwrap(), "{format:?}: the form is not express's spelling");
+            let mut fx = from_str(&text, format).unwrap().build().unwrap();
+            let size = fx.emitters[0].particle.attributes.iter_mut().find(|a| a.hash == pandemic_hash_m2("size")).unwrap();
+            size.value = AtrbValue::F32(1.5);
+            let out = crate::lossless::rewrite(&text, format, &fx, |t| from_str(t, format)?.build(), |x| to_string(&EffectForm::express(x), format))
+                .unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            assert!(out.contains("qm_cyan_disc"), "{format:?}: the frame keeps its name\n{out}");
+            assert_eq!(out.lines().count(), text.lines().count(), "{format:?}");
+            let changed: Vec<(&str, &str)> = text.lines().zip(out.lines()).filter(|(a, b)| a != b).collect();
+            assert_eq!(changed.len(), 1, "{format:?}: {changed:?}");
+            assert!(changed[0].1.contains("1.5"), "{format:?}: {changed:?}");
+        }
+    }
+
     fn lower_err(edit: impl Fn(&mut EffectForm)) -> String {
         let mut f = form();
         edit(&mut f);
