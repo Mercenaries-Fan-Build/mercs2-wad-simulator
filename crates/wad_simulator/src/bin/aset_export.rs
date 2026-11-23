@@ -83,8 +83,9 @@ struct Cli {
     /// by `asset_gap_probe --emit`). When given, these tables are exactly the set
     /// loaded. When absent, the set is `rainbow_table` from `.mercs2-local.toml`,
     /// the `aset_*_names.json` fragments in `crates/mercs2_workshop/data/`, and the
-    /// identifier-shaped names of this repository's `docs/data/aset_block_strings.json`
-    /// minus `crates/mercs2_workshop/data/rejected_names.json`. Every table must load.
+    /// identifier-shaped names of this repository's `docs/data/aset_block_strings.json`,
+    /// each minus the pairs of `crates/mercs2_workshop/data/rejected_names.json`. Every table
+    /// must load.
     #[arg(long)]
     rainbow: Vec<PathBuf>,
 
@@ -165,13 +166,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (`vz_veh_tank_amx30_base`), found per-model against its own hash (T=1).
             data.join("aset_variant_names.json"),
         ];
-        let mut t = RainbowTable::load_many(&first).map_err(|e| format!("load rainbow tables {first:?}: {e}"))?;
+        // A pair on the reject list is no name in whichever table carries it: dropped from each
+        // table before the merge, so the next table's name for that hash is the one taken.
+        let rejected = RainbowTable::load_rejected(&data.join("rejected_names.json"))?;
+        let mut t = RainbowTable::default();
+        for p in &first {
+            t.merge(RainbowTable::load(p).map_err(|e| format!("load rainbow table {}: {e}", p.display()))?.without(&rejected));
+        }
         let harvested = notes.join("aset_block_strings.json");
         t.merge(
             RainbowTable::load_harvested(&harvested, &data.join("rejected_names.json"))
                 .map_err(|e| format!("load {}: {e}", harvested.display()))?,
         );
-        t.merge(RainbowTable::load_many(&rest).map_err(|e| format!("load rainbow tables {rest:?}: {e}"))?);
+        for p in &rest {
+            t.merge(RainbowTable::load(p).map_err(|e| format!("load rainbow table {}: {e}", p.display()))?.without(&rejected));
+        }
         t
     } else {
         RainbowTable::load_many(&cli.rainbow).map_err(|e| format!("load rainbow tables {:?}: {e}", cli.rainbow))?

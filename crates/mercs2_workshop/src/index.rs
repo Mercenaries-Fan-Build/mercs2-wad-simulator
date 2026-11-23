@@ -7,6 +7,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use mercs2_engine::spawn::Archetype;
+use mercs2_engine::vehicle::components::VehicleClass;
 use mercs2_engine::wad;
 
 /// How the Library previews a category, stated HONESTLY.
@@ -149,6 +151,10 @@ pub struct AssetRow {
     pub faction: Option<u32>,
     /// An effect row with no name: the `Name`s of the templates that start it.
     pub started_by: Option<String>,
+    /// A model row: what the world's templates that name the model are, by the engine's rule
+    /// (`mercs2_engine::worldutil::TemplateRecords::archetypes`: the physics record a template
+    /// carries), each archetype once. Empty when no template names the model or every one is a prop.
+    pub archetypes: Vec<Archetype>,
 }
 
 impl AssetRow {
@@ -185,27 +191,57 @@ impl AssetRow {
         }
     }
 
-    /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
-    /// off the `<faction>_veh_<class>_<name>` naming convention (plus a few irregular names like
-    /// `uh1huey`). The class token after `_veh_` is normalised into the 12-type taxonomy from
+    /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle, in the 12-type
+    /// taxonomy of
     /// [`docs/reverse_engineer/valid_model_structure_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/valid_model_structure_map.md) §6.
+    ///
+    /// A model a vehicle template names ([`Self::archetypes`]) is a vehicle whatever its name says,
+    /// and with no name at all. Its class is the one its name spells ([`named_vehicle_class`]) when
+    /// the template's physics simulates that class ([`simulates`]): a truck and a car both run on
+    /// `_CarPhysicsV2`, and only the name tells them apart. A name that spells no class, or one the
+    /// physics does not simulate, leaves the physics' own class ([`drive_class`]); templates of
+    /// several physics with no such name leave `other`.
+    ///
+    /// A model no vehicle template names is classed by its name alone. The support aircraft, the
+    /// destroyers and the emplaced guns are among them: their templates carry no vehicle physics.
     pub fn vehicle_class(&self) -> Option<&'static str> {
-        let n = self.name.as_ref()?.to_ascii_lowercase();
-        let cls = n.split("_veh_").nth(1)?.split('_').next().unwrap_or("");
-        Some(classify_vehicle_token(cls))
+        let named = self.name.as_deref().and_then(named_vehicle_class);
+        let drives: Vec<VehicleClass> = self
+            .archetypes
+            .iter()
+            .filter_map(|a| match a {
+                Archetype::Vehicle(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+        if drives.is_empty() {
+            return named;
+        }
+        if let Some(c) = named.filter(|c| drives.iter().any(|d| simulates(*d).contains(c))) {
+            return Some(c);
+        }
+        match drives.as_slice() {
+            [d] => Some(drive_class(*d)),
+            _ => Some("other"),
+        }
     }
 
-    /// The browser's grouping bucket for this asset, derived from the `<faction>_<domain>_…` naming
-    /// convention: vehicles break out by class, then characters / buildings / weapons / props /
-    /// world-state / other. Drives the grouped model navigator. `Unnamed` = hash-only rows.
+    /// The browser's grouping bucket for this asset: a vehicle by its class
+    /// ([`Self::vehicle_class`]), a model a character template names ([`Self::archetypes`]) under
+    /// Character, and every other named model by the `<faction>_<domain>_…` naming convention
+    /// (characters / buildings / weapons / props / world-state / other). Drives the grouped model
+    /// navigator. `Unnamed` = hash-only rows no vehicle or character template names.
     pub fn category(&self) -> &'static str {
         if self.template.is_some() {
             return "Character";
         }
-        let Some(name) = self.name.as_ref() else { return "Unnamed" };
         if let Some(c) = self.vehicle_class() {
             return vehicle_display(c);
         }
+        if self.archetypes.contains(&Archetype::Character) {
+            return "Character";
+        }
+        let Some(name) = self.name.as_ref() else { return "Unnamed" };
         let n = name.to_ascii_lowercase();
         if n.contains("hum_") || n.contains("_hum") || n.contains("civ_") || n.contains("merc") {
             "Character"
@@ -438,6 +474,42 @@ pub fn category_order(cat: &str) -> usize {
     CATEGORY_ORDER.iter().position(|&c| c == cat).unwrap_or(CATEGORY_ORDER.len())
 }
 
+/// The vehicle class a model name spells: the token after `_veh_` in
+/// `<faction>_veh_<class>_<name>`, through [`classify_vehicle_token`]. `None` for a name with no
+/// `_veh_` token.
+pub fn named_vehicle_class(name: &str) -> Option<&'static str> {
+    let n = name.to_ascii_lowercase();
+    let cls = n.split("_veh_").nth(1)?.split('_').next().unwrap_or("");
+    Some(classify_vehicle_token(cls))
+}
+
+/// The class of a vehicle known only by its physics: `_CarPhysicsV2` is a car, `_TankPhysics` a
+/// tank, `_BoatPhysics` a boat, `_HelicopterPhysics` a helicopter, `_JetPhysics` a jet.
+pub fn drive_class(d: VehicleClass) -> &'static str {
+    match d {
+        VehicleClass::Car => "car",
+        VehicleClass::Bike => "motorcycle",
+        VehicleClass::Tank => "tank",
+        VehicleClass::Boat => "boat",
+        VehicleClass::Helicopter => "helicopter",
+        VehicleClass::Jet => "jet",
+    }
+}
+
+/// The name classes a physics simulates: every class retail's vehicle templates pair it with
+/// (`mercs2_probe model-names` prints the pairs). The wheeled APCs run on the car physics and the
+/// tracked ones on the tank physics; the F-35B has a helicopter template and a jet one.
+pub fn simulates(d: VehicleClass) -> &'static [&'static str] {
+    match d {
+        VehicleClass::Car => &["car", "truck", "van", "semi", "trailer", "towed", "motorcycle", "apc"],
+        VehicleClass::Bike => &["motorcycle"],
+        VehicleClass::Tank => &["tank", "apc"],
+        VehicleClass::Boat => &["boat"],
+        VehicleClass::Helicopter => &["helicopter", "vtol"],
+        VehicleClass::Jet => &["jet", "vtol"],
+    }
+}
+
 /// Normalise a `_veh_<token>_` class token into the model-structure-map taxonomy.
 pub fn classify_vehicle_token(cls: &str) -> &'static str {
     if cls.contains("heli") || cls.starts_with("uh1") || cls.contains("huey") || cls.contains("copter") {
@@ -610,7 +682,7 @@ impl AssetIndex {
                 } else {
                     0
                 };
-                let fresh = AssetRow { hash, type_id: ty, block, src, others: Vec::new(), name: None, template: None, faction: None, started_by: None };
+                let fresh = AssetRow { hash, type_id: ty, block, src, others: Vec::new(), name: None, template: None, faction: None, started_by: None, archetypes: Vec::new() };
                 match buckets[i].get_mut(&hash) {
                     None => {
                         buckets[i].insert(hash, fresh);
@@ -658,7 +730,8 @@ impl AssetIndex {
     /// character-kit outfit), labelled by the template's `Name`, beside its kit's own row. A template
     /// whose model has no row in the catalog adds nothing. `world` is every template that names a
     /// model, which the faction labels are learned from. The rotor records and helicopter keys are
-    /// kept for vehicle previews. Returns how many rows were added.
+    /// kept for vehicle previews. Every model row takes the archetypes of the templates that name it
+    /// ([`AssetRow::archetypes`]). Returns how many rows were added.
     pub fn add_kit_templates(&mut self, t: &crate::app::KitTemplates) -> usize {
         let (templates, world) = (&t.kits, &t.all);
         let Some(mi) = Kind::ALL.iter().position(|k| *k == Kind::Model) else { return 0 };
@@ -666,6 +739,9 @@ impl AssetIndex {
         self.rotor_records = t.rotors.clone();
         self.helicopter_keys = t.helicopters.clone();
         self.effect_starters = t.effect_starters.clone();
+        for r in self.rows[mi].iter_mut() {
+            r.archetypes = t.archetypes.get(&r.hash).cloned().unwrap_or_default();
+        }
         let mut added = Vec::new();
         for t in templates {
             let (Some(name), Some(kit)) = (&t.name, self.rows[mi].iter().find(|r| r.hash == t.model && r.template.is_none()))
@@ -1230,7 +1306,57 @@ mod tests {
     }
 
     fn row(hash: u32, template: Option<&str>) -> AssetRow {
-        AssetRow { hash, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: template.map(str::to_string), faction: None, started_by: None }
+        AssetRow { hash, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: template.map(str::to_string), faction: None, started_by: None, archetypes: Vec::new() }
+    }
+
+    /// Retail models with the physics of the templates that name them (`mercs2_probe model-names`).
+    #[test]
+    fn a_vehicle_template_decides_the_class_and_the_name_refines_it() {
+        use mercs2_engine::spawn::Archetype::{self, Character, Vehicle};
+        use mercs2_engine::vehicle::components::VehicleClass::{Boat, Car, Helicopter, Jet, Tank};
+        let class = |name: Option<&str>, archetypes: &[Archetype]| {
+            let mut r = row(1, None);
+            r.name = name.map(str::to_string);
+            r.archetypes = archetypes.to_vec();
+            (r.vehicle_class(), r.category())
+        };
+        // The pirate technical 0x19676216 (`T300` templates) under the name a grammar sweep gave
+        // it, and a car the table has no name for (0x3CAC72AB, `RTR (crappy)`).
+        assert_eq!(class(Some("proutpost_bld_hq_ruin_lod.propattach07_ruin_lod1"), &[Vehicle(Car)]), (Some("car"), "Car"));
+        assert_eq!(class(None, &[Vehicle(Car)]), (Some("car"), "Car"));
+        // The name tells a truck, a semi and a wheeled APC from a car, and a tracked APC from a tank.
+        assert_eq!(class(Some("vz_veh_truck_m35"), &[Vehicle(Car)]), (Some("truck"), "Truck"));
+        assert_eq!(class(Some("civ_veh_semi_austin"), &[Vehicle(Car)]).0, Some("semi"));
+        assert_eq!(class(Some("pmc_veh_motorcycle_r71_sidecar"), &[Vehicle(Car)]).0, Some("motorcycle"));
+        assert_eq!(class(Some("ch_veh_apc_wz551"), &[Vehicle(Car), Vehicle(Boat)]).0, Some("apc"));
+        assert_eq!(class(Some("gr_veh_apc_m113"), &[Vehicle(Tank)]), (Some("apc"), "APC"));
+        assert_eq!(class(Some("al_veh_vtol_f35b"), &[Vehicle(Jet), Vehicle(Helicopter)]).0, Some("vtol"));
+        assert_eq!(class(Some("vz_veh_helicopter_mi35hind"), &[Vehicle(Helicopter)]).0, Some("helicopter"));
+        // `global_veh_fordf150` spells the vehicle where the class goes: the physics' class is left.
+        assert_eq!(class(Some("global_veh_fordf150"), &[Vehicle(Car)]), (Some("car"), "Car"));
+        // A class the physics does not simulate does not stand, and several physics with no
+        // class they share leave `other`.
+        assert_eq!(class(Some("vz_veh_truck_m38_cab116_damage_nk"), &[Vehicle(Boat)]).0, Some("boat"));
+        assert_eq!(class(None, &[Vehicle(Car), Vehicle(Boat)]), (Some("other"), "Vehicle (other)"));
+        // No vehicle template: the name alone. The A-10's templates carry no vehicle physics.
+        assert_eq!(class(Some("al_veh_plane_a10"), &[]), (Some("jet"), "Jet"));
+        assert_eq!(class(None, &[]), (None, "Unnamed"));
+        // A character template: 0x34FF6DBD is `vz_hum_deathsquad_a`, which the table had as a building.
+        assert_eq!(class(Some("commercial_bld_corner04x26a"), &[Character]), (None, "Character"));
+        assert_eq!(class(None, &[Character]), (None, "Character"));
+    }
+
+    /// Every class a physics simulates is one the name classifier can produce, and each physics
+    /// simulates its own class.
+    #[test]
+    fn a_physics_simulates_classes_the_names_spell() {
+        use mercs2_engine::vehicle::components::VehicleClass::{Bike, Boat, Car, Helicopter, Jet, Tank};
+        for d in [Car, Bike, Tank, Boat, Helicopter, Jet] {
+            assert!(super::simulates(d).contains(&super::drive_class(d)), "{d:?}");
+            for c in super::simulates(d) {
+                assert_eq!(super::classify_vehicle_token(c), *c, "{d:?} simulates {c}, which no name token spells");
+            }
+        }
     }
 
     #[test]
@@ -1267,7 +1393,7 @@ mod tests {
     #[test]
     fn harvested_names_drop_debris() {
         let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
-        assert_eq!(rejected.len(), 8);
+        assert_eq!(rejected.len(), 18);
         for (h, n) in &rejected {
             assert_eq!(m2(n), *h, "{n}");
         }

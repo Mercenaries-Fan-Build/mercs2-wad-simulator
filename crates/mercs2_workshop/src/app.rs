@@ -10721,27 +10721,40 @@ pub(crate) fn load_kit_templates(w: &mut WadStack) -> Result<KitTemplates, Strin
             out.push(t);
         }
     }
+    let records = mercs2_engine::worldutil::TemplateRecords::from_worldentity(&we)?;
+    let mut archetypes: HashMap<u32, Vec<mercs2_engine::spawn::Archetype>> = HashMap::new();
+    for t in &all {
+        if let Some(&a) = records.archetypes.get(&t.key) {
+            let of_model = archetypes.entry(t.model).or_default();
+            if !of_model.contains(&a) {
+                of_model.push(a);
+            }
+        }
+    }
     Ok(KitTemplates {
         kits: out,
         all,
         rotors: mercs2_formats::rotor::rotor_records(&we)?,
         helicopters: mercs2_formats::rotor::helicopter_keys(&we),
+        archetypes,
         effect_starters: {
-            let names: HashMap<u32, String> = mercs2_engine::worldutil::TemplateRecords::from_worldentity(&we)?.names.into_iter().collect();
+            let names: HashMap<u32, String> = records.names.into_iter().collect();
             crate::vfxview::starters(&we, &names)?
         },
     })
 }
 
 /// The world's templates that name a model: `all` of them, and the `kits` among them — those
-/// that pick an outfit of a character kit — plus every template's `Rotor` records and the keys of
-/// the helicopter templates.
+/// that pick an outfit of a character kit — plus every template's `Rotor` records, the keys of
+/// the helicopter templates, and each model's `archetypes`: what the templates that name it are by
+/// the engine's rule (`mercs2_engine::worldutil::TemplateRecords::archetypes`), props left out.
 #[derive(Default)]
 pub(crate) struct KitTemplates {
     pub kits: Vec<mercs2_formats::mixr::KitTemplate>,
     pub all: Vec<mercs2_formats::mixr::KitTemplate>,
     pub rotors: Vec<(Vec<u32>, mercs2_formats::rotor::RotorRecord)>,
     pub helicopters: std::collections::BTreeSet<u32>,
+    pub archetypes: HashMap<u32, Vec<mercs2_engine::spawn::Archetype>>,
     pub effect_starters: HashMap<u32, Vec<crate::vfxview::StartedBy>>,
 }
 
@@ -12115,7 +12128,7 @@ mod rail_tests {
     }
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None, started_by: None }
+        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None, started_by: None, archetypes: Vec::new() }
     }
 
     /// A Lens pill's count is the number of rows the list shows under it, and the Lenses never
@@ -12219,6 +12232,7 @@ mod inspect_tests {
             template: None,
             faction: None,
             started_by: None,
+            archetypes: Vec::new(),
         };
         assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_STRINGDB)), Subject::StringTable);
         assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_FONT)), Subject::Other);
@@ -12510,6 +12524,36 @@ mod facefx_retail_tests {
         assert_eq!((jen.model, jen.actor), (m2("pmc_hum_jen"), m2("pmc_hum_jennifer")));
         let fiona = cast.sets[&m2("Global_Job_Briefing_Fiona")].as_ref().expect("Fiona's set");
         assert_eq!((fiona.template.as_str(), fiona.actor), ("Fiona Taylor", m2("pmc_hum_fiona")));
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod vehicle_class_retail_tests {
+    use super::{load_kit_templates, AssetIndex, WadStack};
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+
+    /// With no name table at all, retail's templates still class the models they name: the pirate
+    /// technical (`T300`), the three cars no name is known for (`RTR (crappy)`, `RTR (racing)`,
+    /// `Valiant (4door)`), and every other model of a template with vehicle physics. The support
+    /// aircraft's templates carry none, so only a name classes them.
+    #[test]
+    fn the_templates_class_retails_vehicles_with_no_name_table() {
+        let mut w = WadStack::open(&super::retail_vz_wad(), &[]).expect("open retail vz.wad");
+        let templates = load_kit_templates(&mut w).unwrap_or_else(|e| panic!("{e}"));
+        let mut index = AssetIndex::build(&w.wads, &[], std::collections::HashMap::new());
+        index.add_kit_templates(&templates);
+        let class = |h: u32| {
+            index.models().iter().find(|r| r.is(h, None)).unwrap_or_else(|| panic!("0x{h:08X}: no model row")).vehicle_class()
+        };
+        for h in [0x1967_6216, 0x3CAC_72AB, 0x9C3D_4104, 0x95F4_BA55] {
+            assert_eq!(class(h), Some("car"), "0x{h:08X}");
+        }
+        assert_eq!(class(m2("vz_veh_helicopter_mi35hind")), Some("helicopter"));
+        assert_eq!(class(m2("gr_veh_apc_m113")), Some("tank"));
+        assert_eq!(class(m2("vz_veh_boat_patrol")), Some("boat"));
+        assert_eq!(class(m2("al_veh_plane_a10")), None);
+        let vehicles = index.models().iter().filter(|r| r.template.is_none() && r.vehicle_class().is_some()).count();
+        assert_eq!(vehicles, 161, "retail's models of a template with vehicle physics");
     }
 }
 

@@ -131,7 +131,10 @@ zeros. Their tests are game-gated (`--features retail`) and read `memory_dumps_d
 * **Archive / naming**: `aset_probe` (every ASET row a name-hash owns + a multi-block striping
   census), `model_namer` (derives a model's name from the textures it uses, and can emit a rainbow-
   table name fragment), `kit_templates` (the resident worldentity's spawn templates that wear a given
-  model, by their `Name` — the in-game identity of an unnamed model).
+  model, by their `Name` — the in-game identity of an unnamed model), and the subcommand
+  `model-names` (every model's catalog name against the templates that name the model and the
+  textures it cites, with the engine archetype of those templates beside the name's `_veh_<class>_`
+  token; exits 1 while a model's own data spells another name than the catalog's).
 * **Water**: `watermap_probe` — resolves the `watr` singleton through `AssetSource::extract_singleton`
   and reports grid, world extent, wet/dry census, waterline range and the Layer 0 × Layer 1 cross-tab.
   The cross-tab is the regression guard on the 44-byte header: a wet cell carrying the dry sentinel

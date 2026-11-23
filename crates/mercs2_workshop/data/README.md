@@ -12,7 +12,7 @@ name, and every entry satisfies `m2(name) == hash`.
 | `aset_roster_names.json` | Model roots from the vehicle/weapon roster × the `<faction>_veh_<class>_<name>` grammar | `aset_external_mine --roster` |
 | `aset_model_names.json` | Model names derived from the textures each model uses | `mercs2_probe --bin model_namer` |
 | `aset_variant_names.json` | Decorated variants of named models (`vz_veh_tank_amx30_base`) | per-model search against its own hash |
-| `rejected_names.json` | Names harvested from block bytes that are collision debris: those with an identifier's shape (`wxfm0u`, `i4e2`, `csumoe9mucfxp`), and `j-cfe`, which `production_names.json` had taken in. Every reader of the harvest, and `--pack-data`'s read of `production_names.json`, drops these pairs | by hand, each hash checked |
+| `rejected_names.json` | Names that hash to an asset and are collision debris: harvested from block bytes with an identifier's shape (`wxfm0u`, `i4e2`, `csumoe9mucfxp`); `j-cfe`, which `production_names.json` had taken in; and names of a grammar that hash to a model whose own template spells another name (`vz_veh_truck_m38_cab116_damage_nk` on `jungle_env_junglewallfoliage04`), which `mercs2_probe model-names` lists as contradicted. Every reader of the harvest, `--pack-data`'s read of `production_names.json`, `tools/build_production_names.py` and every table `aset_export` loads by default drop these pairs | by hand, each hash checked |
 | `aset_names.tsv` | The ASET dictionary compiled into the binary (`0xHASH\tname`), applied over `names.bin` | `wad_simulator --bin aset_export --embed-tsv` |
 
 `live_registry_hashes.csv` (the live registry dump) and `spawnable_templates.csv` are here too, and
@@ -44,5 +44,10 @@ convention when nothing names it). Edited by hand; `index::ui_group_tests` check
    pair, and deletes `production_names.base.json`. The base is kept whole because the pack reaches only
    the archives at hand: a rebuild from `names.bin` alone loses every name of an archive it did not
    open.
-4. Commit `crates/mercs2_workshop/data/production_names.json`. Subsequent `--pack-data` runs build
+4. `mercs2_probe model-names` checks the new table against the game: each model's name against
+   the templates that name the model and the textures it cites. It exits 1 while a name is
+   contradicted (the model's own data spells another name that hashes to it). Add the right name to
+   `aset_discovered_names.json`, the wrong pair to `rejected_names.json`, remove the wrong name from
+   the fragment that carries it, and regenerate again until it exits 0.
+5. Commit `crates/mercs2_workshop/data/production_names.json`. Subsequent `--pack-data` runs build
    straight from it.
