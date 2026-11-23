@@ -31,7 +31,7 @@ return `None` from that seam (smoke/test hosts) make the `Hud.*` mutators no-ops
 ## Where it comes from
 
 The code map the crate cites is
-`docs/reverse_engineer/scaleform_gfx_class_map.md` (plus `docs/reverse_engineer/input_code_map.md`).
+[`docs/reverse_engineer/scaleform_gfx_class_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/scaleform_gfx_class_map.md) (plus [`docs/reverse_engineer/input_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/input_code_map.md)).
 
 Retail drives the HUD through a Scaleform GFx overlay; the shape of the model here is taken from the
 `Hud.*` / `Gui.*` cfunc surface those maps describe. Owned Lua namespaces for the system: `Hud`, `Pda`,
