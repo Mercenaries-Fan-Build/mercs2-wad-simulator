@@ -1,5 +1,5 @@
 //! Sound banks: `add_sound`, `replace_sound_bank` and `replace_sound_cue` lowered to the bank tables
-//! the engine loads (`docs/reverse_engineer/audio_code_map.md` §11).
+//! the engine loads ([`docs/reverse_engineer/audio_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/audio_code_map.md) §11).
 //!
 //! A bank named `N` is three tables — soundbank (ASET type 21), sounddb (13) and wavebank (6) — each a
 //! single-`data` UCFX container, all three entries of one block under the name hash `m2(N)` (§11.1).
