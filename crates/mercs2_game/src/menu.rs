@@ -2,7 +2,7 @@
 //!
 //! The retail front-end is a Lua shell state machine driving a Scaleform movie (`shell.gfx`):
 //! Lua calls `ChangeShellState("newGame"|...)` and the engine tears screens up/down
-//! (docs/ui/main_menu_structure.md, docs/ui/shell_menu_lua_anatomy.md). This module is that state
+//! ([`docs/ui/main_menu_structure.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/ui/main_menu_structure.md), [`docs/ui/shell_menu_lua_anatomy.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/ui/shell_menu_lua_anatomy.md)). This module is that state
 //! machine reimplemented natively, with the SAME option identity set as the retail menu strings
 //! (`autoContinue` / `newGame` / load / `quitGame`); the Scaleform movie is replaced by the
 //! engine's 2D UI pass until a GFx/SWF player exists. Save enumeration mirrors the retail
