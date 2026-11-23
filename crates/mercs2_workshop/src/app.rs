@@ -607,11 +607,22 @@ impl FacePlay {
     }
 }
 
+/// The layer the Depot's viewport draws for an open world item: what it reads, and the view it was
+/// read from (its id, the entities it marks, the selected record's entity).
+struct DepotLayer {
+    view: crate::layerview::LayerView,
+    shown: crate::depotworld::View,
+    /// The entity the camera was last framed on for the selection.
+    focus: Option<u32>,
+}
+
 /// Everything loaded for the model currently on the preview pedestal.
 struct Preview {
     hash: u32,
     label: String,
     entity: Entity,
+    /// The scope the scene keeps `entity`'s world under.
+    scope: mercs2_engine::scene::WorldScope,
     rig: Vec<BoneRig>,
     /// Bind-pose palette (identity at bind) — restored when animation is switched off.
     bind: Vec<[[f32; 4]; 4]>,
@@ -689,6 +700,110 @@ struct Preview {
     radius: f32,
 }
 
+/// A clip's time `dt` on from `t`: wrapped into the clip when `looping`, else held at its end. With
+/// whether it still plays.
+fn advance_clip(t: f32, dt: f32, duration: f32, looping: bool) -> (f32, bool) {
+    let dur = duration.max(1e-3);
+    let next = t + dt;
+    match (looping, next >= dur) {
+        (true, _) => (next % dur, true),
+        (false, true) => (dur, false),
+        (false, false) => (next, true),
+    }
+}
+
+/// The skin palette of preview `p` posed by `ca` at time `t`, with `replace`'s bones (FaceFX's) set
+/// over the clip's. A retargeted import drives its own skeleton with the source skeleton's per-bone
+/// world rotation deltas, so the mesh is not deformed.
+fn clip_palette(p: &Preview, ca: &ClipAnim, t: f32, replace: &[(usize, mercs2_formats::anim::QsTransform)]) -> Vec<[[f32; 4]; 4]> {
+    let sample = ca.clip.sample_local(t);
+    match &p.retarget_source {
+        Some((source_rig, target_to_source)) => pose::havok_palette_retarget_cross(
+            &p.rig,
+            source_rig,
+            target_to_source,
+            &sample,
+            &ca.track_to_hier,
+            ca.num_transform_tracks,
+        ),
+        None => pose::havok_palette_in_place_replacing(&p.rig, &sample, &ca.track_to_hier, ca.num_transform_tracks, replace),
+    }
+}
+
+/// The clip an open animation item plays on the Depot's hero (`depotanim::Want`), and for a replace
+/// the shipped clip on a second copy of the hero beside it, on one clock.
+struct DepotAnim {
+    id: String,
+    clip_id: String,
+    /// The asset the clip ships as, for the viewport's chip.
+    label: String,
+    hero: u32,
+    /// The item's clip bound to the hero; `None` when its files do not read.
+    yours: Option<Result<ClipAnim, String>>,
+    /// For a replace: the shipped clip bound to the hero, and the copy of the hero it plays on.
+    shipped: Option<(Result<ClipAnim, String>, Entity)>,
+    time: f32,
+    playing: bool,
+    looping: bool,
+}
+
+impl DepotAnim {
+    /// The clock's length: the item's clip's, else the shipped clip's.
+    fn duration(&self) -> f32 {
+        match (&self.yours, &self.shipped) {
+            (Some(Ok(ca)), _) | (_, Some((Ok(ca), _))) => ca.clip.duration,
+            _ => 0.0,
+        }
+    }
+
+    /// Apply the transport asked this frame.
+    fn act(&mut self, a: crate::depotanim::AnimAct) {
+        use crate::depotanim::AnimAct;
+        match a {
+            AnimAct::Play => {
+                if !self.looping && self.time >= self.duration() {
+                    self.time = 0.0;
+                }
+                self.playing = true;
+            }
+            AnimAct::Pause => self.playing = false,
+            AnimAct::Restart => {
+                self.time = 0.0;
+                self.playing = true;
+            }
+            AnimAct::Seek(t) => {
+                self.time = t.clamp(0.0, self.duration());
+                self.playing = false;
+            }
+            AnimAct::Loop(on) => self.looping = on,
+        }
+    }
+
+    /// What the page shows of it.
+    fn live(&self) -> crate::depotanim::Live {
+        crate::depotanim::Live {
+            id: self.id.clone(),
+            time: self.time,
+            duration: self.duration(),
+            playing: self.playing,
+            looping: self.looping,
+            yours: self.yours.as_ref().map(|r| r.as_ref().map(|_| ()).map_err(Clone::clone)),
+            shipped: self.shipped.as_ref().map(|(r, _)| r.as_ref().map(|_| ()).map_err(Clone::clone)),
+        }
+    }
+
+    /// Take the copy of the hero away, and put the hero back at its bind pose.
+    fn close(self, (world, scope): (&mut World, mercs2_engine::scene::WorldScope), scene: &mut Scene, hero: Option<&Preview>) {
+        if let Some((_, e)) = self.shipped {
+            world.despawn(e).ok();
+            scene.forget_entity(scope, e);
+        }
+        if let Some(p) = hero.filter(|p| p.hash == self.hero) {
+            let _ = world.insert_one(p.entity, SkinPalette { mats: p.bind.clone() });
+        }
+    }
+}
+
 impl Preview {
     /// The rotor speed the rotors read: the helicopter's, else 0.
     fn rotor_speed(&self) -> f32 {
@@ -726,7 +841,7 @@ impl Preview {
             }
         }
         self.node_enable = rs.node_enable.clone();
-        scene.set_entity_render_state(self.entity, rs);
+        scene.set_entity_render_state(self.scope, self.entity, rs);
         Ok(())
     }
 }
@@ -964,6 +1079,8 @@ enum Act {
     LoadDonorRef,
     /// Load a model by hash onto the preview pedestal (Model Workbench inventory click).
     LoadModelHash(u32, String),
+    /// Load a model by hash into the Depot's own preview (an opened item's subject).
+    DepotLoadModel(u32, String),
     /// Library: show a texture's plate straight from the catalog.
     LoadTexture(u32, String),
     /// Library routing: start a contribution of `kind` with this asset as its donor/target,
@@ -1013,6 +1130,9 @@ enum Workbench {
     Mods,
     /// Retarget a Source-rigged (ValveBiped / Mixamo / Unreal) import onto a Mercs2 HIER skeleton.
     Skeleton,
+    /// The Depot (`crate::depotpage`): the modder's own items, Draft or Ready, in one workspace
+    /// folder. A Shipment packages copies of them (`docs/modernization/workshop_pages/depot.md`).
+    Depot,
     /// The Shipment accumulator: the contribution queue, what each one touches, the linter, and the
     /// build. Every domain's edits land in the same Shipment, so this is where it is assembled.
     Quartermaster,
@@ -1036,12 +1156,13 @@ impl Workbench {
     /// not top-level peers."* They are craft — they act on ONE contribution — so they are entered
     /// from the Shipment page and return to it, rather than being places you navigate to and then
     /// have to remember what you were assembling.
-    const ALL: [Workbench; 7] = [
+    const ALL: [Workbench; 8] = [
         Workbench::Inspect,
         Workbench::Saves,
         Workbench::Domain(crate::domain::Domain::Driving),
         Workbench::Domain(crate::domain::Domain::Missions),
         Workbench::Domain(crate::domain::Domain::Systems),
+        Workbench::Depot,
         Workbench::Quartermaster,
         Workbench::Settings,
     ];
@@ -1085,7 +1206,9 @@ impl Workbench {
         match self {
             // Saves composes its own centre (hero card + HUD overlays + progression tabs) rather
             // than painting over the 3D viewport, so the HUD chips stay suppressed here.
-            Workbench::Quartermaster | Workbench::Settings | Workbench::Saves | Workbench::Live => false,
+            Workbench::Quartermaster | Workbench::Depot | Workbench::Settings | Workbench::Saves | Workbench::Live => {
+                false
+            }
             // A model-browsing domain shows the loaded model; audio/missions/systems do not.
             Workbench::Domain(d) => d.browses_models(),
             _ => true,
@@ -1097,6 +1220,7 @@ impl Workbench {
             Workbench::Saves => "Saves",
             Workbench::Mods => "Mods",
             Workbench::Skeleton => "Skeleton",
+            Workbench::Depot => "Depot",
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
             Workbench::Live => "Live",
@@ -1112,6 +1236,7 @@ impl Workbench {
             Workbench::Saves => crate::gui::theme::RailIcon::Saves,
             Workbench::Mods => crate::gui::theme::RailIcon::Mods,
             Workbench::Skeleton => crate::gui::theme::RailIcon::Skeleton,
+            Workbench::Depot => crate::gui::theme::RailIcon::Depot,
             Workbench::Quartermaster => crate::gui::theme::RailIcon::Quartermaster,
             Workbench::Settings => crate::gui::theme::RailIcon::Settings,
             Workbench::Live => crate::gui::theme::RailIcon::Live,
@@ -1125,12 +1250,33 @@ impl Workbench {
             Workbench::Saves => "Saves",
             Workbench::Mods => "Fit to donor",
             Workbench::Skeleton => "Retarget rig",
+            Workbench::Depot => "Depot",
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
             Workbench::Live => "Live",
             Workbench::Domain(d) => d.label(),
         }
     }
+}
+
+/// Settings › Depot workspace › Choose folder…: pick a folder, check it is a readable folder, and
+/// save it. `None` when the picker was cancelled. A folder that fails the check, or a settings file
+/// that cannot be written, leaves the saved workspace as it was.
+fn choose_depot_dir(cfg: &mut crate::settings::Settings) -> Option<Result<String, String>> {
+    let p = crate::settings::pick_depot_dir()?;
+    let desc = match crate::depot::check_root(&p) {
+        Ok(d) => d,
+        Err(e) => return Some(Err(e)),
+    };
+    let mut next = cfg.clone();
+    next.depot_dir = Some(p.clone());
+    Some(match next.save() {
+        Ok(f) => {
+            *cfg = next;
+            Ok(format!("Depot workspace {} ({desc}); saved to {}.", p.display(), f.display()))
+        }
+        Err(e) => Err(format!("Could not save: {e}")),
+    })
 }
 
 /// The page that implements a bench: Retarget is the Skeleton workbench, Fit the Mods one.
@@ -1152,15 +1298,17 @@ pub(crate) enum SettingsSection {
     Game,
     Data,
     Shipments,
+    Depot,
     Shortcuts,
     About,
 }
 
 impl SettingsSection {
-    pub(crate) const ALL: [SettingsSection; 5] = [
+    pub(crate) const ALL: [SettingsSection; 6] = [
         SettingsSection::Game,
         SettingsSection::Data,
         SettingsSection::Shipments,
+        SettingsSection::Depot,
         SettingsSection::Shortcuts,
         SettingsSection::About,
     ];
@@ -1169,6 +1317,7 @@ impl SettingsSection {
             SettingsSection::Game => "Game archive",
             SettingsSection::Data => "Reference data",
             SettingsSection::Shipments => "Shipments library",
+            SettingsSection::Depot => "Depot workspace",
             SettingsSection::Shortcuts => "Shortcuts",
             SettingsSection::About => "About & diagnostics",
         }
@@ -1178,6 +1327,7 @@ impl SettingsSection {
             SettingsSection::Game => "Which install the tool reads",
             SettingsSection::Data => "Hash-to-name bundle",
             SettingsSection::Shipments => "Where built Shipments go",
+            SettingsSection::Depot => "Where your drafts live",
             SettingsSection::Shortcuts => "Keys this window answers",
             SettingsSection::About => "Versions and resolved paths",
         }
@@ -1879,6 +2029,49 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
     );
     let mut scene = pollster::block_on(Scene::new(window.clone()));
     let mut world = World::new();
+    // The scope the scene keeps Inspect's world's entities under.
+    let world_scope = mercs2_engine::scene::WorldScope::new();
+    // The Depot's own preview: its world, the model an open item shows, kept apart from Inspect's so
+    // opening an item never replaces what Inspect shows.
+    let mut depot_world = World::new();
+    let depot_scope = mercs2_engine::scene::WorldScope::new();
+    // A texture preview's still render: a world of its own, so a model drawn wearing a built texture
+    // never shares an upload with the Depot's viewport or Inspect. The model it holds, and the id of
+    // the render asked for and shown the spinner for one frame before it is drawn.
+    let mut shot_world = World::new();
+    let shot_scope = mercs2_engine::scene::WorldScope::new();
+    let mut shot_drawn: Option<(u32, Entity)> = None;
+    let mut shot_waiting: Option<String> = None;
+    let mut depot_preview: Option<Preview> = None;
+    // The layer an open world item builds, and the id of a view that did not read (not retried).
+    let mut depot_layer: Option<DepotLayer> = None;
+    let mut depot_layer_failed: Option<String> = None;
+    // The terrain cell an open replace_terrain_cell item shows: the view's id, the cell's hash and its
+    // entity; and the id of a view that did not draw (not retried).
+    let mut depot_terrain: Option<(String, u32, Entity)> = None;
+    let mut depot_terrain_failed: Option<String> = None;
+    // The stand-in an open add_tiny_geometry item shows: the view's id, the model's hash and its
+    // entity; and the id of a view that did not draw (not retried).
+    let mut depot_tiny: Option<(String, u32, Entity)> = None;
+    let mut depot_tiny_failed: Option<String> = None;
+    // The effect an open effect item runs in the Depot's world: what it runs (`depotfx::Want`'s id
+    // and frame) and its view; the atlas id and rectangles set on the Depot's world; the id of a want
+    // that did not start (not retried); and the transport asked of it this frame.
+    let mut depot_vfx: Option<(String, String, crate::vfxview::VfxView)> = None;
+    let mut depot_vfx_atlas: Option<u64> = None;
+    let mut depot_vfx_rects: HashMap<u32, mercs2_formats::fxdict::FxRect> = HashMap::new();
+    let mut depot_vfx_failed: Option<String> = None;
+    let mut depot_vfx_acts: Vec<crate::vfxview::VfxAct> = Vec::new();
+    // `fx_time`: the time the Depot's effect is run to and held at once it starts.
+    let mut depot_vfx_seek: Option<f32> = None;
+    // The clip an open animation item plays on the Depot's hero; the hero last asked for (asked once,
+    // so a model that does not load is not retried every frame); and the transport asked of it this
+    // frame.
+    let mut depot_anim: Option<DepotAnim> = None;
+    let mut depot_anim_hero_asked: Option<u32> = None;
+    let mut depot_anim_acts: Vec<crate::depotanim::AnimAct> = Vec::new();
+    // `inspector_scroll`: the inspector held at this scroll offset, for a capture of what is below.
+    let mut inspector_scroll: Option<f32> = None;
     // The inspector GUI (egui through the engine's overlay hook) + the frame's queued actions.
     let mut gui = crate::gui::Gui::new(scene.device(), scene.surface_format(), &window);
     let mut actions: Vec<Act> = Vec::new();
@@ -2015,6 +2208,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
     // The Saves page's own state (a `.profile` currently selected, if any). Lives on the stack
     // beside `qm` so switching rails never discards it.
     let mut saves = crate::saves::Panel::default();
+    // The Depot page's state: the workspace as last read, the selection, the filters. Read again
+    // whenever Settings names another workspace (`depotpage::Panel::is_current`).
+    let mut depot_page = crate::depotpage::Panel::default();
     // Per-hero `shot::HeroRenderer`s, keyed by model hash. Each one owns its own wgpu device
     // and keeps the pipeline + mesh / texture uploads warm, so an orbit drag re-renders in
     // ~10-30 ms instead of the ~1-2 s a fresh `shot::render` call would take. Dropped only
@@ -2159,6 +2355,12 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
     let mut vo_from: Option<(u32, String)> = None;
     // Remembered so a failed open (missing English.wad / .pws / device) is reported once, not per click.
     let mut vo_error: Option<String> = None;
+    // The Depot's own player for its sound previews, opened on the first play, so a preview never
+    // interrupts what the face or the Audio page plays.
+    let mut depot_player: Option<crate::audioplay::Player> = None;
+    // The item and game the Depot's player last played from: leaving the Depot, that item or that
+    // game stops it.
+    let mut depot_played_from: (Option<std::path::PathBuf>, Vec<String>) = (None, Vec::new());
     // In-flight reference-data download from the Settings button (which replaces the downloaded
     // copy with the pinned release's): the receiver while it runs, plus the latest progress line.
     // The automatic download when no bundle is found runs on the boot thread.
@@ -2205,6 +2407,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
     let mut cam_yaw: f32 = 0.6;
     let mut cam_pitch: f32 = -0.35;
     let mut cam_dist: f32 = 8.0;
+    // The orbit of the page not shown: the Depot keeps its own, swapped in while the Depot is open.
+    let mut parked_cam: (Vec3, f32, f32, f32) = (Vec3::ZERO, 0.6, -0.35, 8.0);
+    let mut cam_is_depot = false;
     let mut lmb = false;
     let mut shift = false;
     let mut last_cursor: Option<(f64, f64)> = None;
@@ -2236,7 +2441,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         return;
                     }
                     status = import_file(
-                        &path, &mut w, &mut scene, &mut world, &mut imported, &mut preview,
+                        &path, &mut w, &mut scene, (&mut world, world_scope), &mut imported, &mut preview,
                         &mut cam_target, &mut cam_dist, &mut retarget, &retarget_target,
                         &mut retarget_src_path, &mut wb,
                         &mut sel_bone, donor_ref.map(|(h, _)| h), &index, &anim_sel, &lua_corpus,
@@ -2416,6 +2621,13 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                     let t = start.elapsed().as_secs_f32();
                     let dt = last_frame.elapsed().as_secs_f32().min(0.05);
                     last_frame = std::time::Instant::now();
+                    // Entering or leaving the Depot swaps in the other page's orbit.
+                    if (wb == Workbench::Depot) != cam_is_depot {
+                        let shown = (cam_target, cam_yaw, cam_pitch, cam_dist);
+                        (cam_target, cam_yaw, cam_pitch, cam_dist) = parked_cam;
+                        parked_cam = shown;
+                        cam_is_depot = wb == Workbench::Depot;
+                    }
 
                     // ── Reference-data download (Settings): drain whatever the worker has said. A
                     // finished download re-resolves the chain, which loads it in place when it is
@@ -2482,12 +2694,12 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             // The scene keeps uploads by model hash, and the donor path skips a hash
                             // it already has: a hash both archives share would draw the old mesh.
                             if let Some(p) = preview.take() {
-                                scene.forget_entity(p.entity);
-                                scene.unload_model(p.hash);
+                                scene.forget_entity(p.scope, p.entity);
+                                scene.unload_model(p.scope, p.hash);
                             }
                             if let Some((h, e)) = donor_ref.take() {
-                                scene.forget_entity(e);
-                                scene.unload_model(h);
+                                scene.forget_entity(world_scope, e);
+                                scene.unload_model(world_scope, h);
                             }
                             world = World::new();
                             hero_renderers.clear();
@@ -2504,8 +2716,26 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             voices = None;
                             voice_error = None;
                             if let Some(v) = layer_view.take() {
-                                v.teardown(&mut scene, &mut world, &[]);
+                                v.teardown(&mut scene, (&mut world, world_scope), &[]);
                             }
+                            // The Depot's world holds models of the old archive too.
+                            depot_preview = None;
+                            depot_layer = None;
+                            depot_terrain = None;
+                            depot_terrain_failed = None;
+                            depot_tiny = None;
+                            depot_tiny_failed = None;
+                            depot_vfx = None;
+                            depot_vfx_atlas = None;
+                            depot_vfx_failed = None;
+                            scene.forget_scope(depot_scope);
+                            depot_layer_failed = None;
+                            depot_world = World::new();
+                            // And the texture preview's still render.
+                            scene.forget_scope(shot_scope);
+                            shot_world = World::new();
+                            shot_drawn = None;
+                            shot_waiting = None;
                             layer_templates = None;
                             if let Some(v) = vfx_view.take() {
                                 v.close(&mut scene);
@@ -3029,32 +3259,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         if let Some(ci) = p.cur_clip {
                             let hash = p.clip_catalog[ci].hash;
                             if let Some(Some(ca)) = p.clip_cache.get(&hash) {
-                                let dur = ca.clip.duration.max(1e-3);
                                 if p.playing {
-                                    p.anim_time = (p.anim_time + dt) % dur;
+                                    (p.anim_time, _) = advance_clip(p.anim_time, dt, ca.clip.duration, true);
                                 }
-                                let sample = ca.clip.sample_local(p.anim_time);
-                                let mats = match &p.retarget_source {
-                                    // Retargeted import: drive its OWN (undeformed) skeleton with the
-                                    // source skeleton's per-bone world rotation deltas.
-                                    Some((source_rig, target_to_source)) => {
-                                        pose::havok_palette_retarget_cross(
-                                            &p.rig,
-                                            source_rig,
-                                            target_to_source,
-                                            &sample,
-                                            &ca.track_to_hier,
-                                            ca.num_transform_tracks,
-                                        )
-                                    }
-                                    None => pose::havok_palette_in_place_replacing(
-                                        &p.rig,
-                                        &sample,
-                                        &ca.track_to_hier,
-                                        ca.num_transform_tracks,
-                                        &face_bones,
-                                    ),
-                                };
+                                let mats = clip_palette(p, ca, p.anim_time, &face_bones);
                                 let _ = world.insert_one(p.entity, SkinPalette { mats });
                             }
                         }
@@ -3188,7 +3396,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             }
                             if let Some(t) = st.fx_time {
                                 actions.push(Act::FxTime(t));
+                                depot_vfx_seek = Some(t);
                             }
+                            inspector_scroll = st.inspector_scroll;
                             if let Some(n) = &st.entity {
                                 actions.push(Act::LayerEntity(n.clone()));
                             }
@@ -3213,6 +3423,87 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     ));
                                 }
                                 qm_acts.push(crate::quartermaster::Act::Select(i));
+                            }
+                            if let Some(dir) = &st.depot {
+                                // For this run: the capture exits before anything could save it.
+                                cfg.depot_dir = Some(dir.clone());
+                                depot_page.refresh(Some(dir), qm_names.as_ref());
+                                if let Some(Err(e)) = &depot_page.ws {
+                                    return Err(e.clone());
+                                }
+                            }
+                            if let Some(kind) = &st.depot_new {
+                                let k = mercs2_quartermaster::manifest::Contribution::ALL_KINDS
+                                    .iter()
+                                    .find(|k| **k == kind.as_str())
+                                    .ok_or_else(|| format!("{kind} is not a kind qm knows"))?;
+                                depot_page.apply(crate::depotpage::Act::OpenNew, cfg.depot_dir.as_deref(), qm_names.as_ref());
+                                depot_page.apply(crate::depotpage::Act::NewKind(k), cfg.depot_dir.as_deref(), qm_names.as_ref());
+                            }
+                            if let Some(name) = &st.depot_item {
+                                let ws = depot_page.workspace().ok_or("depot_item needs depot")?;
+                                match ws.items.iter().find(|i| &i.name == name) {
+                                    Some(i) => {
+                                        let dir = i.dir.clone();
+                                        let world_file = crate::depotworld::first(i).map(|(_, s)| i.dir.join(s.file));
+                                        let activation = crate::depotworld::activation(i).is_some();
+                                        depot_page.world.shipped.set(st.depot_shipped);
+                                        depot_page.tiny.tint.set(st.depot_tint);
+                                        let fx_index = i.file.as_ref().ok().and_then(|f| f.contributions.iter().position(crate::depotfx::of));
+                                        if let Some(index) = fx_index {
+                                            if st.depot_shipped {
+                                                depot_page.fx.set_side(dir.clone(), index, crate::depotfx::Side::Shipped);
+                                            }
+                                            if let Some(n) = st.depot_fx_emitter {
+                                                depot_page.fx.set_node(dir.clone(), index, crate::depotfx::Node::Emitter(n));
+                                            }
+                                        } else if st.depot_fx_emitter.is_some() {
+                                            return Err(format!("depot_fx_emitter: {name} holds no effect contribution"));
+                                        }
+                                        if let Some(s) = &st.depot_tiny_shown {
+                                            use crate::depottiny::Shown;
+                                            let shown = match s.as_str() {
+                                                "intact" => Shown::Intact,
+                                                "ruined" => Shown::Ruined,
+                                                "objects" => Shown::Objects,
+                                                other => return Err(format!("depot_tiny_shown: {other:?} is none of intact, ruined, objects")),
+                                            };
+                                            depot_page.tiny.shown.borrow_mut().insert(dir.clone(), shown);
+                                        }
+                                        if let Some(row) = st.depot_world_row {
+                                            match (world_file, activation) {
+                                                (Some(file), _) => {
+                                                    depot_page.world.selected.borrow_mut().insert(file, row);
+                                                }
+                                                (None, true) => {
+                                                    depot_page.world.shown_layer.borrow_mut().insert(dir.clone(), row);
+                                                }
+                                                (None, false) => return Err(format!("depot_world_row: {name} holds no world contribution")),
+                                            }
+                                        }
+                                        depot_page.selected = Some(dir.clone());
+                                        if st.depot_open {
+                                            // As a click opens it, model load included.
+                                            let open = crate::depotpage::Act::Open(dir);
+                                            if let Some(crate::depotpage::AppAct::LoadModel(h, l)) =
+                                                depot_page.apply(open, cfg.depot_dir.as_deref(), qm_names.as_ref())
+                                            {
+                                                actions.push(Act::DepotLoadModel(h, l));
+                                            }
+                                        }
+                                        if let Some(label) = &st.depot_pick {
+                                            crate::kindform::open_for_capture(label);
+                                        }
+                                        if let Some([node, state]) = st.depot_state {
+                                            depot_page.states.node = node;
+                                            depot_page.states.state = state;
+                                        }
+                                    }
+                                    None => {
+                                        let all: Vec<&str> = ws.items.iter().map(|i| i.name.as_str()).collect();
+                                        return Err(format!("no Depot item named {name}; the workspace holds {}", all.join(", ")));
+                                    }
+                                }
                             }
                             if let (Some(b), Some(d)) = (&st.bench, &st.donor) {
                                 let benches = [
@@ -3335,6 +3626,21 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         }
                     }
                     let mut saves_acts: Vec<crate::saves::Act> = Vec::new();
+                    let mut depot_acts: Vec<crate::depotpage::Act> = Vec::new();
+                    // The Depot reads the shipped game alone: `qm_stack[0]` is the base `vz.wad`; the
+                    // overlays after it (`vz-patch.wad`, `--overlay`, a mounted level) are mod output.
+                    depot_page.set_game(&qm_stack[..qm_stack.len().min(1)]);
+                    if let Some(player) = &depot_player {
+                        if player.status().is_some() && (wb != Workbench::Depot || depot_page.open != depot_played_from.0 || qm_stack != depot_played_from.1) {
+                            player.stop();
+                        }
+                        depot_page.sound.playing.set(player.status());
+                    }
+                    if (wb == Workbench::Depot || settings_section == SettingsSection::Depot)
+                        && !depot_page.is_current(cfg.depot_dir.as_deref())
+                    {
+                        depot_page.refresh(cfg.depot_dir.as_deref(), qm_names.as_ref());
+                    }
                     // Captured below inside `gui.run` so the saves reducer (which runs after the
                     // closure returns) can allocate egui textures for the hero-portrait render.
                     let mut pending_ctx: Option<egui::Context> = None;
@@ -3452,6 +3758,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         }
                                     } else if wb == Workbench::Settings {
                                         ui.label(egui::RichText::new(settings_section.label()).color(theme::TX));
+                                    } else if wb == Workbench::Depot {
+                                        let at = depot_page.selected_item().map_or("All items", |i| i.name.as_str());
+                                        ui.label(egui::RichText::new(at).color(theme::TX));
                                     } else if let Some(p) = &preview {
                                         ui.label(egui::RichText::new(&p.label).strong());
                                         ui.label(
@@ -3646,6 +3955,8 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     .flatten();
                                 if wb == Workbench::Live {
                                     crate::live::status(ui, &live_page);
+                                } else if wb == Workbench::Depot && phase != Phase::Setup {
+                                    crate::depotpage::status(ui, &depot_page);
                                 } else if let Some((dot_color, dot_text, detail)) = saves_banner {
                                     theme::status_dot(ui, dot_text, dot_color);
                                     ui.separator();
@@ -3734,6 +4045,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             }
                             Workbench::Saves => {
                                 saves_acts.extend(crate::saves::navigator(ui, &saves));
+                            }
+                            Workbench::Depot => {
+                                depot_acts.extend(crate::depotpage::navigator(ui, &depot_page, qm_names.as_ref()));
                             }
                             Workbench::Inspect => {
                             let before = (kind, filter.clone(), lens);
@@ -4432,12 +4746,19 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             egui::Frame::side_top_panel(&ctx.global_style())
                                 .inner_margin(egui::Margin { left: 13, right: 12, top: 12, bottom: 0 }),
                             |ui| {
-                            theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            let mut scroll = theme::scroll_vertical().auto_shrink([false, false]);
+                            if let Some(y) = inspector_scroll {
+                                scroll = scroll.vertical_scroll_offset(y);
+                            }
+                            scroll.show(ui, |ui| {
                               if eff == Workbench::Quartermaster {
                                   qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
                               }
                               if eff == Workbench::Saves {
                                   saves_acts.extend(crate::saves::inspector(ui, &saves));
+                              }
+                              if eff == Workbench::Depot {
+                                  depot_acts.extend(crate::depotpage::inspector(ui, &depot_page, crate::kindform::Sources { index: Some(&index), corpus: &lua_corpus, names: qm_names.as_ref(), levels: &levels }));
                               }
                               // The Missions editor owns the right pane entirely — the generic
                               // Inspect-style preview panel would compete with the node details.
@@ -6184,6 +6505,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     Workbench::Saves => {
                                         saves_acts.extend(crate::saves::verbs(ui, &saves));
                                     }
+                                    Workbench::Depot => {
+                                        depot_acts.extend(crate::depotpage::verbs(ui, &depot_page));
+                                    }
                                     // Missions owns its own verb bar: Jump-to-source / Add node /
                                     // Compile, which is what a blueprint editor needs, not Export /
                                     // textures.
@@ -6580,6 +6904,93 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                                     }
                                                 });
                                             }
+                                            SettingsSection::Depot => {
+                                                // The one folder every Depot item lives in (depot.md D4).
+                                                // Chosen, never discovered: a guessed folder would scatter a
+                                                // modder's drafts somewhere they did not pick.
+                                                theme::section(ui, "Depot workspace", None, true, |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "One folder holds every Depot item, Draft and Ready. An item is a folder; Copy to Shipment copies its files into a Shipment's src/.",
+                                                        )
+                                                        .color(theme::DIM),
+                                                    );
+                                                    ui.add_space(6.0);
+                                                    match (&cfg.depot_dir, &depot_page.ws) {
+                                                        (None, _) => {
+                                                            theme::status_dot(ui, "Not set", theme::BRASS_DK);
+                                                        }
+                                                        (Some(p), Some(Ok(ws))) => {
+                                                            ui.horizontal(|ui| {
+                                                                theme::status_dot(ui, "Found", theme::GOOD);
+                                                                ui.label(egui::RichText::new(p.display().to_string()).monospace().color(theme::TX));
+                                                            });
+                                                            theme::kv(
+                                                                ui,
+                                                                "items",
+                                                                egui::RichText::new(format!(
+                                                                    "{} \u{b7} {} draft \u{b7} {} ready",
+                                                                    ws.items.len(),
+                                                                    ws.count(crate::depot::State::Draft),
+                                                                    ws.count(crate::depot::State::Ready)
+                                                                )),
+                                                            );
+                                                            let folders: Vec<&str> = ws.folders.iter().map(|(f, _)| f.as_str()).collect();
+                                                            theme::kv(
+                                                                ui,
+                                                                "folders",
+                                                                egui::RichText::new(if folders.is_empty() { "none".to_string() } else { folders.join(", ") }),
+                                                            );
+                                                        }
+                                                        (Some(p), Some(Err(e))) => {
+                                                            ui.horizontal(|ui| {
+                                                                theme::status_dot(ui, "Not found", theme::BAD);
+                                                                ui.label(egui::RichText::new(p.display().to_string()).monospace().color(theme::TX));
+                                                            });
+                                                            ui.label(egui::RichText::new(e).small().color(theme::BAD));
+                                                        }
+                                                        (Some(p), None) => {
+                                                            ui.label(egui::RichText::new(p.display().to_string()).monospace().color(theme::TX));
+                                                        }
+                                                    }
+                                                    theme::kv(ui, "saved in", egui::RichText::new("settings.json"));
+                                                    ui.add_space(6.0);
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("Choose folder\u{2026}").clicked() {
+                                                            if let Some(note) = choose_depot_dir(&mut cfg) {
+                                                                cfg_note = Some(note);
+                                                            }
+                                                        }
+                                                        let found = matches!(&depot_page.ws, Some(Ok(_)));
+                                                        if ui.add_enabled(found, egui::Button::new("Reveal folder")).clicked() {
+                                                            if let Some(p) = &cfg.depot_dir {
+                                                                if let Err(e) = crate::quartermaster::open_in_os(p) {
+                                                                    cfg_note = Some(Err(format!("Could not open {}: {e}", p.display())));
+                                                                }
+                                                            }
+                                                        }
+                                                    });
+                                                });
+                                                theme::section(ui, "One item on disk", None, true, |ui| {
+                                                    theme::code_block(
+                                                        ui,
+                                                        "<workspace>/\n  missions/\n    gurcon002_spawn_lists/\n      item.yaml\n      src/\n        gurcon002_spawn_lists.lua",
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    theme::code_block(
+                                                        ui,
+                                                        "# item.yaml\nstate: draft\ncontributions:\n  - kind: patch_lua\n    target: gurcon002\n    append: src/gurcon002_spawn_lists.lua",
+                                                    );
+                                                    ui.add_space(4.0);
+                                                    ui.label(
+                                                        egui::RichText::new(
+                                                            "The contributions list is the manifest's own form, so a copy adds those entries to the Shipment's manifest.yaml unchanged.",
+                                                        )
+                                                        .small()
+                                                        .color(theme::DIM),
+                                                    );
+                                                });
+                                            }
                                             SettingsSection::Shortcuts => {
                                                 // Written down because they were otherwise discoverable only by pressing
                                                 // keys: the verb bar names a few, and the rest live in a `match code`
@@ -6666,10 +7077,15 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         // CentralPanel rather than the 3D viewport, because a Shipment is read, not
                         // orbited. Added last so the side panels have already claimed their space.
                         if wb == Workbench::Quartermaster {
-                            qm_acts.extend(crate::quartermaster::center(root, &qm, qm_names.as_ref()));
+                            qm_acts.extend(crate::quartermaster::center(root, &qm, crate::kindform::Sources { index: Some(&index), corpus: &lua_corpus, names: qm_names.as_ref(), levels: &levels }));
                         }
                         // Saves owns its own centre too: a composed card (hero preview + at-a-glance
                         // HUD + progression grid), not the 3D viewport (see `has_viewport`).
+                        // The Depot's centre is its item browser, not the 3D viewport.
+                        if wb == Workbench::Depot {
+                            depot_acts.extend(crate::depotpage::center(root, &depot_page, crate::kindform::Sources { index: Some(&index), corpus: &lua_corpus, names: qm_names.as_ref(), levels: &levels }));
+                            depot_acts.extend(crate::depotpage::windows(ctx, &depot_page));
+                        }
                         if wb == Workbench::Saves {
                             saves_acts.extend(crate::saves::center(root, &saves));
                             // Floating windows: the Inspect view and the delete confirmation.
@@ -6719,6 +7135,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         }
                         let vp = root.available_rect_before_wrap();
                         layer_screen = ctx.content_rect().size();
+                        // A Depot item that edits a model (a collision swap) gives the centre to the
+                        // viewport, as Inspect does.
+                        let depot_viewport = eff == Workbench::Depot && depot_page.viewport_item().is_some();
+                        let shows_viewport = eff.has_viewport() || depot_viewport;
                         if let (Some(v), None) = (&layer_view, &tex_view) {
                             if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab && !movie_tab {
                                 let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
@@ -6726,18 +7146,48 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 crate::layerview::overlay(ctx, v, crate::layerview::view_proj(eye, cam_target, aspect), vp);
                             }
                         }
-                        if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab && !movie_tab {
+                        if let (true, Some(d)) = (depot_viewport, &depot_layer) {
+                            let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
+                            let aspect = layer_screen.x / layer_screen.y.max(1.0);
+                            let proj = crate::layerview::view_proj(eye, cam_target, aspect);
+                            crate::layerview::overlay(ctx, &d.view, proj, vp);
+                            crate::depotworld::marks(ctx, &d.view, &d.shown, proj, vp);
+                        }
+                        if let (true, Some(v)) = (depot_viewport && depot_terrain.is_some(), depot_page.terrain_view()) {
+                            crate::depotworld::terrain_label(ctx, &v, vp);
+                        }
+                        if let (true, Some(v)) = (depot_viewport && depot_tiny.is_some(), depot_page.stand_in_view()) {
+                            crate::depottiny::label(ctx, &v, vp);
+                        }
+                        if depot_viewport {
+                            let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
+                            let aspect = layer_screen.x / layer_screen.y.max(1.0);
+                            depot_acts.extend(crate::depotpage::viewport(
+                                ctx,
+                                &depot_page,
+                                crate::layerview::view_proj(eye, cam_target, aspect),
+                                vp,
+                                qm_names.as_ref(),
+                            ));
+                        }
+                        if shows_viewport && wb != Workbench::Settings && !audio_tab && !text_tab && !movie_tab {
                         egui::Area::new(egui::Id::unique("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
                             .show(ctx, |ui| {
                                 ui.horizontal(|ui| {
                                     theme::chip(ui, "Orbit", true, Some(theme::BRASS));
-                                    if let Some(v) = layer_view.as_ref().filter(|v| v.is_loading()) {
+                                    let loading = if depot_viewport { depot_layer.as_ref().map(|d| &d.view) } else { layer_view.as_ref() };
+                                    if let Some(v) = loading.filter(|v| v.is_loading()) {
                                         let (done, all) = v.progress();
                                         theme::chip(ui, &format!("loading {done}/{all}"), false, None);
                                     }
-                                    if let Some(p) = &preview {
+                                    let shown = if depot_viewport { &depot_preview } else { &preview };
+                                    let playing_item = depot_anim.as_ref().filter(|a| depot_viewport && shown.as_ref().is_some_and(|p| p.hash == a.hero));
+                                    if let Some(a) = playing_item {
+                                        let clip = format!("{}{} \u{b7} {:.2}/{:.2} s", if a.playing { "▶ " } else { "" }, a.label, a.time, a.duration());
+                                        theme::chip(ui, &clip, false, None);
+                                    } else if let Some(p) = shown {
                                         // Clip position — name (or bind pose) + n/total + play state.
                                         let n = p.clip_catalog.len();
                                         let clip = if n == 0 {
@@ -7067,7 +7517,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     // (Rig). `import_file` flips the workbench to Skeleton for a
                                     // rigged model; we re-assert the bench below, after the load.
                                     let s = import_file(
-                                        &subject.model, &mut w, &mut scene, &mut world,
+                                        &subject.model, &mut w, &mut scene, (&mut world, world_scope),
                                         &mut imported, &mut preview, &mut cam_target, &mut cam_dist,
                                         &mut retarget, &retarget_target, &mut retarget_src_path,
                                         &mut wb, &mut sel_bone, donor_ref.map(|(h, _)| h), &index, &anim_sel,
@@ -7275,8 +7725,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             let dir = qm.ensure_shipment(qm_names.as_ref())?;
                             let rel = std::path::Path::new("src").join(format!("{}.lua", req.target));
                             let file = dir.join(&rel);
-                            std::fs::create_dir_all(dir.join("src")).map_err(|e| format!("{}: {e}", dir.display()))?;
-                            std::fs::write(&file, &req.source).map_err(|e| format!("{}: {e}", file.display()))?;
+                            crate::missions::write_staged(&mut missions_panel.staged, &file, &req.source)?;
                             let existing = qm.find_contribution(|c| {
                                 matches!(c, mercs2_quartermaster::manifest::Contribution::ReplaceLua { target, .. } if *target == req.target)
                             });
@@ -7318,6 +7767,59 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                     // `saves`; it is a long-lived piece of app state, not a per-frame scratchpad.
                     for act in std::mem::take(&mut saves_acts) {
                         crate::saves::apply(act, &mut saves);
+                    }
+                    for act in std::mem::take(&mut depot_acts) {
+                        match depot_page.apply(act, cfg.depot_dir.as_deref(), qm_names.as_ref()) {
+                            None => {}
+                            Some(crate::depotpage::AppAct::OpenSettings) => {
+                                wb = Workbench::Settings;
+                                settings_section = SettingsSection::Depot;
+                            }
+                            Some(crate::depotpage::AppAct::ChooseWorkspace) => {
+                                depot_page.status = choose_depot_dir(&mut cfg);
+                                depot_page.refresh(cfg.depot_dir.as_deref(), qm_names.as_ref());
+                            }
+                            Some(crate::depotpage::AppAct::LoadModel(hash, label)) => {
+                                actions.push(Act::DepotLoadModel(hash, label));
+                            }
+                            Some(crate::depotpage::AppAct::FxPlay(a)) => depot_vfx_acts.push(a),
+                            Some(crate::depotpage::AppAct::AnimPlay(a)) => depot_anim_acts.push(a),
+                            // The wave playing pauses, a paused one resumes, any other plays.
+                            Some(crate::depotpage::AppAct::PlaySound(wave)) => {
+                                if depot_player.is_none() {
+                                    depot_player = crate::audioplay::Player::start();
+                                }
+                                match &depot_player {
+                                    None => depot_page.status = Some(Err("no audio output device".into())),
+                                    Some(player) => match player.status() {
+                                        Some(s) if s.clip == wave.id && !s.paused => player.pause(),
+                                        Some(s) if s.clip == wave.id => player.resume(),
+                                        _ => match wave.pcm() {
+                                            Ok(pcm) => {
+                                                depot_played_from = (depot_page.open.clone(), qm_stack.clone());
+                                                player.play(wave.id, pcm.samples, pcm.rate, pcm.channels);
+                                            }
+                                            Err(e) => depot_page.status = Some(Err(e)),
+                                        },
+                                    },
+                                }
+                            }
+                            // The model in the viewport run through the item's edited machine. Asked
+                            // again on a later frame while the model is still loading; a machine the
+                            // gate cannot run is reported, and the preview keeps what it showed.
+                            Some(crate::depotpage::AppAct::PreviewMachine(hash, machine, node_state)) => {
+                                match depot_preview.as_mut().filter(|p| p.hash == hash) {
+                                    None => depot_page.states.reshow(),
+                                    Some(p) => {
+                                        let was = (p.machine.replace(*machine), std::mem::replace(&mut p.node_state, node_state));
+                                        if let Err(e) = p.regate(&mut scene) {
+                                            (p.machine, p.node_state) = was;
+                                            depot_page.status = Some(Err(format!("the viewport cannot run the edited machine: {e}")));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     for act in live_acts.drain(..) {
                         match act {
@@ -7386,12 +7888,29 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                     // ── Execute the frame's queued actions (keyboard + GUI, one implementation). ──
                     for act in std::mem::take(&mut actions) {
                         match act {
+                            Act::DepotLoadModel(hash, label) => match source_model_data(&mut w, &imported, hash) {
+                                Ok(md) => {
+                                    let p = build_preview(
+                                        &mut w, &mut scene, (&mut depot_world, depot_scope), hash, label, md,
+                                        &depot_preview, None, &index, &anim_sel, &lua_corpus,
+                                    );
+                                    // The Depot's orbit is the shown one while the Depot is open.
+                                    let framing = (p.center, (p.radius * 2.4).clamp(1.5, 15000.0));
+                                    if cam_is_depot {
+                                        (cam_target, cam_dist) = framing;
+                                    } else {
+                                        (parked_cam.0, parked_cam.3) = framing;
+                                    }
+                                    depot_preview = Some(p);
+                                }
+                                Err(e) => depot_page.status = Some(Err(format!("{label}: {e}"))),
+                            },
                             Act::LoadModelHash(hash, label) => {
                                 let t0 = std::time::Instant::now();
                                 match source_model_data(&mut w, &imported, hash) {
                                     Ok(md) => {
                                         let p = build_preview(
-                                            &mut w, &mut scene, &mut world, hash, label.clone(), md,
+                                            &mut w, &mut scene, (&mut world, world_scope), hash, label.clone(), md,
                                             &preview, donor_ref.map(|(h, _)| h), &index, &anim_sel, &lua_corpus,
                                         );
                                         cam_target = p.center;
@@ -7513,9 +8032,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         let label = format!("{base} \u{25B8} {tl}");
                                         imported.insert(phash, md.clone());
                                         // Re-upload: the faithful mesh replaces the import's vertex buffer + bone count.
-                                        scene.unload_model(phash);
+                                        scene.unload_model(world_scope, phash);
                                         let mut p = build_preview(
-                                            &mut w, &mut scene, &mut world, phash, label, md, &preview,
+                                            &mut w, &mut scene, (&mut world, world_scope), phash, label, md, &preview,
                                             donor_ref.map(|(h, _)| h), &index, &anim_sel, &lua_corpus,
                                         );
                                         // The mesh is now in the TARGET skeleton's bind space, so the
@@ -7730,7 +8249,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         match source_model_data(&mut w, &imported, row.hash) {
                                             Ok(md) => {
                                                 let p = build_preview(
-                                                    &mut w, &mut scene, &mut world, row.hash,
+                                                    &mut w, &mut scene, (&mut world, world_scope), row.hash,
                                                     row.label(), md, &preview, donor_ref.map(|(h, _)| h), &index,
                                                     &anim_sel, &lua_corpus,
                                                 );
@@ -7926,13 +8445,13 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         match opened {
                                             Ok(v) => {
                                                 if let Some(old) = layer_view.take() {
-                                                    old.teardown(&mut scene, &mut world, &[]);
+                                                    old.teardown(&mut scene, (&mut world, world_scope), &[]);
                                                 }
                                                 if let Some(p) = preview.take() {
                                                     world.despawn(p.entity).ok();
-                                                    scene.forget_entity(p.entity);
+                                                    scene.forget_entity(p.scope, p.entity);
                                                     if donor_ref.map(|(h, _)| h) != Some(p.hash) {
-                                                        scene.unload_model(p.hash);
+                                                        scene.unload_model(p.scope, p.hash);
                                                     }
                                                 }
                                                 face = None;
@@ -7948,10 +8467,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     Kind::Effect if row.type_id == mercs2_formats::types::TYPE_ID_EFFECT => {
                                         let (hash, label, src) = (row.hash, row.label(), row.src);
                                         let opened = (|| -> Result<crate::vfxview::VfxView, String> {
-                                            if !scene.fx_has_atlas() {
+                                            if !scene.fx_has_atlas(world_scope) {
                                                 let base = w.wads.first_mut().ok_or("no archive open")?;
                                                 let (atlas, rects) = mercs2_engine::game_world::load_fx_atlas(base)?;
-                                                scene.fx_set_atlas(&atlas, &rects)?;
+                                                scene.fx_set_atlas(world_scope, &atlas, &rects)?;
                                                 vfx_rects = rects.into_iter().map(|r| (r.key, r)).collect();
                                                 vfx_atlas = Some(atlas);
                                             }
@@ -7962,18 +8481,18 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                             if let Some(old) = vfx_view.take() {
                                                 old.close(&mut scene);
                                             }
-                                            crate::vfxview::VfxView::open(hash, label.clone(), effect, started_by, &vfx_rects, &mut scene)
+                                            crate::vfxview::VfxView::open(world_scope, hash, label.clone(), effect, started_by, &vfx_rects, &mut scene)
                                         })();
                                         match opened {
                                             Ok(v) => {
                                                 if let Some(old) = layer_view.take() {
-                                                    old.teardown(&mut scene, &mut world, &[]);
+                                                    old.teardown(&mut scene, (&mut world, world_scope), &[]);
                                                 }
                                                 if let Some(p) = preview.take() {
                                                     world.despawn(p.entity).ok();
-                                                    scene.forget_entity(p.entity);
+                                                    scene.forget_entity(p.scope, p.entity);
                                                     if donor_ref.map(|(h, _)| h) != Some(p.hash) {
-                                                        scene.unload_model(p.hash);
+                                                        scene.unload_model(p.scope, p.hash);
                                                     }
                                                 }
                                                 face = None;
@@ -8313,7 +8832,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         } else {
                                             p.hidden.remove(&gi);
                                         }
-                                        scene.set_draw_hidden(p.hash, gi, hide);
+                                        scene.set_draw_hidden(p.scope, p.hash, gi, hide);
                                     }
                                 }
                             }
@@ -8470,7 +8989,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         } else {
                                             p.hidden.remove(&g);
                                         }
-                                        scene.set_draw_hidden(p.hash, g, hide);
+                                        scene.set_draw_hidden(p.scope, p.hash, g, hide);
                                     }
                                     status = format!("isolated draw group {gi}");
                                 }
@@ -8478,7 +8997,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             Act::ShowAllGroups => {
                                 if let Some(p) = &mut preview {
                                     for g in 0..p.draws.len() {
-                                        scene.set_draw_hidden(p.hash, g, false);
+                                        scene.set_draw_hidden(p.scope, p.hash, g, false);
                                     }
                                     p.hidden.clear();
                                 }
@@ -8520,10 +9039,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                             n += 1;
                                             if p.hide_ruin {
                                                 p.hidden.insert(gi);
-                                                scene.set_draw_hidden(p.hash, gi, true);
+                                                scene.set_draw_hidden(p.scope, p.hash, gi, true);
                                             } else {
                                                 p.hidden.remove(&gi);
-                                                scene.set_draw_hidden(p.hash, gi, false);
+                                                scene.set_draw_hidden(p.scope, p.hash, gi, false);
                                             }
                                         }
                                     }
@@ -8568,7 +9087,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         .pick_file()
                                     {
                                         status = import_file(
-                                            &path, &mut w, &mut scene, &mut world, &mut imported,
+                                            &path, &mut w, &mut scene, (&mut world, world_scope), &mut imported,
                                             &mut preview, &mut cam_target, &mut cam_dist,
                                             &mut retarget, &retarget_target, &mut retarget_src_path,
                                             &mut wb, &mut sel_bone,
@@ -8581,7 +9100,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 // Unload the current import from the GPU + the in-app store and reset
                                 // every retarget field, so the next import starts from a clean slate.
                                 if let Some(p) = preview.take() {
-                                    scene.unload_model(p.hash);
+                                    scene.unload_model(p.scope, p.hash);
                                     imported.remove(&p.hash);
                                 }
                                 retarget = None;
@@ -8754,13 +9273,13 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     status = "donor ref: set a donor first".into();
                                     continue;
                                 };
-                                if !scene.has_model(dh) {
-                                    if let Err(e) = load_gpu_only(&mut w, &mut scene, dh) {
+                                if !scene.has_model(world_scope, dh) {
+                                    if let Err(e) = load_gpu_only(&mut w, (&mut scene, world_scope), dh) {
                                         status = format!("donor ref: {e}");
                                         continue;
                                     }
                                 }
-                                let rest = scene.model_rest_palette(dh);
+                                let rest = scene.model_rest_palette(world_scope, dh);
                                 let e = world.spawn((
                                     Transform {
                                         translation: Vec3::ZERO,
@@ -8772,13 +9291,13 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     SkinPalette { mats: rest },
                                 ));
                                 let rs = default_render_state(&mut w, dh);
-                                scene.set_entity_render_state(e, rs);
+                                scene.set_entity_render_state(world_scope, e, rs);
                                 // One reference at a time: the new donor replaces the last.
                                 if let Some((old, oe)) = donor_ref.replace((dh, e)) {
                                     world.despawn(oe).ok();
-                                    scene.forget_entity(oe);
+                                    scene.forget_entity(world_scope, oe);
                                     if old != dh && preview.as_ref().map(|p| p.hash) != Some(old) {
-                                        scene.unload_model(old);
+                                        scene.unload_model(world_scope, old);
                                     }
                                 }
                                 status = format!("donor reference at origin: {dl}");
@@ -9007,7 +9526,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 }
                             }
                         }
-                        scene.set_glow_cards(&cards);
+                        scene.set_glow_cards(world_scope, &cards);
                     }
                     // Ghost the mesh ONLY while a bone is hovered (in a tree or the mapping grid), so the
                     // highlighted bone reads through it; fully opaque otherwise.
@@ -9018,7 +9537,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                     if preview.is_some() {
                         if let Some(v) = layer_view.take() {
                             let keep: Vec<u32> = preview.iter().map(|p| p.hash).chain(donor_ref.map(|(h, _)| h)).collect();
-                            v.teardown(&mut scene, &mut world, &keep);
+                            v.teardown(&mut scene, (&mut world, world_scope), &keep);
                         }
                     }
                     // ── The open effect: anything else opened since, or leaving its tab, closes it;
@@ -9049,7 +9568,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         let eye = cam_target - fwd * cam_dist;
                         let aspect = scene.size.width as f32 / scene.size.height.max(1) as f32;
                         let vp = crate::layerview::view_proj(eye, cam_target, aspect);
-                        if let Some((x, y)) = picked.filter(|_| tex_view.is_none()) {
+                        if let Some((x, y)) = picked.filter(|_| tex_view.is_none() && wb != Workbench::Depot) {
                             let ppp = scene.size.width as f32 / layer_screen.x.max(1.0);
                             if let Some(i) = crate::layerview::pick(&v.entities, vp, layer_screen, egui::pos2(x as f32 / ppp, y as f32 / ppp)) {
                                 v.selected = Some(i);
@@ -9065,11 +9584,364 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             }
                         }
                         if let Some(Ok(t)) = &layer_templates {
-                            v.step(&mut w, &mut scene, &mut world, t, &index);
+                            v.step(&mut w, &mut scene, (&mut world, world_scope), t, &index);
                         }
                         if let Some((c, d)) = v.take_reframe() {
                             cam_target = c;
                             cam_dist = d;
+                        }
+                    }
+                    // ── The Depot's layer: what the open world item builds, framed on what the
+                    // build changes and then on the selected record, its models loading a few a
+                    // frame. A world item drops the Depot's model; any other item drops the layer. ──
+                    if wb == Workbench::Depot {
+                        // A texture preview's still render: the wearer its preview asked for this
+                        // frame, drawn by the engine the frame after the spinner for it showed.
+                        let want = depot_page.tex.want.borrow_mut().take();
+                        if let Some(want) = want.filter(|want| depot_page.tex.shot_id().as_deref() != Some(want.id.as_str())) {
+                            if shot_waiting.as_deref() == Some(want.id.as_str()) {
+                                shot_waiting = None;
+                                let shot = texture_shot(&mut w, &mut scene, (&mut shot_world, shot_scope), &mut shot_drawn, &want, qm_names.as_ref());
+                                depot_page.tex.set_shot(shot);
+                            } else {
+                                shot_waiting = Some(want.id.clone());
+                            }
+                        }
+                        // An effect item's effect, run by the retail sim in the Depot's world from the
+                        // atlas its build draws; the camera frames it when another item or
+                        // contribution opens.
+                        match depot_page.fx_want() {
+                            None => {
+                                if let Some((_, _, v)) = depot_vfx.take() {
+                                    v.close(&mut scene);
+                                }
+                            }
+                            Some(want) if depot_vfx.as_ref().is_none_or(|(id, _, _)| *id != want.id) && depot_vfx_failed.as_deref() != Some(want.id.as_str()) => {
+                                let fresh = depot_vfx.as_ref().is_none_or(|(_, frame, _)| *frame != want.frame);
+                                if let Some((_, _, old)) = depot_vfx.take() {
+                                    old.close(&mut scene);
+                                }
+                                let opened = start_depot_fx(&mut scene, depot_scope, &want, (&mut depot_vfx_atlas, &mut depot_vfx_rects));
+                                match opened {
+                                    Ok(v) => {
+                                        if fresh {
+                                            (cam_target, cam_dist) = v.framing();
+                                        }
+                                        depot_vfx_failed = None;
+                                        if let Some(t) = depot_vfx_seek.take() {
+                                            depot_vfx_acts.push(crate::vfxview::VfxAct::Seek(t));
+                                        }
+                                        depot_vfx = Some((want.id, want.frame, v));
+                                    }
+                                    Err(e) => {
+                                        depot_page.status = Some(Err(format!("{}: {e}", want.label)));
+                                        depot_vfx_failed = Some(want.id);
+                                    }
+                                }
+                            }
+                            Some(_) => {}
+                        }
+                        match &mut depot_vfx {
+                            Some((_, _, v)) => {
+                                for a in depot_vfx_acts.drain(..) {
+                                    if let Err(e) = v.act(a, &depot_vfx_rects, &mut scene) {
+                                        depot_page.status = Some(Err(format!("{}: {e}", v.label)));
+                                    }
+                                }
+                                v.frame(dt, &mut scene);
+                                depot_page.fx.live.set(Some(crate::depotfx::Live {
+                                    time: v.time,
+                                    span: v.measure.span,
+                                    particles: v.live,
+                                    paused: v.paused,
+                                    speed: v.speed,
+                                    travel: v.travel,
+                                    chosen: v.chosen,
+                                }));
+                            }
+                            None => {
+                                depot_vfx_acts.clear();
+                                depot_page.fx.live.set(None);
+                            }
+                        }
+                        // An animation item's clip, played on the hero its preview chose (loaded as
+                        // the Depot's model), and a replace's shipped clip on a copy of the hero
+                        // beside it, on one clock.
+                        match depot_page.anim_want(qm_names.as_ref()) {
+                            None => {
+                                if let Some(a) = depot_anim.take() {
+                                    a.close((&mut depot_world, depot_scope), &mut scene, depot_preview.as_ref());
+                                }
+                                depot_anim_hero_asked = None;
+                            }
+                            Some(want) => match depot_preview.as_ref().filter(|p| p.hash == want.hero) {
+                                None => {
+                                    if let Some(a) = depot_anim.take() {
+                                        a.close((&mut depot_world, depot_scope), &mut scene, depot_preview.as_ref());
+                                    }
+                                    if depot_anim_hero_asked != Some(want.hero) {
+                                        depot_anim_hero_asked = Some(want.hero);
+                                        actions.push(Act::DepotLoadModel(want.hero, want.hero_label.clone()));
+                                    }
+                                }
+                                Some(p) if depot_anim.as_ref().is_none_or(|a| a.id != want.id) => {
+                                    let old = depot_anim.take();
+                                    let same_clip = old.as_ref().filter(|a| a.clip_id == want.clip_id);
+                                    let (time, playing, looping) = same_clip.map_or((0.0, true, true), |a| (a.time, a.playing, a.looping));
+                                    if let Some(a) = old {
+                                        a.close((&mut depot_world, depot_scope), &mut scene, Some(p));
+                                    }
+                                    let bind = |(clip, trnm): &(std::sync::Arc<Vec<u8>>, std::sync::Arc<Vec<u8>>), whose: &str| {
+                                        ClipAnim::from_sources(clip, trnm, &p.hier, want.name_hash).map_err(|e| format!("{whose} {}: {e}", want.label))
+                                    };
+                                    let yours = want.yours.as_ref().map(|s| bind(s, "your"));
+                                    let shipped = want.shipped.as_ref().map(|s| {
+                                        let clip = bind(s, "the shipped");
+                                        let at = Vec3::new(p.radius * 1.2, 0.0, 0.0);
+                                        let e = depot_world.spawn((
+                                            Transform::from_translation(at),
+                                            ModelRef { model: p.hash },
+                                            AnimState::default(),
+                                            SkinPalette { mats: p.bind.clone() },
+                                        ));
+                                        if let Some(rs) = scene.entity_render_state(p.scope, p.entity).cloned() {
+                                            scene.set_entity_render_state(p.scope, e, rs);
+                                        }
+                                        if cam_is_depot {
+                                            cam_target = p.center + Vec3::new(p.radius * 0.6, 0.0, 0.0);
+                                            cam_dist = (p.radius * 3.6).clamp(1.5, 15000.0);
+                                        }
+                                        (clip, e)
+                                    });
+                                    depot_anim = Some(DepotAnim {
+                                        id: want.id,
+                                        clip_id: want.clip_id,
+                                        label: want.label,
+                                        hero: want.hero,
+                                        yours,
+                                        shipped,
+                                        time,
+                                        playing,
+                                        looping,
+                                    });
+                                }
+                                Some(_) => {}
+                            },
+                        }
+                        match (&mut depot_anim, depot_preview.as_ref()) {
+                            (Some(a), Some(p)) if p.hash == a.hero => {
+                                for act in depot_anim_acts.drain(..) {
+                                    a.act(act);
+                                }
+                                if a.playing {
+                                    (a.time, a.playing) = advance_clip(a.time, dt, a.duration(), a.looping);
+                                }
+                                if let Some(Ok(ca)) = &a.yours {
+                                    let mats = clip_palette(p, ca, a.time.min(ca.clip.duration), &[]);
+                                    let _ = depot_world.insert_one(p.entity, SkinPalette { mats });
+                                }
+                                if let Some((Ok(ca), e)) = &a.shipped {
+                                    let mats = clip_palette(p, ca, a.time.min(ca.clip.duration), &[]);
+                                    let _ = depot_world.insert_one(*e, SkinPalette { mats });
+                                }
+                                depot_page.anim.live.replace(Some(a.live()));
+                            }
+                            _ => {
+                                depot_anim_acts.clear();
+                                depot_page.anim.live.replace(None);
+                            }
+                        }
+                        let world_open = depot_page
+                            .viewport_item()
+                            .is_some_and(|i| crate::depotworld::draws(i) || crate::depottiny::of(i).is_some());
+                        let layer_open = depot_page.layer_open();
+                        let terrain_open = depot_page.viewport_item().is_some_and(|i| crate::depotworld::terrain(i).is_some());
+                        if world_open {
+                            if let Some(p) = depot_preview.take() {
+                                depot_world.despawn(p.entity).ok();
+                                scene.forget_entity(p.scope, p.entity);
+                                scene.unload_model(p.scope, p.hash);
+                            }
+                        }
+                        if !layer_open {
+                            if let Some(d) = depot_layer.take() {
+                                d.view.teardown(&mut scene, (&mut depot_world, depot_scope), &[]);
+                            }
+                        }
+                        // The stand-in: the model qm builds, its intact or ruined part, at its cell's
+                        // centre, on the textures its materials name.
+                        let want_tiny = depot_page.stand_in_view();
+                        if want_tiny.is_none() || !world_open {
+                            if let Some((_, hash, e)) = depot_tiny.take() {
+                                depot_world.despawn(e).ok();
+                                scene.forget_entity(depot_scope, e);
+                                scene.unload_model(depot_scope, hash);
+                            }
+                        }
+                        let fresh_tiny = want_tiny.filter(|v| {
+                            depot_tiny.as_ref().is_none_or(|(id, _, _)| *id != v.id) && depot_tiny_failed.as_deref() != Some(v.id.as_str())
+                        });
+                        if let Some(v) = fresh_tiny {
+                            match crate::depottiny::stand_in_mesh(&v.after.built.model, v.ruined, v.tint) {
+                                Ok((verts, indices, draws)) => {
+                                    let mut textures: TexMap = HashMap::new();
+                                    for h in draws.iter().filter_map(|d| d.diffuse) {
+                                        if textures.contains_key(&h) {
+                                            continue;
+                                        }
+                                        if let Some(td) = w.wads.iter_mut().rev().find_map(|x| wad::extract_texture_hires(x, h).ok()) {
+                                            textures.insert(h, td);
+                                        }
+                                    }
+                                    let same_item = depot_tiny.as_ref().is_some_and(|(id, _, _)| id.split('|').next() == v.id.split('|').next());
+                                    if let Some((_, hash, e)) = depot_tiny.take() {
+                                        depot_world.despawn(e).ok();
+                                        scene.forget_entity(depot_scope, e);
+                                        scene.unload_model(depot_scope, hash);
+                                    }
+                                    let skin = mesh::SkinData::identity();
+                                    scene.load_model(depot_scope, v.hash, &verts, &indices, &draws, &textures, &skin);
+                                    let mats = scene.model_rest_palette(depot_scope, v.hash);
+                                    let at = Vec3::from(v.centre);
+                                    let e = depot_world.spawn((Transform::from_translation(at), ModelRef { model: v.hash }, AnimState::default(), SkinPalette { mats }));
+                                    if !same_item {
+                                        let radius = verts.iter().map(|vx| Vec3::from(vx.pos).length()).fold(1.0, f32::max);
+                                        cam_target = at;
+                                        cam_dist = (radius * 2.4).clamp(5.0, 15000.0);
+                                    }
+                                    depot_tiny_failed = None;
+                                    depot_tiny = Some((v.id, v.hash, e));
+                                }
+                                Err(e) => {
+                                    depot_page.status = Some(Err(format!("{}: {e}", v.label)));
+                                    depot_tiny_failed = Some(v.id);
+                                }
+                            }
+                        }
+                        // The terrain cell: yours or the shipped one, built from its bytes as the game
+                        // builds a cell, at the placement that puts it in the world.
+                        let want_terrain = if terrain_open { depot_page.terrain_view() } else { None };
+                        if !terrain_open {
+                            if let Some((_, hash, e)) = depot_terrain.take() {
+                                depot_world.despawn(e).ok();
+                                scene.forget_entity(depot_scope, e);
+                                scene.unload_model(depot_scope, hash);
+                            }
+                        }
+                        let fresh_terrain = want_terrain.filter(|v| {
+                            depot_terrain.as_ref().is_none_or(|(id, _, _)| *id != v.id) && depot_terrain_failed.as_deref() != Some(v.id.as_str())
+                        });
+                        if let Some(v) = fresh_terrain {
+                            let templates = layer_templates.get_or_insert_with(|| crate::layerview::Templates::read(&mut w));
+                            let built = match templates {
+                                Ok(t) => {
+                                    let fade = t.terrain_fade(v.parent);
+                                    let mut failed = Vec::new();
+                                    w.wads
+                                        .iter_mut()
+                                        .rev()
+                                        .find_map(|x| {
+                                            mercs2_engine::game_world::terrainmesh_from_container(x, v.hash, &v.container, v.pos, fade, &|h| {
+                                                scene.has_terrain_view(depot_scope, h)
+                                            })
+                                            .map_err(|e| failed.push(e))
+                                            .ok()
+                                        })
+                                        .ok_or_else(|| failed.join("; "))
+                                }
+                                Err(e) => Err(format!("the world's templates: {e}")),
+                            };
+                            match built {
+                                Ok(m) => {
+                                    let same_item = depot_terrain.as_ref().is_some_and(|(id, _, _)| id.split('|').next() == v.id.split('|').next());
+                                    if let Some((_, hash, e)) = depot_terrain.take() {
+                                        depot_world.despawn(e).ok();
+                                        scene.forget_entity(depot_scope, e);
+                                        scene.unload_model(depot_scope, hash);
+                                    }
+                                    let radius = m.verts.iter().map(|vx| (Vec3::from(vx.pos) - Vec3::from(v.pos)).length()).fold(1.0, f32::max);
+                                    scene.load_terrain_model(depot_scope, m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                                    let mats = scene.model_rest_palette(depot_scope, m.hash);
+                                    let e = depot_world.spawn((Transform::IDENTITY, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats }));
+                                    if !same_item {
+                                        cam_target = Vec3::from(v.pos);
+                                        cam_dist = (radius * 2.4).clamp(5.0, 15000.0);
+                                    }
+                                    depot_terrain_failed = None;
+                                    depot_terrain = Some((v.id, m.hash, e));
+                                }
+                                Err(e) => {
+                                    depot_page.status = Some(Err(format!("{}: {e}", v.label)));
+                                    depot_terrain_failed = Some(v.id);
+                                }
+                            }
+                        }
+                        let want = depot_page.world_view();
+                        let fresh = want.filter(|v| {
+                            depot_layer.as_ref().is_none_or(|d| d.shown.id != v.id) && depot_layer_failed.as_deref() != Some(v.id.as_str())
+                        });
+                        if let Some(v) = fresh {
+                            let templates = layer_templates.get_or_insert_with(|| crate::layerview::Templates::read(&mut w));
+                            let read = match templates {
+                                Ok(t) => crate::layerview::LayerView::read(0, v.label.clone(), 0, &v.block, t),
+                                Err(e) => Err(format!("the world's templates: {e}")),
+                            };
+                            match read {
+                                Ok(lv) => {
+                                    let same_item = depot_layer.as_ref().is_some_and(|d| d.shown.frame == v.frame);
+                                    if let Some(old) = depot_layer.take() {
+                                        let keep: Vec<u32> = lv.models.keys().copied().collect();
+                                        old.view.teardown(&mut scene, (&mut depot_world, depot_scope), &keep);
+                                    }
+                                    if !same_item {
+                                        (cam_target, cam_dist) = crate::depotworld::framing(&lv, &v.marked);
+                                    }
+                                    depot_layer_failed = None;
+                                    depot_layer = Some(DepotLayer { view: lv, shown: v, focus: None });
+                                }
+                                Err(e) => {
+                                    depot_page.status = Some(Err(format!("{}: {e}", v.label)));
+                                    depot_layer_failed = Some(v.id);
+                                }
+                            }
+                        } else if let (Some(d), Some(v)) = (&mut depot_layer, depot_page.world_view()) {
+                            if d.shown.id == v.id {
+                                d.shown.focus = v.focus;
+                            }
+                        }
+                        // A click on an entity selects its record (or, for an `edit_world`, finds it in
+                        // the layer's entity list).
+                        let clicked = match (&depot_layer, picked) {
+                            (Some(d), Some((x, y))) => {
+                                let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
+                                let aspect = scene.size.width as f32 / scene.size.height.max(1) as f32;
+                                let vp = crate::layerview::view_proj(eye, cam_target, aspect);
+                                let ppp = scene.size.width as f32 / layer_screen.x.max(1.0);
+                                crate::layerview::pick(&d.view.entities, vp, layer_screen, egui::pos2(x as f32 / ppp, y as f32 / ppp))
+                                    .map(|i| d.view.entities[i].key)
+                            }
+                            _ => None,
+                        };
+                        if let Some(act) = clicked.and_then(|k| depot_page.world_pick(k)) {
+                            depot_page.apply(act, cfg.depot_dir.as_deref(), qm_names.as_ref());
+                        }
+                        if let Some(d) = &mut depot_layer {
+                            if d.shown.focus != d.focus {
+                                d.focus = d.shown.focus;
+                                let at = d.focus.and_then(|k| d.view.entities.iter().position(|e| e.key == k));
+                                d.view.selected = at;
+                                if let Some((c, dist)) = at.and_then(|i| d.view.frame_entity(i)) {
+                                    cam_target = c;
+                                    cam_dist = dist;
+                                }
+                            }
+                            if let Some(Ok(t)) = &layer_templates {
+                                d.view.step(&mut w, &mut scene, (&mut depot_world, depot_scope), t, &index);
+                            }
+                            if let Some((c, dist)) = d.view.take_reframe() {
+                                cam_target = c;
+                                cam_dist = dist;
+                            }
                         }
                     }
                     // ── Session log: record `status` whenever it CHANGED this frame. Runs after the
@@ -9112,9 +9984,22 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 scene.set_view(f.view.matrix(), crate::live_cam::NEAR, crate::live_cam::FAR);
                                 scene.set_view_shift(f.shift);
                                 scene.set_shadow(f.view.target.into(), [-0.45, -1.0, -0.35], (f.view.eye.distance(f.view.target) * 1.5).clamp(18.0, 400.0));
-                                scene.render_with(&live_page.mirror.world, Some(&mut overlay))
+                                scene.render_with(live_page.mirror.scope, &live_page.mirror.world, Some(&mut overlay))
                             }
                             None => scene.render_menu_with(t, Some(&mut overlay)),
+                        }
+                    } else if wb == Workbench::Depot {
+                        // The Depot's own world, when an open item shows a model.
+                        if depot_page.viewport_item().is_some()
+                            && (depot_preview.is_some() || depot_layer.is_some() || depot_terrain.is_some() || depot_tiny.is_some() || depot_vfx.is_some())
+                        {
+                            let fwd = dir_from(cam_yaw, cam_pitch);
+                            let view = Mat4::look_at_lh(cam_target - fwd * cam_dist, cam_target, Vec3::Y);
+                            scene.set_view(view, 0.05, 40000.0);
+                            scene.set_shadow(cam_target.into(), [-0.45, -1.0, -0.35], (cam_dist * 1.5).clamp(4.0, 400.0));
+                            scene.render_with(depot_scope, &depot_world, Some(&mut overlay))
+                        } else {
+                            scene.render_menu_with(t, Some(&mut overlay))
                         }
                     } else if tex_view.is_some() || (preview.is_none() && donor_ref.is_none() && layer_view.is_none() && vfx_view.is_none()) {
                         scene.render_menu_with(t, Some(&mut overlay))
@@ -9128,7 +10013,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             [-0.45, -1.0, -0.35],
                             (cam_dist * 1.5).clamp(4.0, 400.0),
                         );
-                        scene.render_with(&world, Some(&mut overlay))
+                        scene.render_with(world_scope, &world, Some(&mut overlay))
                     };
                     match r {
                         Ok(()) => {}
@@ -10280,10 +11165,120 @@ fn conform_autofit(donor: &ModelData, import: &ModelData) -> (f32, [f32; 3]) {
     (s, t)
 }
 
+/// Start what an effect item's viewport runs in the Depot's world `scope`, setting that world's atlas
+/// first when the build draws another (`atlas`: the id and rectangles last set).
+fn start_depot_fx(
+    scene: &mut Scene,
+    scope: mercs2_engine::scene::WorldScope,
+    want: &crate::depotfx::Want,
+    (atlas, rects): (&mut Option<u64>, &mut HashMap<u32, mercs2_formats::fxdict::FxRect>),
+) -> Result<crate::vfxview::VfxView, String> {
+    if *atlas != Some(want.atlas.id) {
+        scene.fx_set_atlas(scope, &want.atlas.texture, &want.atlas.rects)?;
+        *rects = want.atlas.rects.iter().map(|r| (r.key, *r)).collect();
+        *atlas = Some(want.atlas.id);
+    }
+    crate::vfxview::VfxView::open(scope, want.hash, want.label.clone(), (*want.effect).clone(), want.started_by.clone(), rects, scene)
+}
+
+/// A texture preview's square still (width, height, RGBA) and the outfit part of its label, or why it
+/// could not be drawn.
+type ShotDrawn = Result<((u32, u32, Vec<u8>), String), String>;
+
+/// The engine's still render for a texture preview: `want.model` wearing the built texture in place of
+/// `want.target` (or the game's own, when `want.yours` is `None`), in the preview's own world, at the
+/// state a freshly placed instance draws — a character kit at the first outfit of its templates that
+/// shows a part wearing the texture — framed on its bounds from three-quarters above, the square
+/// centre of the frame kept. The model drawn last is unloaded first.
+fn texture_shot(
+    w: &mut WadStack,
+    scene: &mut Scene,
+    (world, scope): (&mut World, mercs2_engine::scene::WorldScope),
+    drawn: &mut Option<(u32, Entity)>,
+    want: &crate::depottex::ShotWant,
+    names: Option<&mercs2_quartermaster::NameTable>,
+) -> crate::depottex::Shot {
+    let name = names.and_then(|n| n.reverse(want.model)).map_or_else(|| format!("0x{:08X}", want.model), str::to_string);
+    let drew = (|| -> ShotDrawn {
+        if let Some((h, e)) = drawn.take() {
+            world.despawn(e).ok();
+            scene.forget_entity(scope, e);
+            scene.unload_model(scope, h);
+        }
+        let mut md = load_model_data(w, want.model)?;
+        if !md.draws.iter().any(|d| d.textures.contains(&want.target)) {
+            return Err(format!("{name}: no draw of its finest rung cites texture 0x{:08X}", want.target));
+        }
+        if let Some(td) = &want.yours {
+            md.textures.insert(want.target, (**td).clone());
+        }
+        let (rs, outfit) = shot_render_state(w, want.model, &md.draws, want.target)?;
+        scene.load_model(scope, want.model, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
+        let mats = scene.model_rest_palette(scope, want.model);
+        let e = world.spawn((Transform::from_translation(Vec3::ZERO), ModelRef { model: want.model }, AnimState::default(), SkinPalette { mats }));
+        *drawn = Some((want.model, e));
+        scene.set_entity_render_state(scope, e, rs);
+        let (centre, radius) = scene.model_bounds(scope, want.model).ok_or("internal error: the model uploaded has no bounds")?;
+        // Close enough that the bounding sphere's height spans most of the engine's 45° vertical view.
+        let dist = radius / 22.5f32.to_radians().tan() * 0.8;
+        let eye = centre + Vec3::new(0.7, 0.55, 1.0).normalize() * dist;
+        let view = glam::Mat4::look_at_lh(eye, centre, Vec3::Y);
+        let frame = scene.render_still(scope, world, view, (dist - radius * 1.5).max(dist * 0.01), dist + radius * 1.5)?;
+        Ok((crop_square(&frame), outfit))
+    })();
+    let texture = if want.yours.is_some() { "the built texture" } else { "the game's texture" };
+    match drew {
+        Ok((image, outfit)) => crate::depottex::Shot {
+            id: want.id.clone(),
+            label: format!("{name} wearing {texture}{outfit}, as the engine draws it"),
+            image: Ok(image),
+        },
+        Err(e) => crate::depottex::Shot { id: want.id.clone(), label: String::new(), image: Err(e) },
+    }
+}
+
+/// The centred square of a frame.
+fn crop_square(f: &mercs2_engine::scene::CapturedFrame) -> (u32, u32, Vec<u8>) {
+    let side = f.width.min(f.height);
+    let (x0, y0) = ((f.width - side) / 2, (f.height - side) / 2);
+    let mut out = Vec::with_capacity((side * side * 4) as usize);
+    for y in y0..y0 + side {
+        let at = ((y * f.width + x0) * 4) as usize;
+        out.extend_from_slice(&f.rgba[at..at + (side * 4) as usize]);
+    }
+    (side, side, out)
+}
+
+/// The state a texture preview draws `hash` at: a freshly placed instance's ([`default_render_state`]),
+/// or for a character kit the first outfit of its templates under which a draw citing `target` shows
+/// ([`outfit_render_state`]), with that outfit named. A kit none of whose outfits shows such a draw is
+/// an error.
+fn shot_render_state(
+    w: &mut WadStack,
+    hash: u32,
+    draws: &[DrawGroup],
+    target: u32,
+) -> Result<(mercs2_engine::render_state::RenderState, String), String> {
+    let Some(kit) = kit_outfits(w, hash)? else { return Ok((default_render_state(w, hash), String::new())) };
+    for t in &kit.templates {
+        let (_, outfits) = kit.mixr.template_outfits(t)?;
+        for (k, o) in outfits.iter().enumerate() {
+            let rs = outfit_render_state(w, hash, &kit.mixr, *o)?;
+            if draws.iter().any(|d| rs.node_visible(d.node) && d.textures.contains(&target)) {
+                return Ok((rs, format!(", outfit {} of {:?}", k + 1, t.label())));
+            }
+        }
+    }
+    Err(format!(
+        "0x{hash:08X} is a character kit, and no outfit of its {} template(s) shows a part wearing texture 0x{target:08X}",
+        kit.templates.len()
+    ))
+}
+
 /// GPU-upload a model by hash (used by the Fit bench's donor reference for a model not previewed yet).
-fn load_gpu_only(w: &mut WadStack, scene: &mut Scene, hash: u32) -> Result<(), String> {
+fn load_gpu_only(w: &mut WadStack, (scene, scope): (&mut Scene, mercs2_engine::scene::WorldScope), hash: u32) -> Result<(), String> {
     let md = load_model_data(w, hash)?;
-    scene.load_model(hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
+    scene.load_model(scope, hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
     Ok(())
 }
 
@@ -10380,7 +11375,7 @@ fn import_file(
     path: &std::path::Path,
     w: &mut WadStack,
     scene: &mut Scene,
-    world: &mut World,
+    world: (&mut World, mercs2_engine::scene::WorldScope),
     imported: &mut HashMap<u32, ModelData>,
     preview: &mut Option<Preview>,
     cam_target: &mut Vec3,
@@ -10409,7 +11404,7 @@ fn import_file(
     let src_parents = im.skin_parents.clone();
     let md: ModelData = im.into();
     imported.insert(hash, md.clone());
-    scene.unload_model(hash); // re-import of the same file replaces it
+    scene.unload_model(world.1, hash); // re-import of the same file replaces it
     let p = build_preview(
         w, scene, world, hash, label, md, &*preview, keep, index, anim_sel, lua_corpus,
     );
@@ -10449,7 +11444,7 @@ fn import_file(
 fn build_preview(
     w: &mut WadStack,
     scene: &mut Scene,
-    world: &mut World,
+    (world, scope): (&mut World, mercs2_engine::scene::WorldScope),
     hash: u32,
     label: String,
     md: ModelData,
@@ -10464,13 +11459,13 @@ fn build_preview(
     // Its model stays loaded when `keep` (the Fit bench's donor reference) still draws it.
     if let Some(p) = old {
         world.despawn(p.entity).ok();
-        scene.forget_entity(p.entity);
+        scene.forget_entity(p.scope, p.entity);
         if p.hash != hash && keep != Some(p.hash) {
-            scene.unload_model(p.hash);
+            scene.unload_model(p.scope, p.hash);
         }
     }
 
-    scene.load_model(hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
+    scene.load_model(scope, hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
     // GROUND-TRUTH visibility, exactly the engine's three-clause draw gate, evaluated per segment
     // against THIS entity's state — not baked into the vertex buffer and not keyed by model hash.
     //  - clause 2: the LOD-rung mask vs `view_state` (the tier the preview starts at).
@@ -10484,7 +11479,7 @@ fn build_preview(
         .unwrap_or_default();
     for gi in 0..md.draws.len() {
         // Clear any stale per-model override from a previous preview of this hash; the gate decides.
-        scene.set_draw_hidden(hash, gi, false);
+        scene.set_draw_hidden(scope, hash, gi, false);
     }
     // The rotors, from the templates that name the model; a helicopter's start at rest, as a parked
     // one in the world does (`+0x68` unset: no crew aboard).
@@ -10600,6 +11595,7 @@ fn build_preview(
         hash,
         label,
         entity,
+        scope,
         rig: md.skin.rig.clone(),
         bind,
         draws: md.draws,
@@ -11050,6 +12046,7 @@ mod rail_tests {
                 | Workbench::Saves
                 | Workbench::Mods
                 | Workbench::Skeleton
+                | Workbench::Depot
                 | Workbench::Quartermaster
                 | Workbench::Settings
                 | Workbench::Live
@@ -11061,6 +12058,7 @@ mod rail_tests {
             Workbench::Saves,
             Workbench::Mods,
             Workbench::Skeleton,
+            Workbench::Depot,
             Workbench::Quartermaster,
             Workbench::Settings,
             Workbench::Live,
@@ -11070,11 +12068,12 @@ mod rail_tests {
         pages
     }
 
-    /// The rail lists the mockup's seven entries, in its order; Live and Log sit at its foot.
+    /// The rail lists the mockup's entries in `RailLevel`'s order (Level comes with its page); Live
+    /// and Log sit at its foot.
     #[test]
     fn the_rail_is_in_the_mockups_order() {
         let labels: Vec<&str> = Workbench::ALL.iter().map(|w| w.label()).collect();
-        assert_eq!(labels, ["Inspect", "Saves", "Driving", "Missions", "Systems", "Shipment", "Settings"]);
+        assert_eq!(labels, ["Inspect", "Saves", "Driving", "Missions", "Systems", "Depot", "Shipment", "Settings"]);
         assert!(!Workbench::ALL.contains(&Workbench::Live), "Live is pinned to the foot, not listed");
     }
 
@@ -11339,6 +12338,71 @@ mod side_wad_retail_tests {
 }
 
 #[cfg(all(test, feature = "retail"))]
+mod depot_anim_retail_tests {
+    use super::{advance_clip, load_model_data, ClipAnim, WadStack};
+
+    /// The Depot's clip, built from a shipped animation asset's own container (its `data` and
+    /// `trnm`, as a replace of it reads them and as an author ships them), binds and poses Mattias
+    /// exactly as the clip Inspect loads from the game's animgroups under the same hash: the
+    /// validated idle (`docs/modernization/locomotion_clips.md`).
+    #[test]
+    fn a_clip_from_its_files_poses_as_the_clip_loaded_by_hash() {
+        let wad = super::retail_vz_wad();
+        let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let md = load_model_data(&mut w, mercs2_formats::hash::pandemic_hash_m2("pmc_hum_mattias")).unwrap_or_else(|e| panic!("{e}"));
+        let hier: Vec<u32> = md.skin.rig.iter().map(|b| b.name_hash).collect();
+        let idle = 0x24F8_C8E6;
+        let by_hash = w.clip_for_rig(&hier, idle).expect("the idle binds to Mattias");
+        let shipped = crate::depotanim::read_shipped(&[std::path::PathBuf::from(&wad)], "0x24F8C8E6").unwrap_or_else(|e| panic!("{e}"));
+        let from = ClipAnim::from_sources(&shipped.clip.clip, &shipped.clip.trnm, &hier, idle).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(from.track_to_hier, by_hash.track_to_hier);
+        assert_eq!(from.num_transform_tracks, by_hash.num_transform_tracks);
+        assert!(from.track_to_hier.iter().filter(|t| t.is_some()).count() > 20, "the idle binds most of the rig");
+        let dur = by_hash.clip.duration;
+        assert_eq!(from.clip.duration, dur);
+        for k in 0..8 {
+            let t = dur * k as f32 / 8.0;
+            assert_eq!(from.clip.sample_local(t), by_hash.clip.sample_local(t), "at {t} s");
+        }
+    }
+
+    #[test]
+    fn a_clip_loops_or_holds_at_its_end() {
+        assert!(advance_clip(0.9, 0.2, 1.0, true).1);
+        assert!((advance_clip(0.9, 0.2, 1.0, true).0 - 0.1).abs() < 1e-5);
+        assert_eq!(advance_clip(0.9, 0.2, 1.0, false), (1.0, false));
+        assert_eq!(advance_clip(0.2, 0.2, 1.0, false), (0.4, true));
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod texture_shot_retail_tests {
+    use super::{load_model_data, shot_render_state, WadStack};
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+
+    /// A texture preview's render draws a model that is no kit at a placed instance's state, and a kit
+    /// at the first outfit of its templates that shows a part wearing the texture: the casual kit's
+    /// baseball cap is drawn under an outfit that shows it, not under the first outfit of all.
+    #[test]
+    fn a_render_draws_an_outfit_that_shows_the_texture() {
+        let mut w = WadStack::open(&super::retail_vz_wad(), &[]).expect("open retail vz.wad");
+        let boss = m2("al_hum_boss");
+        let md = load_model_data(&mut w, boss).unwrap_or_else(|e| panic!("{e}"));
+        let (_, outfit) = shot_render_state(&mut w, boss, &md.draws, m2("al_hum_boss_ub")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(outfit, "", "al_hum_boss is no kit");
+
+        let kit = m2("civ_hum_super_casual");
+        let cap = m2("civ_hum_baseballcap");
+        let md = load_model_data(&mut w, kit).unwrap_or_else(|e| panic!("{e}"));
+        assert!(md.draws.iter().any(|d| d.textures.contains(&cap)), "the kit has a draw wearing the cap");
+        let (rs, outfit) = shot_render_state(&mut w, kit, &md.draws, cap).unwrap_or_else(|e| panic!("{e}"));
+        eprintln!("civ_hum_super_casual wearing civ_hum_baseballcap{outfit}");
+        assert!(outfit.starts_with(", outfit "), "{outfit}");
+        assert!(md.draws.iter().any(|d| rs.node_visible(d.node) && d.textures.contains(&cap)), "the outfit shows the cap");
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
 mod kit_parts_retail_tests {
     use super::{kit_outfits_with, kit_part_names, load_kit_templates, load_model_data, AssetIndex, WadStack};
 
@@ -11521,5 +12585,22 @@ mod string_table_retail_tests {
             assert_eq!(&code[..4], b"\x1bLua", "{name}");
             lua.load(&code).set_name(name).into_function().unwrap_or_else(|e| panic!("{name}: {e}"));
         }
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod picker_lists_retail_tests {
+    use super::{AssetIndex, WadStack};
+    use crate::kindform::{List, Sources};
+
+    /// `ui_hud`'s soundbank, sounddb and wavebank rows share the bank's hash, and the catalog's Audio
+    /// category keeps one row per hash; the soundbank and wavebank pickers each still hold it.
+    #[test]
+    fn the_sound_pickers_hold_a_bank_whose_tables_share_its_hash() {
+        let w = WadStack::open(&super::retail_vz_wad(), &[]).expect("open retail vz.wad");
+        let index = AssetIndex::build(&w.wads, &w.side, std::collections::HashMap::new());
+        let s = Sources { index: Some(&index), corpus: &[], names: None, levels: &[] };
+        assert!(List::SoundBanks.holds(&s, "ui_hud").unwrap(), "ui_hud is not in the soundbank list");
+        assert!(List::WaveBanks.holds(&s, "ui_hud").unwrap(), "ui_hud is not in the wavebank list");
     }
 }
