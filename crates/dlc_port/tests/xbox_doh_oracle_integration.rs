@@ -15,7 +15,7 @@
 //! `decl` descriptor whose primary name_hash has a matching Xbox-DOH
 //! counterpart. That build-up is one order of magnitude more code than the
 //! dispatch logic it would cover. The real retail end-to-end run is
-//! documented in `docs/_dlc_port_xbox_doh_side_oracle.md` and in the
+//! documented in [`docs/_dlc_port_xbox_doh_side_oracle.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_dlc_port_xbox_doh_side_oracle.md) and in the
 //! scratchpad under `dlc_port_side_oracle/`.
 
 use std::path::PathBuf;
@@ -60,7 +60,7 @@ fn ps3_compact_decl_marker_is_the_live_error_phrase() {
     // Belt-and-braces: fail fast if the classifier phrase drifts away from
     // the live error text the walker actually emits. If this test ever
     // flips red, update xbox_doh_oracle::PS3_COMPACT_DECL_MARKER AND the
-    // scope note in docs/_dlc_port_xbox_doh_side_oracle.md at the same time.
+    // scope note in https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_dlc_port_xbox_doh_side_oracle.md at the same time.
     assert!(LIVE_TERRAIN_REJECTION.contains(PS3_COMPACT_DECL_MARKER));
     assert!(LIVE_MESH_REJECTION.contains(PS3_COMPACT_DECL_MARKER));
     assert!(is_ps3_compact_decl_rejection(LIVE_TERRAIN_REJECTION));
@@ -69,7 +69,7 @@ fn ps3_compact_decl_marker_is_the_live_error_phrase() {
 
 #[test]
 fn other_convert_block_rejections_are_left_on_the_skip_path() {
-    // Shared with the Xbox DOH input (docs/_dlc01_pipeline_readiness.md §4):
+    // Shared with the Xbox DOH input (https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_dlc01_pipeline_readiness.md §4):
     // these 8 blocks fail on both platforms. The oracle must NOT claim them.
     assert!(!is_ps3_compact_decl_rejection(
         "convert_block: wavebank transcode: wavebank records_offset 56, expected 40"
