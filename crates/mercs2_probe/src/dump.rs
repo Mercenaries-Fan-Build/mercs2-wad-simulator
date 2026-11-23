@@ -8,7 +8,7 @@
 //!
 //! Either way the dump's bytes must match their recorded sha256, and the game code in the dump must be
 //! v1.0 — the only code whose addresses are the Ghidra decomp's — proven from the dump's own image by
-//! the three-address byte test of `docs/reverse_engineer/pc_exe_build_fingerprints.md`. [`Mem`] then
+//! the three-address byte test of [`docs/reverse_engineer/pc_exe_build_fingerprints.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/pc_exe_build_fingerprints.md). [`Mem`] then
 //! reads virtual addresses out of the dump's `Memory64List`; an address the dump did not capture is an
 //! error, never zeros.
 
