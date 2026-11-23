@@ -85,62 +85,106 @@ pub fn patch_transform(
     pos: Option<[f32; 3]>,
     quat: Option<[f32; 4]>,
 ) -> usize {
-    let spans = transform_record_offsets(block, key);
-    for o in &spans {
-        if let Some(p) = pos {
-            block[o + 4..o + 8].copy_from_slice(&p[0].to_le_bytes());
-            block[o + 8..o + 12].copy_from_slice(&p[1].to_le_bytes());
-            block[o + 12..o + 16].copy_from_slice(&p[2].to_le_bytes());
-        }
-        if let Some(q) = quat {
-            block[o + 20..o + 24].copy_from_slice(&q[0].to_le_bytes());
-            block[o + 24..o + 28].copy_from_slice(&q[1].to_le_bytes());
-            block[o + 28..o + 32].copy_from_slice(&q[2].to_le_bytes());
-            block[o + 32..o + 36].copy_from_slice(&q[3].to_le_bytes());
-        }
-    }
-    spans.len()
+    RecordIndex::read(block).patch_transform(block, key, pos, quat)
 }
 
 /// Patch a `ModelName` record's `model_hash` IN PLACE, matched by entity `key` — the reskin edit
 /// (point a placed entity at a different model). Returns the number of records patched.
 pub fn patch_model(block: &mut [u8], key: u32, model_hash: u32) -> usize {
-    let mut patched = 0;
-    for (off, size) in comp_data_spans(block, "ModelName") {
-        let mut o = off;
-        while o + MODELNAME_STRIDE <= off + size && o + MODELNAME_STRIDE <= block.len() {
-            if read_u32_le(block, o) == key {
-                block[o + 4..o + 8].copy_from_slice(&model_hash.to_le_bytes());
-                patched += 1;
-            }
-            o += MODELNAME_STRIDE;
-        }
-    }
-    patched
+    RecordIndex::read(block).patch_model(block, key, model_hash)
 }
 
-/// Byte offset of every `Transform` record whose entity key is `key`.
-fn transform_record_offsets(block: &[u8], key: u32) -> Vec<usize> {
-    let mut out = Vec::new();
-    for (off, size) in comp_data_spans(block, "Transform") {
-        let mut o = off;
-        while o + TRANSFORM_STRIDE <= off + size && o + TRANSFORM_STRIDE <= block.len() {
-            if read_u32_le(block, o) == key {
-                out.push(o);
-            }
-            o += TRANSFORM_STRIDE;
-        }
-    }
-    out
+/// The byte offset of every `Transform` and `ModelName` record of a block, by entity key, read in
+/// one walk. [`patch_transform`] and [`patch_model`] rewrite fields inside a record and never move
+/// one, so an index read once serves every patch of the same block.
+#[derive(Debug, Clone, Default)]
+pub struct RecordIndex {
+    transforms: std::collections::HashMap<u32, Vec<usize>>,
+    models: std::collections::HashMap<u32, Vec<usize>>,
 }
 
-/// The `(data_off, data_size)` of every COMP with a given info type-name.
-fn comp_data_spans(block: &[u8], info_name: &str) -> Vec<(usize, usize)> {
-    comp_inventory(block)
-        .into_iter()
-        .filter(|c| c.info_name.as_deref() == Some(info_name))
-        .filter_map(|c| Some((c.data_off?, c.data_size?)))
-        .collect()
+impl RecordIndex {
+    pub fn read(block: &[u8]) -> RecordIndex {
+        let mut index = RecordIndex::default();
+        for c in comp_inventory(block) {
+            let (Some(off), Some(size)) = (c.data_off, c.data_size) else { continue };
+            let (stride, into) = match c.info_name.as_deref() {
+                Some("Transform") => (TRANSFORM_STRIDE, &mut index.transforms),
+                Some("ModelName") => (MODELNAME_STRIDE, &mut index.models),
+                _ => continue,
+            };
+            let mut o = off;
+            while o + stride <= off + size && o + stride <= block.len() {
+                into.entry(read_u32_le(block, o)).or_default().push(o);
+                o += stride;
+            }
+        }
+        index
+    }
+
+    /// [`patch_transform`] on the block this index was read from.
+    pub fn patch_transform(&self, block: &mut [u8], key: u32, pos: Option<[f32; 3]>, quat: Option<[f32; 4]>) -> usize {
+        let spans = self.transforms.get(&key).map(Vec::as_slice).unwrap_or_default();
+        for o in spans {
+            if let Some(p) = pos {
+                block[o + 4..o + 8].copy_from_slice(&p[0].to_le_bytes());
+                block[o + 8..o + 12].copy_from_slice(&p[1].to_le_bytes());
+                block[o + 12..o + 16].copy_from_slice(&p[2].to_le_bytes());
+            }
+            if let Some(q) = quat {
+                block[o + 20..o + 24].copy_from_slice(&q[0].to_le_bytes());
+                block[o + 24..o + 28].copy_from_slice(&q[1].to_le_bytes());
+                block[o + 28..o + 32].copy_from_slice(&q[2].to_le_bytes());
+                block[o + 32..o + 36].copy_from_slice(&q[3].to_le_bytes());
+            }
+        }
+        spans.len()
+    }
+
+    /// [`patch_model`] on the block this index was read from.
+    pub fn patch_model(&self, block: &mut [u8], key: u32, model_hash: u32) -> usize {
+        let spans = self.models.get(&key).map(Vec::as_slice).unwrap_or_default();
+        for o in spans {
+            block[o + 4..o + 8].copy_from_slice(&model_hash.to_le_bytes());
+        }
+        spans.len()
+    }
+
+    /// The byte offset of each `Transform` and `ModelName` record of `key`.
+    pub fn offsets(&self, key: u32) -> impl Iterator<Item = usize> + '_ {
+        [&self.transforms, &self.models].into_iter().filter_map(move |m| m.get(&key)).flatten().copied()
+    }
+}
+
+/// Recompute the `CSUM` trailer of each container of `block` (a decompressed block: its entry table,
+/// then its containers) that holds one of the byte offsets `at`: CRC-32 ([`crate::crc32::crc32_mercs2`])
+/// of the container's bytes before its `CSUM` tag. The patches above write fields inside a container
+/// and leave its trailer as it was; a block that ships needs this after them. Returns how many
+/// trailers were written. An offset outside every container, or a container with no `CSUM` trailer,
+/// is an error.
+pub fn reseal(block: &mut [u8], at: &std::collections::BTreeSet<usize>) -> Result<usize, String> {
+    let spans = crate::ucfx::block_chunk_spans(block)?;
+    let mut sealed = 0;
+    let mut left: std::collections::BTreeSet<usize> = at.clone();
+    for (i, (_, r)) in spans.iter().enumerate() {
+        let inside: Vec<usize> = left.range(r.clone()).copied().collect();
+        if inside.is_empty() {
+            continue;
+        }
+        for o in &inside {
+            left.remove(o);
+        }
+        let tag = r.end.checked_sub(8).filter(|&t| t >= r.start && &block[t..t + 4] == b"CSUM").ok_or_else(|| {
+            format!("entry {i} (bytes {}..{}) ends in no CSUM trailer", r.start, r.end)
+        })?;
+        let sum = crate::crc32::crc32_mercs2(&block[r.start..tag]);
+        block[tag + 4..tag + 8].copy_from_slice(&sum.to_le_bytes());
+        sealed += 1;
+    }
+    match left.first() {
+        Some(o) => Err(format!("byte {o} is in no container of the block")),
+        None => Ok(sealed),
+    }
 }
 
 /// Enumerate EVERY COMP across every UCFX sub-block of a decompressed block (both
@@ -1298,6 +1342,52 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block of two sealed containers.
+    fn two_containers() -> Vec<u8> {
+        let sealed = |body: &[u8]| {
+            let mut c = b"UCFX".to_vec();
+            c.extend_from_slice(body);
+            let sum = crate::crc32::crc32_mercs2(&c);
+            c.extend_from_slice(b"CSUM");
+            c.extend_from_slice(&sum.to_le_bytes());
+            c
+        };
+        let (a, b) = (sealed(&[1, 2, 3, 4]), sealed(&[5, 6]));
+        let mut block = 2u32.to_le_bytes().to_vec();
+        for (name, c) in [(0xAu32, &a), (0xB, &b)] {
+            for w in [name, crate::types::TYPE_HASH_LAYER, 0, c.len() as u32] {
+                block.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        block.extend_from_slice(&a);
+        block.extend_from_slice(&b);
+        block
+    }
+
+    /// A byte written into a container leaves its CSUM stale until it is resealed; reseal writes the
+    /// trailer of that container alone, and of an untouched one changes nothing.
+    #[test]
+    fn reseal_rewrites_the_trailer_of_each_container_written_into() {
+        let block = two_containers();
+        let first = 4 + 2 * 16 + 4;
+        assert_eq!(reseal(&mut block.clone(), &[first].into()).map(|n| (n, ())), Ok((1, ())));
+        let mut resealed = block.clone();
+        reseal(&mut resealed, &[first].into()).unwrap();
+        assert_eq!(resealed, block, "resealing an unchanged container changes nothing");
+
+        // The first container is bytes 36..52: its CSUM covers 36..44, its value is at 48..52.
+        let sealed = |b: &[u8]| crate::crc32::crc32_mercs2(&b[36..44]).to_le_bytes() == b[48..52];
+        let mut edited = block.clone();
+        edited[first] = 9;
+        assert!(!sealed(&edited));
+        reseal(&mut edited, &[first].into()).unwrap();
+        assert!(sealed(&edited));
+        let second = 4 + 2 * 16 + 16;
+        assert_eq!(&edited[second..], &block[second..], "the other container is as it was");
+        let past = edited.len() + 5;
+        assert!(reseal(&mut edited, &[past].into()).unwrap_err().contains("in no container"));
+    }
 
     /// A Transform record is exactly 42 bytes: key + XYZ + pad + quat + 6-tail.
     #[test]
