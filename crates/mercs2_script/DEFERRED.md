@@ -7,7 +7,7 @@ the oracle; only `[faithful-blocker: yes]` items can change observable game beha
 
 - **Namespace global-name uncertainty for low-usage tables.** `[faithful-blocker: no]` The per-table
   `GLOBAL` in `src/bindings/*.rs` was data-derived from the dominant `Global.Func(` prefix in the
-  decompiled corpus (`docs/mercs2-luacd`). For tables the game barely calls, the corpus signal is weak,
+  decompiled corpus ([`corpus/mercs2-luacd/src`](corpus/mercs2-luacd/src)). For tables the game barely calls, the corpus signal is weak,
   so a few globals are best-effort labels pending a confirm-live read of the `luaL_register` registrar
   (the open item in `scripting_host_binding_code_map.md` §1.2/§6): `ObjectFilter` (doc "Filter"),
   `Report` (doc "Infraction"; entries `Init/GetInfractions/Completed/Failed/SetDelay`), `Timer`,
@@ -37,7 +37,7 @@ the oracle; only `[faithful-blocker: yes]` items can change observable game beha
 - **`Event.ObjectHibernation`'s model-detail gate is not modelled.** `[faithful-blocker: no]` The
   condition's optional fourth argument (`+0x2C`, awake form only) makes retail's entity test also
   require the entity's model resource loaded at that detail level (`0x0246F220`,
-  `docs/reverse_engineer/hibernation_grid.md` §6a). No shipped script passes one — the only site that
+  [`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §6a). No shipped script passes one — the only site that
   forwards a detail, `MrxUtil.SpawnActor`'s `nDetail`, passes nil — so `EngineHost::object_hibernation_passes`
   makes a detail a hard error instead.
 
