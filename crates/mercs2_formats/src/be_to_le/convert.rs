@@ -1024,7 +1024,7 @@ fn convert_generic_bodies(
                         // u16s, moving 0x0226 to +0 and zeroing the +14
                         // sub-component count, crashing the effect loader on the
                         // first COLR append (AV @ 0x00493102). See Python
-                        // _convert_efct_header / docs/spatial_hash_crash_analysis.md.
+                        // _convert_efct_header / https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/spatial_hash_crash_analysis.md.
                         convert_efct_header_inplace(
                             &mut data_area[body_local_start..body_local_end],
                         );
@@ -1557,7 +1557,7 @@ fn xbox_decl_format_to_pc_type(fmt: u8) -> Option<u8> {
 /// followed by a compact token sequence describing that one stream's attribute
 /// set. The entire DLC01 PS3 inventory uses only 11 distinct patterns across
 /// 7,806 descriptor rows; the per-pattern enumeration + Xbox-DOH oracle
-/// citations live in `docs/_descriptor_walker_oracle.md`.
+/// citations live in [`docs/_descriptor_walker_oracle.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md).
 ///
 /// Because each PS3 STRM group describes only one slice of the full vertex,
 /// its `decl` cannot by itself produce a usable PC decl: the PC engine's
@@ -1566,7 +1566,7 @@ fn xbox_decl_format_to_pc_type(fmt: u8) -> Option<u8> {
 /// a geometry-less or partial decl, silently breaking the mesh. The honest
 /// behaviour is to fail loud here and have the caller route the DLC via the
 /// X360-DOH import path (the current production flow — see §4-§5 of
-/// `docs/_dlc01_pipeline_readiness.md`), which already converts cleanly.
+/// [`docs/_dlc01_pipeline_readiness.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_dlc01_pipeline_readiness.md)), which already converts cleanly.
 ///
 /// Returns `Err` on every input, with the recognised pattern and detected
 /// stride (if the sibling `info` chunk is available via the data_area header)
@@ -1581,7 +1581,7 @@ fn convert_decl_ps3_compact(be: &[u8]) -> Result<Vec<u8>, String> {
         }
         s
     };
-    // Classify by observed catalogue (see docs/_descriptor_walker_oracle.md).
+    // Classify by observed catalogue (see https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md).
     // Each known pattern cites its Xbox-DOH oracle decl so a reader can see
     // what the PC conversion WOULD need to synthesise if the full multi-
     // stream merge pass is wired. Patterns are keyed by exact bytes — a
@@ -1603,7 +1603,7 @@ fn convert_decl_ps3_compact(be: &[u8]) -> Result<Vec<u8>, String> {
         // Mesh / foliage patterns (type_hash 0x5B724250 / 0x600B904E).
         // These are 1-to-many against Xbox-DOH decls at the same block/desc
         // index — the compact body alone cannot select which Xbox decl to
-        // emit. See docs/_descriptor_walker_oracle.md §Mesh ambiguity.
+        // emit. See https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md §Mesh ambiguity.
         "03000802" => "mesh/foliage compact stride-4 (ambiguous: maps to 10 Xbox decls)",
         "0300080206040201" => "mesh compact stride-8 variant-a (xbox-oracle: UV@8 F16x2 + NORMAL@12 F16x4)",
         "0300080204040304" => "mesh/foliage compact stride-8 variant-b (ambiguous: maps to 9+ Xbox decls)",
@@ -1613,7 +1613,7 @@ fn convert_decl_ps3_compact(be: &[u8]) -> Result<Vec<u8>, String> {
         "PS3 compact decl detected (bytes=`{hex}`, {}): the PS3 DLC ships a \
          non-interleaved multi-stream vertex layout; one PS3 STRM group / `decl` describes \
          ONE attribute slice. The PC engine requires a single-stream interleaved \
-         D3DVERTEXELEMENT9 array. See docs/_descriptor_walker_oracle.md — route this \
+         D3DVERTEXELEMENT9 array. See https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md — route this \
          block through the X360 DOH import path (dlc_port --x360-stfs <dlc01.doh>) \
          or implement the multi-STRM merge pass before translating here.",
         semantic
@@ -1648,7 +1648,7 @@ fn pc_d3ddecltype_size(t: u8) -> u16 {
 ///   22/26 bytes, vs Xbox single-stream strides 20/24/28/32/36 for the same
 ///   semantic meshes). Routed to `convert_decl_ps3_compact`, which pattern-
 ///   matches against the 11-pattern vocabulary catalogued (with per-pattern
-///   Xbox-DOH oracle citations) in `docs/_descriptor_walker_oracle.md`.
+///   Xbox-DOH oracle citations) in [`docs/_descriptor_walker_oracle.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md).
 ///
 /// PC output in both paths:
 ///   `8B header [0, 16]` + N×8B D3DVERTEXELEMENT9 (`u16 Stream, u16 Offset, u8
@@ -1658,7 +1658,7 @@ fn pc_d3ddecltype_size(t: u8) -> u16 {
 fn convert_decl(be: &[u8]) -> Result<Vec<u8>, String> {
     // PS3 compact decl: `03 00 ...`. The Xbox fetch-decl header always starts
     // with four zero bytes (`a` of the header record), so this gate is
-    // unambiguous. See docs/_descriptor_walker_oracle.md.
+    // unambiguous. See https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_descriptor_walker_oracle.md.
     if be.len() >= 2 && be[0] == 0x03 && be[1] == 0x00 {
         return convert_decl_ps3_compact(be);
     }
@@ -3040,7 +3040,7 @@ fn convert_cfx_inplace(body: &mut [u8]) {
 /// record builder (0x0063D7C0) strides 42 only when that value is `>= 0x2A`,
 /// otherwise 40. Reversing the first 8 bytes as two `u32` words *transposes*
 /// the two `u16` fields, zeroing the gate → 40-byte strides → spatial-hash
-/// access violation on save-load. See docs/spatial_hash_crash_analysis.md.
+/// access violation on save-load. See [`docs/spatial_hash_crash_analysis.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/spatial_hash_crash_analysis.md).
 ///
 /// Swaps only the bytes that are present; callers handle bytes beyond +8.
 fn swap_chdr_header_inplace(data: &mut [u8]) {
