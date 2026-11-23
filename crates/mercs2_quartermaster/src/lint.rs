@@ -238,12 +238,12 @@ pub const M0197_SCRIPT_NAME_TAKEN: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0197",
 };
 
-/// An `add_placement` / `add_layer` entity file lists one key twice, or an `add_placement` key is
-/// one the target layer's block already places ([`placement_game_checks`]). Retail places every
-/// key once.
+/// An `add_placement` / `add_layer` entity file lists one key twice, or adds a key a layer of the
+/// game already places or another of the Shipment's placements adds ([`placement_game_checks`]).
+/// Retail places every key once.
 pub const M0198_ENTITY_KEY_TAKEN: Rule = Rule {
     code: "M0198",
-    title: "an added entity's key is already placed in the target layer, or twice in its file",
+    title: "an added entity's key is already placed in the game, added twice by the Shipment, or twice in its file",
     doc: "docs/modding/manifest_format.md#m0198",
 };
 
@@ -286,6 +286,16 @@ pub const M0316_FETCH_PACKAGE: Rule = Rule {
     code: "M0316",
     title: "a fetch_package or a from: that the build cannot resolve",
     doc: "docs/modding/manifest_format.md#m0316",
+};
+
+/// A `set_spawn_lists` row the generated wrapper cannot set: a function or building that is not a
+/// name, an empty part, a call another row already sets ([`crate::spawn_lists::row_problems`]); and,
+/// against the shipped scripts, no such call in the target, a building the function holds as a
+/// parameter or local, or a list no shipped script sets ([`spawn_list_source_checks`]).
+pub const M0317_SPAWN_LIST_UNSETTABLE: Rule = Rule {
+    code: "M0317",
+    title: "a set_spawn_lists row names a call the wrapper cannot set, or a list the shipped Lua never sets",
+    doc: "docs/modding/manifest_format.md#m0317",
 };
 
 /// An `add_language` name that cannot be a novel language WAD — not a lowercase `[a-z0-9_]` token, or
@@ -941,6 +951,7 @@ pub const RULES: &[Rule] = &[
     M0312_LIBRARY_LOAD_UNUSABLE,
     M0315_PCALL_IMPORT,
     M0316_FETCH_PACKAGE,
+    M0317_SPAWN_LIST_UNSETTABLE,
     M0320_MENU_PAGE_UNKNOWN,
     M0321_MENU_ACTION_FORM,
     M0322_MENU_KEY_EMPTY,
@@ -2474,19 +2485,7 @@ pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) ->
     if !crate::fx::merges_fx(manifest) {
         return Ok(out);
     }
-    let base = crate::fx::GameFx::read(game)?;
-    let set = [crate::fx::FxShipment { manifest, root }];
-    let (atlas, repainted) = crate::fx::base_atlas(&base.atlas, &set)?;
-    let schemas = crate::fx::level_schemas(game, std::iter::once(manifest))?;
-    let fx_base = crate::fx::FxBase {
-        effects: &base.effects.entries,
-        worldentity: &base.worldentity,
-        fxdict: &base.fxdict,
-        atlas: &atlas,
-        repainted,
-        level_templates: crate::fx::LevelTemplates::main(schemas.as_ref()),
-    };
-    if let Err(f) = crate::fx::merge(&fx_base, &set, crate::fx::Scope::Build) {
+    if let (_, Err(f)) = crate::fx::merge_shipment(manifest, root, game)? {
         for p in f
             .problems
             .into_iter()
@@ -2508,15 +2507,16 @@ pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) ->
 }
 
 /// M0198 for a Shipment's `add_placement` and `add_layer`: a key two records of one entity file
-/// share, and an `add_placement` key the target layer's block (the block the lowering re-emits,
-/// [`GameStack::layer_block_for_edit`]) already places in a `Transform`, `ModelName` or `Name`
-/// record. A target layer the stack does not have is the lowering's refusal, not this rule's.
-/// A contribution whose entity path is already an error (M0110 missing, M0111 escaping) is not
-/// read: an escaping path would be read outside the Shipment.
+/// share; a key a `Transform`, `ModelName` or `Name` record of any layer of the game stack
+/// ([`GameStack::layer_containers`]) already places; and a key an earlier `add_placement`,
+/// `add_layer` or `add_tiny_geometry` of the Shipment adds. A key an `add_tiny_geometry` shares
+/// with an earlier entity file is reported at the stand-in; two stand-ins, and a stand-in and the
+/// game, are M0250's. A contribution whose entity path is already an error (M0110 missing, M0111
+/// escaping) is not read: an escaping path would be read outside the Shipment.
 ///
 /// An entity file that does not read or parse is not checked here: the lowering refuses it
 /// ([`crate::build::read_entities_file`]), as it refuses an `edit_world` edits file, which no lint
-/// reads either.
+/// reads either. Layers the stack cannot read are an M0198 finding at each entity file.
 pub fn placement_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let unreadable: Vec<usize> = discover::check_sources(manifest, root)
@@ -2528,56 +2528,146 @@ pub fn placement_game_checks(manifest: &Manifest, root: &Path, game: &mut GameSt
             SourceIssue::OutsideSrc { .. } => None,
         })
         .collect();
+    // (index, kind, the keys it adds, the entity file when it has one), in manifest order.
+    let mut adds: Vec<(usize, &str, Vec<u32>, Option<&Path>)> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        let (file, layer) = match c {
-            Contribution::AddPlacement { layer, entity } => (entity, Some(layer)),
-            Contribution::AddLayer { entities, .. } => (entities, None),
+        let file = match c {
+            Contribution::AddPlacement { entity, .. } => entity,
+            Contribution::AddLayer { entities, .. } => entities,
+            Contribution::AddTinyGeometry { key, .. } => {
+                adds.push((index, c.kind(), vec![*key], None));
+                continue;
+            }
             _ => continue,
         };
         if unreadable.contains(&index) {
             continue;
         }
-        let kind = c.kind();
         let Ok(ents) = crate::build::read_entities_file(&root.join(file)) else { continue };
+        adds.push((index, c.kind(), ents.iter().map(|e| e.key).collect(), Some(file.as_path())));
+    }
+    if !adds.iter().any(|a| a.3.is_some()) {
+        return out;
+    }
+    let err = |index: usize, message: String| Diagnostic {
+        rule: M0198_ENTITY_KEY_TAKEN,
+        severity: Severity::Error,
+        message,
+        at: Some(index),
+        fix: None,
+    };
+    let placed: std::collections::BTreeMap<u32, u32> = match game.layer_containers() {
+        Ok(layers) => {
+            let mut placed = std::collections::BTreeMap::new();
+            for (layer, c) in &layers {
+                for k in mercs2_formats::placement::entity_key_set(c) {
+                    placed.entry(k).or_insert(*layer);
+                }
+            }
+            placed
+        }
+        Err(e) => {
+            for (index, kind, _, file) in &adds {
+                if file.is_some() {
+                    out.push(err(*index, format!("{kind}: the game's layers could not be read to check the keys: {e}")));
+                }
+            }
+            return out;
+        }
+    };
+    let mut first: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    for (index, kind, keys, file) in &adds {
+        let (index, kind) = (*index, *kind);
         let mut seen = std::collections::BTreeSet::new();
         let mut twice = std::collections::BTreeSet::new();
-        for e in &ents {
-            if !seen.insert(e.key) {
-                twice.insert(e.key);
+        for k in keys {
+            if !seen.insert(*k) {
+                twice.insert(*k);
             }
         }
-        for key in twice {
-            out.push(Diagnostic {
-                rule: M0198_ENTITY_KEY_TAKEN,
-                severity: Severity::Error,
-                message: format!(
-                    "{kind}: entity key 0x{key:08X} is in two records of {}; each placed entity \
-                     needs its own key",
-                    file.display()
-                ),
-                at: Some(index),
-                fix: None,
-            });
+        if let Some(file) = file {
+            for key in &twice {
+                out.push(err(
+                    index,
+                    format!("{kind}: entity key 0x{key:08X} is in two records of {}; each placed entity needs its own key", file.display()),
+                ));
+            }
+            for key in &seen {
+                if let Some(layer) = placed.get(key) {
+                    out.push(err(
+                        index,
+                        format!(
+                            "{kind}: entity key 0x{key:08X} is already placed by layer 0x{layer:08X} of the game. \
+                             Retail places every key once; give the new entity a key no layer uses."
+                        ),
+                    ));
+                }
+            }
         }
-        let Some(layer) = layer else { continue };
-        let Some(inputs) = game.layer_block_for_edit(layer) else { continue };
-        let placed = mercs2_formats::placement::entity_key_set(&inputs.block);
-        let mut taken: Vec<u32> = ents.iter().map(|e| e.key).filter(|k| placed.contains(k)).collect();
-        taken.sort_unstable();
-        taken.dedup();
-        for key in taken {
-            out.push(Diagnostic {
-                rule: M0198_ENTITY_KEY_TAKEN,
-                severity: Severity::Error,
-                message: format!(
-                    "add_placement: entity key 0x{key:08X} is already placed in {} (the block layer \
-                     {layer:?} names). Retail places every key once; give the new entity a key no \
-                     record of that block uses.",
-                    inputs.path
-                ),
-                at: Some(index),
-                fix: None,
-            });
+        for key in &seen {
+            match first.get(key) {
+                Some(&prev) if file.is_some() || adds.iter().any(|a| a.0 == prev && a.3.is_some()) => out.push(err(
+                    index,
+                    format!("{kind}: entity key 0x{key:08X} is contributions[{prev}]'s key too; each placed entity needs its own key"),
+                )),
+                Some(_) => {}
+                None => {
+                    first.insert(*key, index);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// M0317 against the shipped scripts: each `set_spawn_lists` row names a spawn-list call of its
+/// target that the wrapper can set, and a list the shipped Lua sets. `corpus_root` is the decompiled
+/// Lua corpus the linker appends to; its `vz.wad` folders ([`crate::link::VZ_SOURCE_DIRS`]) are
+/// what is read.
+pub fn spawn_list_source_checks(manifest: &Manifest, corpus_root: &Path) -> Vec<Diagnostic> {
+    let rows: Vec<(usize, &str, &[crate::manifest::SpawnListSet])> = manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| match c {
+            Contribution::SetSpawnLists { target, lists } if !lists.is_empty() => Some((i, target.as_str(), lists.as_slice())),
+            _ => None,
+        })
+        .collect();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let err = |index: usize, message: String| Diagnostic {
+        rule: M0317_SPAWN_LIST_UNSETTABLE,
+        severity: Severity::Error,
+        message,
+        at: Some(index),
+        fix: None,
+    };
+    let names = match crate::spawn_lists::corpus_list_names(corpus_root, crate::link::VZ_SOURCE_DIRS) {
+        Ok(n) => n,
+        Err(e) => return rows.iter().map(|(i, ..)| err(*i, e.clone())).collect(),
+    };
+    let mut out = Vec::new();
+    for (index, target, lists) in rows {
+        let path = match crate::link::base_source_path(corpus_root, crate::link::VZ_SOURCE_DIRS, target) {
+            Ok(p) => p,
+            Err(tried) => {
+                let tried: Vec<String> = tried.iter().map(|p| p.display().to_string()).collect();
+                out.push(err(index, format!("no shipped script {target}: tried {}", tried.join(", "))));
+                continue;
+            }
+        };
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                out.push(err(index, format!("{}: {e}", path.display())));
+                continue;
+            }
+        };
+        let shown = path.display().to_string();
+        for message in crate::spawn_lists::source_problems(lists, &shown, &source, &names) {
+            out.push(err(index, message));
         }
     }
     out
@@ -2654,6 +2744,14 @@ pub fn lint(
             at: sc.indices.first().copied(),
             fix: None,
         });
+    }
+
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        if let Contribution::SetSpawnLists { lists, .. } = c {
+            for message in crate::spawn_lists::row_problems(lists) {
+                out.push(Diagnostic { rule: M0317_SPAWN_LIST_UNSETTABLE, severity: Severity::Error, message, at: Some(index), fix: None });
+            }
+        }
     }
 
     if let Some(names) = names {
