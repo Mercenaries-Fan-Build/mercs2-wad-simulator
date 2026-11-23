@@ -4,6 +4,12 @@ use mercs2_formats::ffcs::{load_ffcs_archive, read_u32_le};
 use mercs2_formats::sges::decompress_block;
 use std::fs::File;
 pub fn run(args: &[String]) {
+    let mut args = args.to_vec();
+    let Some(i) = args.iter().position(|a| a == "--dir").filter(|i| i + 1 < args.len()) else {
+        eprintln!("usage: jc2-blockrt --dir <dir> [vz.wad]  (writes <dir>/block3185_original.bin)");
+        std::process::exit(1)
+    };
+    let dir = std::path::PathBuf::from(args.drain(i..=i + 1).nth(1).expect("checked above"));
     let path = args
         .first()
         .map(std::path::PathBuf::from)
@@ -48,11 +54,9 @@ pub fn run(args: &[String]) {
         blk.len() as i64 - expected as i64
     );
     // Write the UNMODIFIED decompressed block for a null-override diagnostic patch.
-    std::fs::write("../../output/block3185_original.bin", &blk).unwrap();
-    println!(
-        "wrote output/block3185_original.bin ({} bytes, verbatim)",
-        blk.len()
-    );
+    let out = dir.join("block3185_original.bin");
+    std::fs::write(&out, &blk).unwrap_or_else(|e| panic!("write {}: {e}", out.display()));
+    println!("wrote {} ({} bytes, verbatim)", out.display(), blk.len());
     if expected < blk.len() {
         let t = &blk[expected..];
         println!(
