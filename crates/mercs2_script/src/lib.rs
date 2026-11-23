@@ -3,7 +3,7 @@
 //! This is the **engine** side of scripting: the VM, the module system (`import`/`inherit`/
 //! `dynamic_import`), and the *mechanism* for exposing engine services to Lua (the `Sys.*` / `Debug.*`
 //! / `Pg.*` / `Event.*` C-binding tables). It is asset-agnostic — it knows nothing about Mercenaries.
-//! The game's Mercenaries Lua (`docs/mercs2-luacd/`, the `Mrx*`/mission/contract modules) runs *on*
+//! The game's Mercenaries Lua (`corpus/mercs2-luacd/src/`, the `Mrx*`/mission/contract modules) runs *on*
 //! this host and drives the engine through it. This is the charter's embedded-Lua goal
 //! (`docs/modernization/00_charter.md` — run migrated scripts validated by Surface B) and the
 //! engine/game split in `docs/modernization/pangea_engine_alignment.md`.
@@ -29,7 +29,7 @@
 //! - The **engine binding surface**: 37 namespaces / 1092 required cfuncs, one [`bindings`] module per
 //!   `luaL_Reg` table, seeded from the live Surface-B trace
 //!   (`mods/lua_trace_asi/reference/binding_map.json`; human index
-//!   `docs/reverse_engineer/scripting_host_binding_code_map.md` §3). Coverage is machine-readable
+//!   [`docs/reverse_engineer/scripting_host_binding_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/scripting_host_binding_code_map.md) §3). Coverage is machine-readable
 //!   ([`coverage_json`] → `binding_coverage.json`); the burn-down metric is `remaining` = required−real.
 //! - Optionally the bring-up auto-stub layer ([`ScriptHost::enable_autostub`]): unwired Capitalized
 //!   globals resolve to logged no-op stubs so the real import cascade completes, and every touched name
@@ -135,7 +135,7 @@ pub trait EngineHost {
     }
     /// `Pg.LoadLayer` / `Pg.ReloadLayer` / `Pg.UnloadLayer` (`op` = `"Load"` / `"Reload"` /
     /// `"Unload"`): make the request. False when it is refused (the binding pushes nil and tracks
-    /// nothing) — `docs/reverse_engineer/layer_load_code_map.md` §2–3.
+    /// nothing) — [`docs/reverse_engineer/layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md) §2–3.
     fn layer_request(&mut self, op: &str, layer: &str, dynamic: bool) -> bool {
         self.guids().borrow_mut().request_layer(layer_op(op), layer_hash(layer), dynamic)
     }
@@ -160,7 +160,7 @@ pub trait EngineHost {
     /// `None` without a SceneObject row. `Object.IsAwake` (`0x5CF300`) is state 2 and
     /// `Object.IsHibernated` (`0x5CF240`) state ≠ 2, nil without a row.
     fn object_activation_state(&self, guid: u64) -> Option<u8>;
-    /// The `Event.ObjectHibernation` entity test (`0x0246F220`, `docs/reverse_engineer/hibernation_grid.md`
+    /// The `Event.ObjectHibernation` entity test (`0x0246F220`, [`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md)
     /// §6a): false without a SceneObject row; false unless the activation state is exactly `state`;
     /// then, with a `detail`, the entity's model (own ModelName, else its template's) must be resident
     /// at that detail level — an entity with no ModelName passes. The detail gate is not modelled: no
@@ -174,7 +174,7 @@ pub trait EngineHost {
     }
     /// The `Event.ObjectHibernation` layer form: true at layer status 3; at status 2 or 4, when every
     /// entity the (dynamic) layer placed passes the entity test; false otherwise
-    /// (`docs/reverse_engineer/layer_load_code_map.md` §4).
+    /// ([`docs/reverse_engineer/layer_load_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/layer_load_code_map.md) §4).
     fn layer_hibernation_passes(&self, layer: &str, state: u8, detail: Option<i32>) -> bool {
         let h = layer_hash(layer);
         let (status, keys) = {
@@ -208,7 +208,7 @@ pub trait EngineHost {
     }
     /// `Pg.Spawn` (`0x5D5D20`, Xbox `0x82336B70`) — instantiate a worldentity template as a runtime
     /// entity: its key, SceneObject row and grid registration, then a direct activation when a viewer
-    /// is in range (`docs/reverse_engineer/hibernation_grid.md` §6 "Runtime spawns"). Returns the new
+    /// is in range ([`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §6 "Runtime spawns"). Returns the new
     /// key, 0 (Lua `nil`) when retail returns nil; an error is raised into Lua.
     fn pg_spawn(&mut self, spawn: &SpawnArgs) -> Result<u64, String>;
     /// `Object.SetName` — bind a placed name to a runtime GUID.
@@ -1367,7 +1367,7 @@ fn layer_hash(layer: &str) -> u32 {
 pub type SharedHost = Rc<RefCell<dyn EngineHost>>;
 
 /// The engine's **own** Lua bootstrap glue, recovered verbatim from the binary's string pool
-/// (`docs/mercs2-pdb-analysis/lua-scripting.md`, "Notable strings"):
+/// ([`docs/mercs2-pdb-analysis/lua-scripting.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/mercs2-pdb-analysis/lua-scripting.md), "Notable strings"):
 ///
 /// ```text
 /// _tostring = tostring; tostring = Sys.ToStringL; help = Sys.Help; StringToGuid = Sys.StringToGuid;
@@ -1652,7 +1652,7 @@ pub struct ScriptHost {
 
 impl ScriptHost {
     /// Build a host whose `import`/`inherit` resolve module names against `roots` (recursively indexed
-    /// `.lua` files — e.g. `docs/mercs2-luacd/src`). Installs the prelude and the module system.
+    /// `.lua` files — e.g. `crates/mercs2_script/corpus/mercs2-luacd/src`). Installs the prelude and the module system.
     pub fn new(roots: Vec<PathBuf>) -> LuaResult<Self> {
         Self::with_loader(Loader::new(&roots))
     }
