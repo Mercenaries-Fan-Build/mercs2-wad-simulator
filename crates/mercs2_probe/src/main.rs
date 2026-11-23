@@ -79,6 +79,7 @@ mod lod_neuter;
 mod lua_debug_live;
 mod lua_vehicle_hashes;
 mod model_chains;
+mod model_names;
 mod phy2_probe;
 mod place_forge;
 mod place_lift;
@@ -183,6 +184,7 @@ fn usage() -> ! {
          \x20 worldentity-probe [vz.wad] [0xHANDLE ...]      (worldentity COMP groups and template recipes)\n\
          \x20 ragdoll-probe [--hashes] [--extract-fixture]  (Havok physics classes across vz.wad)\n\
          \x20 lua-vehicle-hashes [out.csv]                  (vehicle names in the decompiled Lua; run from the notes repo root)\n\
+         \x20 model-names [--names <names.json>] [--tsv P]   (each model's catalog name against its own templates and textures)\n\
          \x20 shaderforge <list|static-vs|consts|splice|bundle|disasm|roles> <shader3.bin> [rec|role|out] [out] | asm <in.asm> <out.sho> [--target T] | store-id <stem> [--low]\n\
          (vz.wad auto-discovers from MERCS2_GAME_DIR / VZ_WAD, then the registry; override with --wad <path>)"
     );
@@ -1651,6 +1653,9 @@ fn main() {
                 first_positional(&args),
                 flag_val(&args, "--skeleton-csv"),
             ));
+        }
+        "model-names" => {
+            std::process::exit(model_names::run(&wadpath, flag_val(&args, "--names"), flag_val(&args, "--tsv")))
         }
         "overlays" => {
             let prof = first_positional(&args).unwrap_or_else(|| {
