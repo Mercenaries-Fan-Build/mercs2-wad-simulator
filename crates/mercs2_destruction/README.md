@@ -18,8 +18,8 @@ States are `Pristine → Damaged → StartDestroyed → Destroyed`, plus **`Deta
 — the mechanism behind a car shedding a hood or a tank losing its turret as health falls. `SHOW`/
 `HIDE` act on whole subtrees, so a governed parent takes its children with it.
 
-Code map: [`docs/reverse_engineer/state_machine_destruction_code_map.md`]; vehicle reading in
-[`docs/modernization/vehicle_model_spec.md`] §5.
+Code map: [`docs/reverse_engineer/state_machine_destruction_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/state_machine_destruction_code_map.md); vehicle reading in
+[`docs/modernization/vehicle_model_spec.md`](../../docs/modernization/vehicle_model_spec.md) §5.
 
 ## Where the pieces live
 
@@ -61,7 +61,7 @@ the engine, the system takes a `&dyn`, and no leaf→leaf edge appears.
 ## Faithfulness caveats — read before trusting output
 
 - **The node-enable table** is retail's state machine (`orchestrator::machine_node_enable`,
-  `docs/reverse_engineer/hibernation_grid.md` §2): `InitState`, then each node's chosen state entered
+  [`docs/reverse_engineer/hibernation_grid.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/hibernation_grid.md) §2): `InitState`, then each node's chosen state entered
   directly — the intermediate states a damage path passes through are not replayed.
 - **The health→message band thresholds are ours**, not the engine's. Retail posts real damage
   messages with live HP math we have not recovered. `DamageBands` makes that approximation explicit
