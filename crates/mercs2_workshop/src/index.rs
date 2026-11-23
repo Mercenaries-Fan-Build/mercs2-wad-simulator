@@ -505,6 +505,12 @@ pub struct AssetIndex {
     /// The source a level is open from: Inspect lists only that source's rows, while the rest of the
     /// stack still resolves what those rows reference. `None` lists everything.
     pub level_src: Option<usize>,
+    /// Every ASET type id of the stack and side WADs, with the hashes its rows carry, sorted and
+    /// unique: the lists of a type no [`Kind`] claims (terrain meshes, scripts, templates).
+    pub by_type: HashMap<u32, Vec<u32>>,
+    /// The PTHS path of every block a layer's ASET row names in the stack, sorted and unique: what
+    /// a layer needle (`GameStack::layer_block_for_edit`) is matched against.
+    pub layer_blocks: Vec<String>,
 }
 
 /// Each `FactionMarker` value, labelled with the model-name prefix it pairs with most often across
@@ -583,9 +589,19 @@ impl AssetIndex {
         let mut buckets: Vec<HashMap<u32, AssetRow>> =
             (0..Kind::ALL.len()).map(|_| HashMap::new()).collect();
         let n = wads.len();
+        let mut by_type: HashMap<u32, Vec<u32>> = HashMap::new();
+        let layer_blocks: std::collections::BTreeSet<String> = wads
+            .iter()
+            .flat_map(|w| {
+                wad::aset_blocks_for_type_id(w, mercs2_formats::types::TYPE_ID_LAYER)
+                    .into_iter()
+                    .map(|b| w.block_path(b).to_string())
+            })
+            .collect();
         for (src, w) in wads.iter().chain(side).enumerate() {
             let primary_block: HashMap<u32, u16> = wad::model_list(w).into_iter().collect();
             for (hash, ty, _) in wad::all_asets(w) {
+                by_type.entry(ty).or_default().push(hash);
                 let Some(&i) = of_type.get(&ty) else { continue };
                 // Only models carry a primary block here; the rest are reached through their own
                 // ASET row, so 0 is the honest "not resolved by this index" value.
@@ -624,6 +640,15 @@ impl AssetIndex {
             faction_labels: HashMap::new(),
             effect_starters: HashMap::new(),
             level_src: None,
+            by_type: by_type
+                .into_iter()
+                .map(|(ty, mut hs)| {
+                    hs.sort_unstable();
+                    hs.dedup();
+                    (ty, hs)
+                })
+                .collect(),
+            layer_blocks: layer_blocks.into_iter().collect(),
         };
         idx.apply_names(names);
         idx
