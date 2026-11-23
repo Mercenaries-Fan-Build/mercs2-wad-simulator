@@ -85,7 +85,9 @@ impl Domain {
     /// the model catalog; Missions/Systems source their subjects elsewhere and return `false`.
     ///
     /// The predicate reuses `AssetRow::category()` / `vehicle_class()` verbatim, so the domain view
-    /// and the Library's own buckets can never disagree about what a thing is.
+    /// and the Library's own buckets can never disagree about what a thing is. Both read the row's
+    /// template archetypes before its name, so a vehicle or character a template names is in its
+    /// lens with a wrong name or none.
     pub fn model_lens(self, row: &AssetRow) -> bool {
         match self {
             Domain::Driving => row.vehicle_class().is_some(),
@@ -163,7 +165,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None, started_by: None }
+        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None, started_by: None, archetypes: Vec::new() }
     }
 
     /// The lenses sort real retail names into the domain the Library would also file them under —
@@ -206,11 +208,35 @@ mod tests {
         assert!(Domain::World.kinds().contains(&"activate_layer"));
     }
 
-    /// An unnamed (hash-only) row belongs to no domain lens — there is nothing to classify on.
+    /// An unnamed (hash-only) row no vehicle or character template names belongs to no domain lens —
+    /// there is nothing to classify on.
     #[test]
     fn an_unnamed_row_belongs_to_no_domain() {
-        let bare = AssetRow { hash: 0xDEAD_BEEF, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: None, faction: None, started_by: None };
+        let bare = AssetRow { hash: 0xDEAD_BEEF, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: None, faction: None, started_by: None, archetypes: Vec::new() };
         assert!(Domain::ALL.iter().all(|d| !d.model_lens(&bare)));
+    }
+
+    /// An unnamed row a vehicle template names is in the Driving lens, and in that lens alone: retail
+    /// 0x3CAC72AB has no name and is the model of the `RTR (crappy)` templates, which carry
+    /// `_CarPhysicsV2`.
+    #[test]
+    fn an_unnamed_row_a_vehicle_template_names_is_driving() {
+        use mercs2_engine::spawn::Archetype;
+        use mercs2_engine::vehicle::components::VehicleClass;
+        let rtr = AssetRow {
+            hash: 0x3CAC_72AB,
+            type_id: 0,
+            block: 0,
+            src: 0,
+            others: Vec::new(),
+            name: None,
+            template: None,
+            faction: None,
+            started_by: None,
+            archetypes: vec![Archetype::Vehicle(VehicleClass::Car)],
+        };
+        assert!(Domain::Driving.model_lens(&rtr));
+        assert_eq!(Domain::ALL.iter().filter(|d| d.model_lens(&rtr)).count(), 1);
     }
 
     /// The script lens reads the file name: the bank folder a script ships in is not part of what
@@ -235,6 +261,7 @@ mod tests {
             template: Some("Jungle Elite".into()),
             faction: None,
             started_by: None,
+            archetypes: Vec::new(),
         };
         assert_eq!(kit.label(), "Jungle Elite");
         assert!(Domain::Characters.model_lens(&kit));
