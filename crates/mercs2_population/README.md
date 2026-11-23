@@ -42,7 +42,7 @@ Provenance as the source itself states it:
 
 | Piece | Oracle |
 | --- | --- |
-| Overall system | `docs/reverse_engineer/population_spawner_code_map.md` (the recovered `PgSysPopulation` runtime, married Xbox↔PC), plus the component census in `docs/mercs2-ecs/02_ai_perception_population.md` and `ai_code_map.md` §3. |
+| Overall system | [`docs/reverse_engineer/population_spawner_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/population_spawner_code_map.md) (the recovered `PgSysPopulation` runtime, married Xbox↔PC), plus the component census in [`docs/mercs2-ecs/02_ai_perception_population.md`](../mercs2_workshop/data/mercs2-ecs/02_ai_perception_population.md) and `ai_code_map.md` §3. |
 | Per-frame fan-out | `PgSysPopulation::Update`, PC `FUN_00502510` (code map §3). |
 | Death system | PC `FUN_00500b40` (DeathCheck) → `FUN_00500ac0` (DeathCompute); pending list `DAT_00dd12e8` / count `DAT_00dd13ec`, timers `DAT_017959d0[i*0xc]`. Budget **20/frame** from the Xbox `li 0x14`; the 9-entry squared-distance table from Xbox `FUN_8235efc0` (code map §4). |
 | Density | Spawn-history decay `(w >> 1) & 0x7f7f7f7f` = PC `FUN_004e0510`; per-tick budgets `10/10/2/2` = Xbox `FUN_82367d28` (code map §9). Faction types 7 & 8 are skipped by the density loop. |
