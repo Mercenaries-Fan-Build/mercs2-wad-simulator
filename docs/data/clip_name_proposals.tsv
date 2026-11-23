@@ -1,0 +1,139 @@
+hash	name	phase	expected_chance	stance_agrees	family_support	ambiguous	rows (character/equipment@handle)
+0x3A988957	player_chris_bare_upright_idle_fb	narrow	1.09e-3	yes	12		Chris/0xD20EC345@0x5AAC9B8D Chris/Grenade@0x5AAC9B8D
+0xCCB6B257	player_chris_pistol_upright_camera_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0xFE0EAD5A
+0xB963EF32	player_chris_pistol_upright_idle_fb	narrow	6.56e-4	yes	12		Chris/Pistol@0x5AAC9B8D
+0xB5679590	player_chris_pistol_upright_jog_forward_fb	narrow	1.53e-3	yes	10		Chris/0xD20EC345@0xB99AD3B3 Chris/Grenade@0xB99AD3B3 Chris/Pistol@0xB99AD3B3
+0x4F69D6D5	player_chris_pistol_upright_run_forward_fb	narrow	1.53e-3	yes	9		Chris/0xD20EC345@0xF71C4238 Chris/Grenade@0x5CC77D41 Chris/Grenade@0xF71C4238 Chris/Pistol@0xF71C4238
+0x73E90A02	player_chris_pistol_upright_sprint_forward_fb	wide	1.90e-3	yes	9		Chris/0xD20EC345@0x5CC77D41 Chris/Pistol@0x5CC77D41
+0x3EFF5F5B	player_chris_pistol_upright_walk_forward_fb	narrow	1.53e-3	yes	10		Chris/0xD20EC345@0x695F945A Chris/Grenade@0x695F945A Chris/Pistol@0x695F945A
+0xA6824265	player_chris_pistol_uprightaim_idle_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0x9F4EB947
+0x55D49B0F	player_chris_pistol_uprightaim_jog_backward_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0x8ECE17D0
+0x55E488D1	player_chris_pistol_uprightaim_jog_forward_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0x93C5DE3A
+0x86DD1CEC	player_chris_pistol_uprightaim_run_backward_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0x5F0CD0E3
+0xF3F1CA68	player_chris_pistol_uprightaim_run_forward_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0xE20D8D5B
+0x2773EE34	player_chris_pistol_uprightaim_walk_backward_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0x13DE8D5D
+0x224CE4E0	player_chris_pistol_uprightaim_walk_forward_fb	narrow	6.56e-4	yes	9		Chris/Pistol@0x61149BC1
+0xB448382E	player_chris_rifle_upright_camera_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0xFE0EAD5A
+0xD4DF300B	player_chris_rifle_upright_idle_fb	narrow	6.56e-4	yes	12		Chris/Rifle@0x5AAC9B8D
+0x6390D52F	player_chris_rifle_upright_jog_forward_fb	narrow	6.56e-4	yes	10		Chris/Rifle@0xB99AD3B3
+0xA173CA52	player_chris_rifle_upright_run_forward_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0xF71C4238
+0x71A5CCC7	player_chris_rifle_upright_sprint_forward_fb	wide	1.14e-3	yes	9		Chris/Rifle@0x5CC77D41
+0xC2C76D36	player_chris_rifle_upright_walk_forward_fb	narrow	6.56e-4	yes	10		Chris/Rifle@0x695F945A
+0x7A464E5E	player_chris_rifle_uprightaim_idle_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0x9F4EB947
+0x9A950D90	player_chris_rifle_uprightaim_jog_backward_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0x8ECE17D0
+0x826C4844	player_chris_rifle_uprightaim_jog_forward_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0x93C5DE3A
+0x9B378587	player_chris_rifle_uprightaim_run_backward_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0x5F0CD0E3
+0x15F6B979	player_chris_rifle_uprightaim_run_forward_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0xE20D8D5B
+0x64F47369	player_chris_rifle_uprightaim_walk_backward_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0x13DE8D5D
+0x07718BF7	player_chris_rifle_uprightaim_walk_forward_fb	narrow	6.56e-4	yes	9		Chris/Rifle@0x61149BC1
+0x9120B11A	player_chris_rocket_upright_camera_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0xFE0EAD5A
+0xE93AE3DF	player_chris_rocket_upright_idle_fb	narrow	6.56e-4	yes	12		Chris/Rocket@0x5AAC9B8D
+0xB50C47AB	player_chris_rocket_upright_jog_forward_fb	narrow	6.56e-4	yes	10		Chris/Rocket@0xB99AD3B3
+0x0BE5E32E	player_chris_rocket_upright_run_forward_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0xF71C4238
+0xA26C4C4B	player_chris_rocket_upright_sprint_forward_fb	wide	1.14e-3	yes	9		Chris/Rocket@0x5CC77D41
+0x658B1C8A	player_chris_rocket_upright_walk_forward_fb	narrow	6.56e-4	yes	10		Chris/Rocket@0x695F945A
+0x29E78192	player_chris_rocket_uprightaim_idle_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0x9F4EB947
+0x54A20884	player_chris_rocket_uprightaim_jog_backward_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0x8ECE17D0
+0x30CDEDF0	player_chris_rocket_uprightaim_jog_forward_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0x93C5DE3A
+0xE211FC1B	player_chris_rocket_uprightaim_run_backward_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0x5F0CD0E3
+0x8252C035	player_chris_rocket_uprightaim_run_forward_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0xE20D8D5B
+0x600EDC85	player_chris_rocket_uprightaim_walk_backward_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0x13DE8D5D
+0xC0AC17BB	player_chris_rocket_uprightaim_walk_forward_fb	narrow	6.56e-4	yes	9		Chris/Rocket@0x61149BC1
+0x14F12A5B	player_jennifer_bare_upright_idle_fb	narrow	6.56e-4	yes	12		Jennifer/0xD20EC345@0x5AAC9B8D
+0xB1AFA3A3	player_jennifer_pistol_upright_camera_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0xFE0EAD5A
+0xCF0AA2D6	player_jennifer_pistol_upright_idle_fb	narrow	1.09e-3	yes	12		Jennifer/Grenade@0x5AAC9B8D Jennifer/Pistol@0x5AAC9B8D
+0x94B1E4AC	player_jennifer_pistol_upright_jog_forward_fb	narrow	1.53e-3	yes	10		Jennifer/0xD20EC345@0xB99AD3B3 Jennifer/Grenade@0xB99AD3B3 Jennifer/Pistol@0xB99AD3B3
+0xA1FEF731	player_jennifer_pistol_upright_run_forward_fb	narrow	1.53e-3	yes	9		Jennifer/0xD20EC345@0xF71C4238 Jennifer/Grenade@0x5CC77D41 Jennifer/Grenade@0xF71C4238 Jennifer/Pistol@0xF71C4238
+0xF23B92C6	player_jennifer_pistol_upright_sprint_forward_fb	wide	1.90e-3	yes	9		Jennifer/0xD20EC345@0x5CC77D41 Jennifer/Pistol@0x5CC77D41
+0xEB36DB0F	player_jennifer_pistol_upright_walk_forward_fb	narrow	1.53e-3	yes	10		Jennifer/0xD20EC345@0x695F945A Jennifer/Grenade@0x695F945A Jennifer/Pistol@0x695F945A
+0x29DEAEF9	player_jennifer_pistol_uprightaim_idle_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0x9F4EB947
+0x8C8509B3	player_jennifer_pistol_uprightaim_jog_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0x8ECE17D0
+0x130B231D	player_jennifer_pistol_uprightaim_jog_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0x93C5DE3A
+0xF3155D90	player_jennifer_pistol_uprightaim_run_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0x5F0CD0E3
+0xED5CB844	player_jennifer_pistol_uprightaim_run_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0xE20D8D5B
+0x0F83A400	player_jennifer_pistol_uprightaim_walk_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0x13DE8D5D
+0x32745574	player_jennifer_pistol_uprightaim_walk_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Pistol@0x61149BC1
+0x5AE2CEF2	player_jennifer_rifle_upright_camera_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0xFE0EAD5A
+0x62646147	player_jennifer_rifle_upright_idle_fb	narrow	6.56e-4	yes	12		Jennifer/Rifle@0x5AAC9B8D
+0xE34014C3	player_jennifer_rifle_upright_jog_forward_fb	narrow	6.56e-4	yes	10		Jennifer/Rifle@0xB99AD3B3
+0x076A6136	player_jennifer_rifle_upright_run_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0xF71C4238
+0x50ABFBF3	player_jennifer_rifle_upright_sprint_forward_fb	wide	1.14e-3	yes	9		Jennifer/Rifle@0x5CC77D41
+0x3F845392	player_jennifer_rifle_upright_walk_forward_fb	narrow	6.56e-4	yes	10		Jennifer/Rifle@0x695F945A
+0x0163F2AA	player_jennifer_rifle_uprightaim_idle_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0x9F4EB947
+0xCFD379BC	player_jennifer_rifle_uprightaim_jog_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0x8ECE17D0
+0xE19D65F8	player_jennifer_rifle_uprightaim_jog_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0x93C5DE3A
+0x57E7CF83	player_jennifer_rifle_uprightaim_run_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0x5F0CD0E3
+0xF001292D	player_jennifer_rifle_uprightaim_run_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0xE20D8D5B
+0xF31D442D	player_jennifer_rifle_uprightaim_walk_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0x13DE8D5D
+0x99AF7853	player_jennifer_rifle_uprightaim_walk_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rifle@0x61149BC1
+0x05381CA6	player_jennifer_rocket_upright_camera_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0xFE0EAD5A
+0xAA583A53	player_jennifer_rocket_upright_idle_fb	narrow	6.56e-4	yes	12		Jennifer/Rocket@0x5AAC9B8D
+0x2172F327	player_jennifer_rocket_upright_jog_forward_fb	narrow	6.56e-4	yes	10		Jennifer/Rocket@0xB99AD3B3
+0xA7233C3A	player_jennifer_rocket_upright_run_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0xF71C4238
+0xC70C390F	player_jennifer_rocket_upright_sprint_forward_fb	wide	1.14e-3	yes	9		Jennifer/Rocket@0x5CC77D41
+0x8B2D281E	player_jennifer_rocket_upright_walk_forward_fb	narrow	6.56e-4	yes	10		Jennifer/Rocket@0x695F945A
+0xAA849A76	player_jennifer_rocket_uprightaim_idle_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0x9F4EB947
+0x643D3E88	player_jennifer_rocket_uprightaim_jog_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0x8ECE17D0
+0x23FB484C	player_jennifer_rocket_uprightaim_jog_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0x93C5DE3A
+0x061CD10F	player_jennifer_rocket_uprightaim_run_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0x5F0CD0E3
+0x27F53AD1	player_jennifer_rocket_uprightaim_run_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0xE20D8D5B
+0x43C0B891	player_jennifer_rocket_uprightaim_walk_backward_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0x13DE8D5D
+0x925EA8AF	player_jennifer_rocket_uprightaim_walk_forward_fb	narrow	6.56e-4	yes	9		Jennifer/Rocket@0x61149BC1
+0x01CA8A69	player_mattias_bare_upright_idle_fb	narrow	4.37e-4	yes	12		Mattias/0xD20EC345@0x5AAC9B8D
+0x193879AD	player_mattias_bare_upright_jog_forward_fb	narrow	4.37e-4	yes	10		Mattias/0xD20EC345@0xB99AD3B3
+0xBBA47DC4	player_mattias_bare_upright_walk_forward_fb	narrow	4.37e-4	yes	10		Mattias/0xD20EC345@0x695F945A
+0x724D3377	player_mattias_pistol_crouch_idle_fb	narrow	2.40e-3	yes	3		*/Grenade@0x9B20B655 */Grenade@0xD491DD44 */Pistol@0xD491DD44
+0xAE4664A2	player_mattias_pistol_crouch_walk_forward_fb	narrow	2.40e-3	yes	3		*/Grenade@0x5E7ADCC3 */Pistol@0x5E7ADCC3
+0xA912993A	player_mattias_pistol_crouchaim_idle_fb	narrow	2.40e-3	yes	3		*/Grenade@0x850901F6 */Pistol@0x850901F6
+0x9DC1D11D	player_mattias_pistol_crouchaim_walk_backward_fb	narrow	2.40e-3	yes	3		*/Grenade@0x3A9730A0 */Pistol@0x3A9730A0
+0x27754443	player_mattias_pistol_crouchaim_walk_forward_fb	narrow	2.40e-3	yes	3		*/Grenade@0xCDB6B2CA */Pistol@0xCDB6B2CA
+0xD9287B49	player_mattias_pistol_upright_camera_fb	narrow	8.74e-4	yes	9		*/Pistol@0xFE0EAD5A Mattias/Pistol@0xFE0EAD5A
+0x3368C274	player_mattias_pistol_upright_idle_fb	narrow	6.56e-4	yes	12		Mattias/Grenade@0x2403F715 Mattias/Grenade@0x5AAC9B8D Mattias/Pistol@0x5AAC9B8D
+0x49478852	player_mattias_pistol_upright_jog_forward_fb	narrow	6.56e-4	yes	10		Mattias/Grenade@0xB99AD3B3 Mattias/Pistol@0xB99AD3B3
+0xC49B7F23	player_mattias_pistol_upright_run_forward_fb	narrow	8.74e-4	yes	9		Mattias/0xD20EC345@0xF71C4238 Mattias/Grenade@0xF71C4238 Mattias/Pistol@0xF71C4238
+0xE76E2740	player_mattias_pistol_upright_sprint_forward_fb	wide	1.52e-3	yes	9		Mattias/0xD20EC345@0x5CC77D41 Mattias/Grenade@0x5CC77D41 Mattias/Pistol@0x5CC77D41
+0x1857A825	player_mattias_pistol_upright_walk_forward_fb	narrow	6.56e-4	yes	10		Mattias/Grenade@0x695F945A Mattias/Pistol@0x695F945A
+0xB20025CB	player_mattias_pistol_uprightaim_idle_fb	narrow	4.37e-4	yes	9		Mattias/Pistol@0x9F4EB947
+0xC41DBDD1	player_mattias_pistol_uprightaim_jog_backward_fb	narrow	4.37e-4	yes	9		Mattias/Pistol@0x8ECE17D0
+0xA72CFBEF	player_mattias_pistol_uprightaim_jog_forward_fb	narrow	4.37e-4	yes	9		Mattias/Pistol@0x93C5DE3A
+0xAFB2929A	player_mattias_pistol_uprightaim_run_backward_fb	narrow	4.37e-4	yes	9		Mattias/Pistol@0x5F0CD0E3
+0x17E5EA12	player_mattias_pistol_uprightaim_run_forward_fb	narrow	4.37e-4	yes	9		Mattias/Pistol@0xE20D8D5B
+0x6E1569F6	player_mattias_pistol_uprightaim_walk_backward_fb	narrow	4.37e-4	yes	9		Mattias/Pistol@0x13DE8D5D
+0x8B48D9F6	player_mattias_pistol_uprightaim_walk_forward_fb	narrow	4.37e-4	yes	9		Mattias/Pistol@0x61149BC1
+0x186ADBF0	player_mattias_rifle_crouch_idle_fb	narrow	1.31e-3	yes	3		*/Rifle@0x9B20B655 */Rifle@0xD491DD44
+0xFF3AF841	player_mattias_rifle_crouch_walk_forward_fb	narrow	1.31e-3	yes	3		*/Rifle@0x5E7ADCC3
+0xA155EC47	player_mattias_rifle_crouchaim_idle_fb	narrow	1.31e-3	yes	3		*/Rifle@0x850901F6
+0x8D99981A	player_mattias_rifle_crouchaim_walk_backward_fb	narrow	1.31e-3	yes	3		*/Rifle@0x3A9730A0
+0xAA3C3E92	player_mattias_rifle_crouchaim_walk_forward_fb	narrow	1.31e-3	yes	3		*/Rifle@0xCDB6B2CA
+0x005381C4	player_mattias_rifle_upright_camera_fb	narrow	8.74e-4	yes	9		*/Rifle@0xFE0EAD5A Mattias/Rifle@0xFE0EAD5A
+0x7AC45CF1	player_mattias_rifle_upright_idle_fb	narrow	4.37e-4	yes	12		Mattias/Rifle@0x5AAC9B8D
+0x10912665	player_mattias_rifle_upright_jog_forward_fb	narrow	4.37e-4	yes	10		Mattias/Rifle@0xB99AD3B3
+0xFCDA05A1	player_mattias_rifle_upright_kick_fb	wide	1.52e-3	yes	1		*/*@0x7A9110C8 Mattias/Rifle@0x7A9110C8
+0xD23346BC	player_mattias_rifle_upright_run_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0xF71C4238
+0x35E07B11	player_mattias_rifle_upright_sprint_forward_fb	wide	7.60e-4	yes	9		Mattias/Rifle@0x5CC77D41
+0xDDDCE94C	player_mattias_rifle_upright_walk_forward_fb	narrow	4.37e-4	yes	10		Mattias/Rifle@0x695F945A
+0xD2B7E258	player_mattias_rifle_uprightaim_idle_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0x9F4EB947
+0xC044FA3E	player_mattias_rifle_uprightaim_jog_backward_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0x8ECE17D0
+0xFE34478E	player_mattias_rifle_uprightaim_jog_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0x93C5DE3A
+0x389EC5A1	player_mattias_rifle_uprightaim_run_backward_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0x5F0CD0E3
+0x68D7ECBF	player_mattias_rifle_uprightaim_run_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0xE20D8D5B
+0x444E70F7	player_mattias_rifle_uprightaim_walk_backward_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0x13DE8D5D
+0x11341769	player_mattias_rifle_uprightaim_walk_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rifle@0x61149BC1
+0xBBECB5D8	player_mattias_rocket_crouch_idle_fb	narrow	1.31e-3	yes	3		*/Rocket@0x9B20B655 */Rocket@0xD491DD44
+0x5EFFDAE9	player_mattias_rocket_crouch_walk_forward_fb	narrow	1.31e-3	yes	3		*/Rocket@0x5E7ADCC3
+0x22E7D7BF	player_mattias_rocket_crouchaim_idle_fb	narrow	1.31e-3	yes	3		*/Rocket@0x850901F6
+0x22BE4602	player_mattias_rocket_crouchaim_walk_backward_fb	narrow	1.31e-3	yes	3		*/Rocket@0x3A9730A0
+0x12366D6A	player_mattias_rocket_crouchaim_walk_forward_fb	narrow	1.31e-3	yes	3		*/Rocket@0xCDB6B2CA
+0x966DB3AC	player_mattias_rocket_upright_camera_fb	narrow	8.74e-4	yes	9		*/Rocket@0xFE0EAD5A Mattias/Rocket@0xFE0EAD5A
+0x9A921529	player_mattias_rocket_upright_idle_fb	narrow	4.37e-4	yes	12		Mattias/Rocket@0x5AAC9B8D
+0x867B166D	player_mattias_rocket_upright_jog_forward_fb	narrow	4.37e-4	yes	10		Mattias/Rocket@0xB99AD3B3
+0x5100FC54	player_mattias_rocket_upright_run_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0xF71C4238
+0x0EB9B669	player_mattias_rocket_upright_sprint_forward_fb	wide	7.60e-4	yes	9		Mattias/Rocket@0x5CC77D41
+0x53682784	player_mattias_rocket_upright_walk_forward_fb	narrow	4.37e-4	yes	10		Mattias/Rocket@0x695F945A
+0x3C018B20	player_mattias_rocket_uprightaim_idle_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0x9F4EB947
+0x3CB55D06	player_mattias_rocket_uprightaim_jog_backward_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0x8ECE17D0
+0x57207A06	player_mattias_rocket_uprightaim_jog_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0x93C5DE3A
+0x4215FC79	player_mattias_rocket_uprightaim_run_backward_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0x5F0CD0E3
+0x3CCE1607	player_mattias_rocket_uprightaim_run_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0xE20D8D5B
+0xB12F1F4F	player_mattias_rocket_uprightaim_walk_backward_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0x13DE8D5D
+0x82AE7811	player_mattias_rocket_uprightaim_walk_forward_fb	narrow	4.37e-4	yes	9		Mattias/Rocket@0x61149BC1
