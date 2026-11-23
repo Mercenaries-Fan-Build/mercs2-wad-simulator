@@ -364,20 +364,12 @@ pub struct TargetBlock<'a> {
 
 /// Find a script's decompiled source under the corpus.
 ///
-/// Searched in `subfolders`, in order, then the stub directory. The `vz.wad` blocks pass
-/// [`VZ_SOURCE_DIRS`]. On a miss, every path tried comes back.
+/// Searched in `subfolders`, in order. The `vz.wad` blocks pass [`VZ_SOURCE_DIRS`]. On a miss, every
+/// path tried comes back.
 pub fn base_source_path(corpus_root: &Path, subfolders: &[&str], target: &str) -> Result<PathBuf, Vec<PathBuf>> {
     let mut tried = Vec::new();
     for sub in subfolders {
         let p = corpus_root.join(sub).join(format!("{target}.lua"));
-        if p.is_file() {
-            return Ok(p);
-        }
-        tried.push(p);
-    }
-    // `corpus/stubs` sits beside `corpus/mercs2-luacd/src`, not inside it.
-    if let Some(corpus_dir) = corpus_root.parent().and_then(|p| p.parent()) {
-        let p = corpus_dir.join("stubs").join(format!("{target}.lua"));
         if p.is_file() {
             return Ok(p);
         }
@@ -1083,7 +1075,7 @@ pub fn qm_shell_modloader_source(sounds: &[SoundBankRegistration], order: &[Stri
 }
 
 /// One installed level on the Extras ▸ Downloadable Content page: an `add_level` of `shipment`
-/// ([`extras_page_source`]).
+/// ([`shell_pages_source`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LevelEntry {
     pub shipment: String,
@@ -1097,21 +1089,52 @@ pub struct LevelEntry {
     pub date: Option<(u32, u32, u32)>,
 }
 
-/// The Extras ▸ Downloadable Content page's half of `qm_shell_modloader`: every installed level listed,
-/// in load `order`, then by level name. Empty without levels.
+/// One `add_menu_item` of `shipment` on a front-end page ([`shell_pages_source`]): its label key, the
+/// event its Enter sends (FSCommand [`crate::menu_items::ITEM_COMMAND`]), and the `Module.Function` it
+/// runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItemEntry {
+    pub shipment: String,
+    pub label: String,
+    pub action: String,
+}
+
+/// The front-end pages' half of `qm_shell_modloader`: the Extras ▸ Downloadable Content page's levels
+/// and the added menu items' dispatcher, in load `order`. Empty without either.
 ///
-/// SHELL.gfx shows its DLC button while the movie's `DLCVisibleVar` is true when the Extras page is
-/// built; `DLCAvailable(true)` sets it and the movie clears it when it starts, so the loader sets it on
-/// every frame the shell movie is loaded (the shell Flash widget's `GuiUpdate`). Opening the page empties
-/// `DLCArray` and sends FSCommand `onlineListDLCMaps`; the next frame's update calls `addDLC` once per
-/// level (`Event.TimerRelative` never fires in the front end, live 2026-11-20), and an `addDLC` once the
-/// page is up sorts and redraws the list. Choosing an entry sends `onlineSelectDLC` with the level's
-/// name: the loader starts it as a single-player game of that level and master script. A name it did not
-/// list fails, naming it. qm edits SHELL so the page is reachable on PC and its hero pick starts the
-/// level (`data/shell_extras.tsv`).
-pub fn extras_page_source(levels: &[LevelEntry], order: &[String]) -> Result<String, LinkError> {
-    if levels.is_empty() {
+/// Levels: every installed level listed, in load order, then by level name. SHELL.gfx shows its DLC
+/// button while the movie's `DLCVisibleVar` is true when the Extras page is built; `DLCAvailable(true)`
+/// sets it and the movie clears it when it starts, so the loader sets it on every frame the shell movie
+/// is loaded (the shell Flash widget's `GuiUpdate`). Opening the page empties `DLCArray` and sends
+/// FSCommand `onlineListDLCMaps`; the next frame's update calls `addDLC` once per level
+/// (`Event.TimerRelative` never fires in the front end, live 2026-11-20), and an `addDLC` once the page
+/// is up sorts and redraws the list. Choosing an entry sends `onlineSelectDLC` with the level's name: the
+/// loader starts it as a single-player game of that level and master script. A name it did not list
+/// fails, naming it. qm edits SHELL so the page is reachable on PC and its hero pick starts the level
+/// (`data/shell_extras.tsv`).
+///
+/// Menu items: an added item's Enter (or click) sends FSCommand `qmMenuItem` with its event, its label
+/// key ([`crate::menu_items`]); the dispatcher runs that item's `Module.Function` under its Shipment, the
+/// module the env qm's loader kept when the library loaded (`QM.libraries`, by its lowercase name, as
+/// script names are). An event no item has, a module that is not loaded or a function it does not have
+/// fails, naming it.
+///
+/// The handlers are registered when the shell opens and again on the first frame the movie is loaded,
+/// from the one `GuiUpdate` handler both share.
+pub fn shell_pages_source(levels: &[LevelEntry], items: &[MenuItemEntry], order: &[String]) -> Result<String, LinkError> {
+    if levels.is_empty() && items.is_empty() {
         return Ok(String::new());
+    }
+    let mut ordered_items: Vec<&MenuItemEntry> = items.iter().collect();
+    sort_by_order(&mut ordered_items, order, |i| i.shipment.as_str(), |_| ())?;
+    let mut item_rows = String::new();
+    for i in &ordered_items {
+        item_rows.push_str(&format!(
+            "  [{label}] = {{ sOwner = {owner}, sAction = {action} }},\n",
+            label = lua_string(&i.label),
+            owner = lua_string(&i.shipment),
+            action = lua_string(&i.action),
+        ));
     }
     let mut ordered: Vec<&LevelEntry> = levels.iter().collect();
     sort_by_order(&mut ordered, order, |l| l.shipment.as_str(), |l| l.level.clone())?;
@@ -1130,15 +1153,12 @@ pub fn extras_page_source(levels: &[LevelEntry], order: &[String]) -> Result<Str
             details = lua_string(l.details.as_deref().unwrap_or("")),
         ));
     }
-    Ok(format!(
-        "-- The Extras ▸ Downloadable Content page: every installed level.\n\
+    let qm = lua_string(crate::loader::QM_OWNER);
+    let mut out = format!(
+        "-- The front end's pages: the Extras ▸ Downloadable Content page's levels and the added menu items.\n\
          import(\"MrxGuiBase\")\n\
          import(\"MrxGuiShellBootstrap\")\n\
-         -- addDLC(internalName, year, month, day, mapName, missionName, screenshot, missionDetails, isGood):\n\
-         -- SHELL.gfx's parameter order. The page draws mapName, month/day/year, missionName, missionDetails.\n\
-         local tLevels = {{\n{rows}}}\n\
          local bLoadedSeen = false\n\
-         local bEntriesPending = false\n\
          local function guarded(sOwner, sWhere, fn, ...)\n\
          \x20 local ok, err = pcall(fn, ...)\n\
          \x20 if not ok then\n\
@@ -1158,7 +1178,89 @@ pub fn extras_page_source(levels: &[LevelEntry], order: &[String]) -> Result<Str
          \x20   error(\"the Shell widget has no Flash widget (CustomData.oFlash)\")\n\
          \x20 end\n\
          \x20 return oFlash\n\
+         end\n"
+    );
+    let mut register = String::new();
+    let mut each_frame = String::new();
+    let mut opened = String::new();
+    if !levels.is_empty() {
+        out.push_str(&levels_part(&rows, &qm));
+        register.push_str(
+            "\x20 oFlash:SetFlashEventHandler(\"onlineListDLCMaps\", onListDLCMaps, {})\n\
+             \x20 oFlash:SetFlashEventHandler(\"onlineSelectDLC\", onSelectDLC, {})\n",
+        );
+        each_frame.push_str(
+            "\x20   oFlash:CallActionScriptCallback(\"DLCAvailable\", {true})\n\
+             \x20   if bEntriesPending then\n\
+             \x20     bEntriesPending = false\n\
+             \x20     addEntries(oFlash)\n\
+             \x20   end\n",
+        );
+        opened.push_str("\x20 print(\"[qm] Extras: \" .. #tLevels .. \" level(s) on the Downloadable Content page\")\n");
+    }
+    if !items.is_empty() {
+        out.push_str(&format!(
+            "-- The added menu items, by event (their label key): the Shipment and the Module.Function each runs.\n\
+             local tItems = {{\n{item_rows}}}\n\
+             local function runItem(sEvent, t)\n\
+             \x20 local sModule, sFunction = string.match(t.sAction, \"^([%w_]+)%.([%w_]+)$\")\n\
+             \x20 local tModule = sModule and QM.libraries[string.lower(sModule)]\n\
+             \x20 if type(tModule) ~= \"table\" then\n\
+             \x20   error(\"menu item \" .. sEvent .. \" runs \" .. t.sAction .. \", and no module \" .. tostring(sModule) .. \" is loaded in the front end\")\n\
+             \x20 end\n\
+             \x20 if type(tModule[sFunction]) ~= \"function\" then\n\
+             \x20   error(\"menu item \" .. sEvent .. \" runs \" .. t.sAction .. \", and \" .. sModule .. \" has no function \" .. sFunction)\n\
+             \x20 end\n\
+             \x20 print(\"[qm] menu item \" .. sEvent .. \": \" .. t.sAction .. \"()\")\n\
+             \x20 tModule[sFunction]()\n\
+             end\n\
+             local function onMenuItem(oFlash, sEvent)\n\
+             \x20 local t = tItems[sEvent]\n\
+             \x20 if t == nil then\n\
+             \x20   QM.fail({qm}, \"{command}\", \"the menu sent \" .. tostring(sEvent) .. \", and no installed Shipment adds a menu item of that label\")\n\
+             \x20   return\n\
+             \x20 end\n\
+             \x20 guarded(t.sOwner, \"menu item \" .. sEvent, runItem, sEvent, t)\n\
+             end\n",
+            command = crate::menu_items::ITEM_COMMAND,
+        ));
+        register.push_str(&format!("\x20 oFlash:SetFlashEventHandler(\"{}\", onMenuItem, {{}})\n", crate::menu_items::ITEM_COMMAND));
+        opened.push_str(&format!("\x20 print(\"[qm] menu: {} item(s) added\")\n", ordered_items.len()));
+    }
+    out.push_str(&format!(
+        "local function register(oFlash)\n{register}end\n\
+         local function update(oFlash, nDeltaTime)\n\
+         \x20 guarded({qm}, \"front-end pages update\", function()\n\
+         \x20   if oFlash.CustomData.bLoaded ~= true then\n\
+         \x20     bLoadedSeen = false\n\
+         \x20     return\n\
+         \x20   end\n\
+         \x20   if not bLoadedSeen then\n\
+         \x20     bLoadedSeen = true\n\
+         \x20     register(oFlash)\n\
+         \x20   end\n\
+         {each_frame}\
+         \x20 end)\n\
          end\n\
+         QM.on(\"shell.open\", function()\n\
+         \x20 local oFlash = shellFlash()\n\
+         \x20 register(oFlash)\n\
+         \x20 bLoadedSeen = false\n\
+         \x20 oFlash:SetEventHandler(\"GuiUpdate\", update)\n\
+         {opened}\
+         end, {qm})\n"
+    ));
+    Ok(out)
+}
+
+/// The Extras page's levels ([`shell_pages_source`]): `rows` its `tLevels` entries.
+fn levels_part(rows: &str, qm: &str) -> String {
+    format!(
+        "-- The Extras ▸ Downloadable Content page: every installed level.\n\
+         -- addDLC(internalName, year, month, day, mapName, missionName, screenshot, missionDetails, isGood):\n\
+         -- SHELL.gfx's parameter order. The page draws mapName, month/day/year, missionName, missionDetails.\n\
+         local tLevels = {{\n{rows}}}\n\
+         local bEntriesPending = false\n\
          local function levelNamed(sName)\n\
          \x20 for _, t in ipairs(tLevels) do\n\
          \x20   if t.tEntry[1] == sName then\n\
@@ -1202,37 +1304,8 @@ pub fn extras_page_source(levels: &[LevelEntry], order: &[String]) -> Result<Str
          \x20   return\n\
          \x20 end\n\
          \x20 guarded(t.sOwner, \"Extras level \" .. sArg, startLevel, t)\n\
-         end\n\
-         local function register(oFlash)\n\
-         \x20 oFlash:SetFlashEventHandler(\"onlineListDLCMaps\", onListDLCMaps, {{}})\n\
-         \x20 oFlash:SetFlashEventHandler(\"onlineSelectDLC\", onSelectDLC, {{}})\n\
-         end\n\
-         local function update(oFlash, nDeltaTime)\n\
-         \x20 guarded({qm}, \"Extras page update\", function()\n\
-         \x20   if oFlash.CustomData.bLoaded ~= true then\n\
-         \x20     bLoadedSeen = false\n\
-         \x20     return\n\
-         \x20   end\n\
-         \x20   if not bLoadedSeen then\n\
-         \x20     bLoadedSeen = true\n\
-         \x20     register(oFlash)\n\
-         \x20   end\n\
-         \x20   oFlash:CallActionScriptCallback(\"DLCAvailable\", {{true}})\n\
-         \x20   if bEntriesPending then\n\
-         \x20     bEntriesPending = false\n\
-         \x20     addEntries(oFlash)\n\
-         \x20   end\n\
-         \x20 end)\n\
-         end\n\
-         QM.on(\"shell.open\", function()\n\
-         \x20 local oFlash = shellFlash()\n\
-         \x20 register(oFlash)\n\
-         \x20 bLoadedSeen = false\n\
-         \x20 oFlash:SetEventHandler(\"GuiUpdate\", update)\n\
-         \x20 print(\"[qm] Extras: \" .. #tLevels .. \" level(s) on the Downloadable Content page\")\n\
-         end, {qm})\n",
-        qm = lua_string(crate::loader::QM_OWNER),
-    ))
+         end\n"
+    )
 }
 
 /// A Lua string literal with quotes and backslashes escaped, so an author-supplied `display:`
@@ -1542,15 +1615,16 @@ fn link_session_hooks(
 ///
 /// Each `add_script` library that loads in the front end is minted into the block that carries
 /// `shellbootstrap`, in load order. When any of `sound_regs` loads a bank in the front end, or the set
-/// adds a level (`levels`, the Extras page's entries, [`extras_page_source`]), `qm_shell_modloader`
-/// ([`qm_shell_modloader_source`]) is minted beside them and loads as qm's own library. Then the front
-/// end's hooks are spliced onto their hosts ([`link_session_hooks`]): the entry `shell.boot` onto
-/// `shellbootstrap`, which loads the libraries. Nothing is recompiled from the corpus. Every touched
-/// block must still CSUM-verify.
+/// adds a level (`levels`, the Extras page's entries) or a menu item (`items`) ([`shell_pages_source`]),
+/// `qm_shell_modloader` ([`qm_shell_modloader_source`]) is minted beside them and loads as qm's own
+/// library. Then the front end's hooks are spliced onto their hosts ([`link_session_hooks`]): the entry
+/// `shell.boot` onto `shellbootstrap`, which loads the libraries. Nothing is recompiled from the corpus.
+/// Every touched block must still CSUM-verify.
 pub fn link_front_end(
     blocks: &mut [TargetBlock<'_>],
     sound_regs: &[SoundBankRegistration],
     levels: &[LevelEntry],
+    items: &[MenuItemEntry],
     additions: &[ScriptAddition],
     order: &[String],
     hooks: QmHooks,
@@ -1558,7 +1632,7 @@ pub fn link_front_end(
     let session = crate::manifest::LoadSession::FrontEnd;
     let sounds = session_sounds(sound_regs, session, order)?;
     let shipment_libraries = session_libraries(additions, session, order)?;
-    let loader = !sounds.is_empty() || !levels.is_empty();
+    let loader = !sounds.is_empty() || !levels.is_empty() || !items.is_empty();
     let splice = match hooks {
         QmHooks::Always => true,
         QmHooks::ForLibraries => loader || !shipment_libraries.is_empty(),
@@ -1588,7 +1662,7 @@ pub fn link_front_end(
         });
     }
     if loader {
-        let source = format!("{}{}", qm_shell_modloader_source(sound_regs, order)?, extras_page_source(levels, order)?);
+        let source = format!("{}{}", qm_shell_modloader_source(sound_regs, order)?, shell_pages_source(levels, items, order)?);
         refuse_taken(blocks, QM_SHELL_MODLOADER_NAME, MODLOADER_CONTRIBUTOR)?;
         let bytecode = mercs2_luac::compile(&source, QM_SHELL_MODLOADER_NAME).map_err(|e| LinkError::Compile {
             target: QM_SHELL_MODLOADER_NAME.to_string(),
@@ -1598,7 +1672,12 @@ pub fn link_front_end(
             target: QM_SHELL_MODLOADER_NAME.to_string(),
             message: m,
         })?;
-        let mut names: Vec<&String> = sounds.iter().map(|r| &r.shipment).chain(levels.iter().map(|l| &l.shipment)).collect();
+        let mut names: Vec<&String> = sounds
+            .iter()
+            .map(|r| &r.shipment)
+            .chain(levels.iter().map(|l| &l.shipment))
+            .chain(items.iter().map(|i| &i.shipment))
+            .collect();
         names.sort();
         names.dedup();
         sort_by_order(&mut names, order, |n| n.as_str(), |_| ())?;
@@ -2695,7 +2774,7 @@ function GetWidgetByName(name) if name == "Shell" then return { CustomData = { o
             ("MrxGuiShellBootstrap", String::new()),
             (
                 QM_SHELL_MODLOADER_NAME,
-                format!("{}{}", qm_shell_modloader_source(&[], &order).unwrap(), extras_page_source(&levels, &order).unwrap()),
+                format!("{}{}", qm_shell_modloader_source(&[], &order).unwrap(), shell_pages_source(&levels, &[], &order).unwrap()),
             ),
         ]);
         lua.load(
@@ -2740,6 +2819,173 @@ table.insert(calls, "nPlayersSelected " .. tostring(_MODULES.MrxGuiShellBootstra
         assert!(
             failed.iter().any(|c| c.contains("qm_none") && c.contains("no installed Shipment adds a level of that name")),
             "{failed:?}"
+        );
+    }
+
+    /// ★ The menu items' dispatcher, run against a stand-in for the shell movie: `shell.open` registers
+    /// `qmMenuItem`; the event of an item runs its `Module.Function` from the library qm's loader loaded
+    /// (its env, kept by `QM.load`; the module named in any case); an event no item has, and an item
+    /// whose module lacks the function, each fail naming it.
+    #[test]
+    fn a_menu_item_runs_its_function_when_chosen() {
+        let order = names(&["b-mods", "a-mods"]);
+        let items = [
+            MenuItemEntry { shipment: "a-mods".into(), label: "Mods.Menu.Open".into(), action: "ModsMenu.Open".into() },
+            MenuItemEntry { shipment: "b-mods".into(), label: "Mods.Menu.Gone".into(), action: "modsmenu.Gone".into() },
+        ];
+        let library = crate::loader::Library {
+            module: "modsmenu".into(),
+            owner: "a-mods".into(),
+            when: "shell.boot".into(),
+            sessions: vec![LoadSession::FrontEnd],
+        };
+        let hosts = session_hosts(
+            LoadSession::FrontEnd,
+            &[qm_shell_modloader_library(), library],
+            &[("mrxsound", "function EnterShellState() table.insert(calls, \"retail EnterShellState\") end\n")],
+        );
+        let gui = r#"
+__handlers = {}
+__flash = { CustomData = { bLoaded = true } }
+function __flash:SetFlashEventHandler(name, fn, args) __handlers[name] = fn end
+function __flash:SetEventHandler(name, fn) __handlers[name] = fn end
+function __flash:CallActionScriptCallback(name, args) table.insert(calls, name) end
+function GetWidgetByName(name) if name == "Shell" then return { CustomData = { oFlash = __flash } } end end
+"#;
+        let lua = module_vm(&[
+            ("mrxsound", hosts["mrxsound"].clone()),
+            ("shellbootstrap", hosts["shellbootstrap"].clone()),
+            ("MrxSoundBanks", BANKS.to_string()),
+            ("MrxGuiBase", gui.to_string()),
+            ("MrxGuiShellBootstrap", String::new()),
+            ("modsmenu", "function Open() table.insert(calls, \"ModsMenu.Open ran\") end\n".to_string()),
+            (
+                QM_SHELL_MODLOADER_NAME,
+                format!("{}{}", qm_shell_modloader_source(&[], &order).unwrap(), shell_pages_source(&[], &items, &order).unwrap()),
+            ),
+        ]);
+        lua.load(
+            r#"
+_GuiInternal = { SetFlashCallback = function() end, CallFlashScriptFunction = function() end }
+import("mrxsound")
+import("shellbootstrap")
+mrxsound.EnterShellState()
+local f = _MODULES.MrxGuiBase.GetWidgetByName("Shell").CustomData.oFlash
+_MODULES.MrxGuiBase.__handlers.GuiUpdate(f, 0)
+_MODULES.MrxGuiBase.__handlers.qmMenuItem(f, "Mods.Menu.Open")
+"#,
+        )
+        .exec()
+        .expect("the front end runs");
+        let got = calls(&lua);
+        let at = got.iter().position(|c| c == "[qm] menu: 2 item(s) added").expect("shell.open registered the items");
+        assert!(got.iter().any(|c| c == "[qm] library modsmenu: ready"), "{got:?}");
+        assert_eq!(got[at + 1..], ["[qm] menu item Mods.Menu.Open: ModsMenu.Open()", "ModsMenu.Open ran"]);
+        lua.load("_MODULES.MrxGuiBase.__handlers.qmMenuItem(nil, \"Mods.Menu.Gone\")").exec().unwrap_or(());
+        let gone = calls(&lua);
+        assert!(gone.iter().any(|c| c.contains("b-mods") && c.contains("modsmenu has no function Gone")), "{gone:?}");
+        let lua2 = module_vm(&[
+            ("mrxsound", hosts["mrxsound"].clone()),
+            ("shellbootstrap", hosts["shellbootstrap"].clone()),
+            ("MrxSoundBanks", BANKS.to_string()),
+            ("MrxGuiBase", gui.to_string()),
+            ("MrxGuiShellBootstrap", String::new()),
+            ("modsmenu", String::new()),
+            (
+                QM_SHELL_MODLOADER_NAME,
+                format!("{}{}", qm_shell_modloader_source(&[], &order).unwrap(), shell_pages_source(&[], &items, &order).unwrap()),
+            ),
+        ]);
+        lua2.load(
+            "_GuiInternal = { SetFlashCallback = function() end, CallFlashScriptFunction = function() end }\n\
+             import(\"mrxsound\")\nimport(\"shellbootstrap\")\nmrxsound.EnterShellState()\n\
+             _MODULES.MrxGuiBase.__handlers.qmMenuItem(nil, \"Mods.Menu.None\")\n",
+        )
+        .exec()
+        .unwrap_or(());
+        let none = calls(&lua2);
+        assert!(none.iter().any(|c| c.contains("Mods.Menu.None") && c.contains("no installed Shipment adds a menu item of that label")), "{none:?}");
+    }
+
+    /// ★ A set with a level and a menu item: one `register` sets the Extras page's two handlers and
+    /// `qmMenuItem`, both when the shell opens and on the movie's first loaded frame; the one per-frame
+    /// update still asserts `DLCAvailable(true)` every frame; the item's event runs its function and the
+    /// Extras page still lists its level.
+    #[test]
+    fn the_extras_page_and_a_menu_item_share_the_shell_s_update() {
+        let order = names(&["mods"]);
+        let levels = [LevelEntry { shipment: "mods".into(), level: "qm_a".into(), display: "A".into(), mission: None, details: None, date: None }];
+        let items = [MenuItemEntry { shipment: "mods".into(), label: "Mods.Menu.Open".into(), action: "modsmenu.Open".into() }];
+        let library = crate::loader::Library { module: "modsmenu".into(), owner: "mods".into(), when: "shell.boot".into(), sessions: vec![LoadSession::FrontEnd] };
+        let hosts = session_hosts(
+            LoadSession::FrontEnd,
+            &[qm_shell_modloader_library(), library],
+            &[("mrxsound", "function EnterShellState() table.insert(calls, \"retail EnterShellState\") end\n")],
+        );
+        let gui = r#"
+__handlers = {}
+__flash = { CustomData = { bLoaded = false } }
+function __flash:SetFlashEventHandler(name, fn, args) __handlers[name] = fn; table.insert(calls, "register " .. name) end
+function __flash:SetEventHandler(name, fn) __handlers[name] = fn end
+function __flash:CallActionScriptCallback(name, args)
+  local t = {}
+  for i = 1, #args do t[i] = tostring(args[i]) end
+  table.insert(calls, name .. " " .. table.concat(t, "|"))
+end
+function GetWidgetByName(name) if name == "Shell" then return { CustomData = { oFlash = __flash } } end end
+"#;
+        let lua = module_vm(&[
+            ("mrxsound", hosts["mrxsound"].clone()),
+            ("shellbootstrap", hosts["shellbootstrap"].clone()),
+            ("MrxSoundBanks", BANKS.to_string()),
+            ("MrxGuiBase", gui.to_string()),
+            ("MrxGuiShellBootstrap", String::new()),
+            ("modsmenu", "function Open() table.insert(calls, \"modsmenu.Open ran\") end\n".to_string()),
+            (
+                QM_SHELL_MODLOADER_NAME,
+                format!("{}{}", qm_shell_modloader_source(&[], &order).unwrap(), shell_pages_source(&levels, &items, &order).unwrap()),
+            ),
+        ]);
+        lua.load(
+            r#"
+_GuiInternal = { SetFlashCallback = function() end, CallFlashScriptFunction = function() end }
+import("mrxsound")
+import("shellbootstrap")
+mrxsound.EnterShellState()
+local f = _MODULES.MrxGuiBase.GetWidgetByName("Shell").CustomData.oFlash
+local h = _MODULES.MrxGuiBase.__handlers
+h.GuiUpdate(f, 0)
+f.CustomData.bLoaded = true
+h.GuiUpdate(f, 0)
+h.GuiUpdate(f, 0)
+h.onlineListDLCMaps(f, true)
+h.GuiUpdate(f, 0)
+h.qmMenuItem(f, "Mods.Menu.Open")
+"#,
+        )
+        .exec()
+        .expect("the front end runs");
+        let got = calls(&lua);
+        let at = got.iter().position(|c| c == "[qm] hook shell.open: enter").expect("shell.open fired");
+        let registered = ["register onlineListDLCMaps", "register onlineSelectDLC", "register qmMenuItem"];
+        assert_eq!(got[at + 1..at + 4], registered, "the shell opening registers all three");
+        assert_eq!(
+            got[at + 4..],
+            [
+                "[qm] Extras: 1 level(s) on the Downloadable Content page",
+                "[qm] menu: 1 item(s) added",
+                // The first loaded frame registers again, then asserts the button; the next frames too.
+                registered[0],
+                registered[1],
+                registered[2],
+                "DLCAvailable true",
+                "DLCAvailable true",
+                "DLCAvailable true",
+                "addDLC qm_a||||A||||true",
+                "[qm] Extras: qm_a listed",
+                "[qm] menu item Mods.Menu.Open: modsmenu.Open()",
+                "modsmenu.Open ran",
+            ]
         );
     }
 
