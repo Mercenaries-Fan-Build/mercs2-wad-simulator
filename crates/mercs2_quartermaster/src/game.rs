@@ -318,21 +318,52 @@ pub struct LayerEditInputs {
     pub rows: Vec<AsetRow>,
 }
 
-/// What [`GameStack::model_container_for_edit`] hands back: the model's container plus the exact
-/// bytes an overlay copy must reproduce (its `field_c` and its ASET LOD-chain refs) and the source
-/// block index the rung remap needs.
+/// One rung of a model's LOD chain, read from the WAD that owns the model's ASET row.
 #[derive(Debug, Clone)]
-pub struct ModelEditInputs {
-    /// The model's primary UCFX container, verbatim (with its CSUM) — the bytes to edit.
+pub struct ModelRung {
+    /// The model's UCFX container in this rung's block, verbatim (with its CSUM).
     pub container: Vec<u8>,
-    /// The original block entry's third word, carried through so the re-emitted entry matches.
-    pub field_c: u32,
-    /// The ASET row's `secondary_ref` (`_P002`/`_P003` rungs) — copied so the chain is preserved.
-    pub secondary_ref: u32,
-    /// The ASET row's `packed_block_ref` (`_P000`/`_P001`) — copied; `_P000` is re-pointed at emit.
-    pub packed_block_ref: u32,
-    /// The block this container came from, so the rung remap can re-point or sentinel each rung.
-    pub source_block_index: u32,
+    /// The source block's INDX `packed_field`; its high byte is the block's tier, which the engine
+    /// copies to the stream node as its eviction class.
+    pub packed_field: u32,
+    /// The source block's PTHS path.
+    pub path: String,
+    /// The source block's index in [`ModelChain::wad`].
+    pub block: u16,
+}
+
+/// What [`GameStack::model_chain`] hands back: every rung the model's ASET row names, `_P000` first.
+///
+/// `_P000` holds `HIER`/`SEGM`/`MTRL`/`PHY2` and the destruction machine; the finer rungs hold
+/// geometry only. An edit re-emits all of them (`build::emit_model_chain`), so none is dropped.
+#[derive(Debug, Clone)]
+pub struct ModelChain {
+    pub hash: u32,
+    /// The WAD whose row and blocks these are.
+    pub wad: PathBuf,
+    /// `rungs[n]` is `_P00n`; never empty.
+    pub rungs: Vec<ModelRung>,
+}
+
+/// The block indices a row names, `_P000` first, stopping at the first sentinel slot. A rung after a
+/// sentinel is an error: the engine stops at the first absent rung, so such a rung never loads.
+fn row_chain(e: &mercs2_formats::ffcs::AsetEntry) -> Result<Vec<u16>, String> {
+    let slots = [
+        e.block_index(),
+        (e.packed_block_ref & 0xFFFF) as u16,
+        (e.secondary_ref >> 16) as u16,
+        (e.secondary_ref & 0xFFFF) as u16,
+    ];
+    let present = slots.iter().take_while(|&&b| b != 0xFFFF).count();
+    if let Some(n) = slots[present..].iter().position(|&b| b != 0xFFFF) {
+        return Err(format!(
+            "its ASET row names _P{:03} (block {}) after an absent _P{present:03}; the engine stops at the \
+             first absent rung",
+            present + n,
+            slots[present + n]
+        ));
+    }
+    Ok(slots[..present].to_vec())
 }
 
 /// The ASET rows of `archive` that name block `b` as their `_P000`.
@@ -376,6 +407,8 @@ pub struct ReemitBlock {
 /// An opened `[base, overlays…]` stack.
 pub struct GameStack {
     wads: Vec<OpenWad>,
+    /// [`Self::layer_containers`], read once: the stack does not change once open.
+    layers: Option<std::collections::BTreeMap<u32, Vec<u8>>>,
 }
 
 impl std::fmt::Debug for GameStack {
@@ -427,7 +460,7 @@ impl GameStack {
                 paths: wads.iter().map(|w| w.path.clone()).collect(),
             });
         }
-        Ok(GameStack { wads })
+        Ok(GameStack { wads, layers: None })
     }
 
     /// Which bake this stack is. Opening a console WAD is allowed; whether a given operation
@@ -811,8 +844,18 @@ impl GameStack {
     }
 
     /// Every layer sub-block of the stack, by name hash, last-mounted-wins: each block an ASET layer
-    /// row points at is read once, and each of its `0xE6B81A54` entries taken.
+    /// row points at is read once, and each of its `0xE6B81A54` entries taken. Read on the first
+    /// call; later calls give the same map.
     pub fn layer_containers(&mut self) -> Result<std::collections::BTreeMap<u32, Vec<u8>>, String> {
+        if let Some(l) = &self.layers {
+            return Ok(l.clone());
+        }
+        let out = self.read_layer_containers()?;
+        self.layers = Some(out.clone());
+        Ok(out)
+    }
+
+    fn read_layer_containers(&mut self) -> Result<std::collections::BTreeMap<u32, Vec<u8>>, String> {
         use mercs2_formats::types::{TYPE_HASH_LAYER, TYPE_ID_LAYER};
         let mut out = std::collections::BTreeMap::new();
         for wad in self.wads.iter_mut().rev() {
@@ -842,57 +885,77 @@ impl GameStack {
         Ok(out)
     }
 
-    /// Everything an in-place MODEL-container edit (`edit_state_machine`) needs to re-emit the model
-    /// as its OWN minimal block without shadowing its block-mates.
+    /// The `Name`, `ModelName` and `Transform` COMP scaffolding of the stack's layers
+    /// ([`mercs2_formats::placement_build::LayerScaffold::read`] over [`Self::layer_containers`]):
+    /// what a layer that lacks one of the three is given.
+    pub fn layer_scaffold(&mut self) -> Result<mercs2_formats::placement_build::LayerScaffold, String> {
+        let layers = self.layer_containers()?;
+        mercs2_formats::placement_build::LayerScaffold::read(layers.values().map(Vec::as_slice))
+            .map_err(|e| format!("the game's layers: {e}"))
+    }
+
+    /// A model's whole LOD chain, for an edit that re-emits the model (`edit_state_machine`,
+    /// `replace_phy2`) without shadowing its block-mates.
     ///
-    /// A model container is a leaf in a block that usually holds many other models, and its ASET row
-    /// packs a LOD chain of block indices. To edit just this one model we emit a single-entry block
-    /// carrying only its (edited) container, copy its ASET row verbatim, and record the source block
-    /// index. [`build_patch_wad_multi`](mercs2_formats::patch_wad::build_patch_wad_multi) then
-    /// rewrites `_P000` to the new block and remaps or sentinels the finer rungs — a sentinel
-    /// degrades that model to its coarse tier, it does not dangle — so no block-mate is carried and
-    /// the chain never hangs. `field_c` from the original entry is preserved because the loader reads
-    /// it and a guessed value is a needless risk.
-    pub fn model_container_for_edit(&mut self, name_hash: u32) -> Option<ModelEditInputs> {
+    /// The row is the model's in the top-most WAD that has one, and every rung is read from that same
+    /// WAD, because the row's block indices number that WAD's blocks. `Ok(None)` when no WAD of the
+    /// stack has a model row for `name_hash`. Fails, naming the rung, when a rung block does not hold
+    /// the model's entry exactly once (the engine's rung gate spins on such a block), when a rung
+    /// follows an absent one, and when the row names fewer rungs than base `vz.wad`'s row for the same
+    /// model — building on a chain an earlier build shortened would ship its loss again.
+    pub fn model_chain(&mut self, name_hash: u32) -> Result<Option<ModelChain>, String> {
         use mercs2_formats::types::{TYPE_HASH_MODEL, TYPE_ID_MODEL};
-        for wad in self.wads.iter_mut().rev() {
-            let Some(row) = wad
-                .archive
-                .aset
-                .iter()
-                .find(|e| e.asset_hash == name_hash && e.type_id == TYPE_ID_MODEL && e.is_primary())
-            else {
-                continue;
-            };
-            let (secondary_ref, packed_block_ref) = (row.secondary_ref, row.packed_block_ref);
-            let block_index = row.block_index();
-            let Ok(dec) = mercs2_formats::sges::decompress_block(
-                &mut wad.file,
-                &wad.archive.indx,
-                block_index,
-            ) else {
-                continue;
-            };
-            // Walk the raw entry table so `field_c` and the exact container bytes come through — the
-            // container is spliced back verbatim, so anything the higher-level walker normalises away
-            // would corrupt it.
+        let row_of = |wad: &OpenWad| {
+            wad.archive.aset.iter().find(|e| e.asset_hash == name_hash && e.type_id == TYPE_ID_MODEL).cloned()
+        };
+        let Some(top) = self.wads.iter().rposition(|w| row_of(w).is_some()) else {
+            return Ok(None);
+        };
+        let wad = &self.wads[top];
+        let row = row_of(wad).expect("rposition found a row");
+        let blocks = row_chain(&row).map_err(|m| format!("model 0x{name_hash:08X} in {}: {m}", wad.path.display()))?;
+        if top != 0 {
+            if let Some(base_row) = row_of(&self.wads[0]) {
+                let base = row_chain(&base_row)
+                    .map_err(|m| format!("model 0x{name_hash:08X} in {}: {m}", self.wads[0].path.display()))?;
+                if blocks.len() < base.len() {
+                    return Err(format!(
+                        "model 0x{name_hash:08X}: {} names {} rung(s) (blocks {blocks:?}) where {} names {} \
+                         (blocks {base:?}); an edit built on the shorter chain would ship without the \
+                         missing rungs. Rebuild or remove {} first.",
+                        wad.path.display(),
+                        blocks.len(),
+                        self.wads[0].path.display(),
+                        base.len(),
+                        wad.path.display()
+                    ));
+                }
+            }
+        }
+        let wad = &mut self.wads[top];
+        let shown = wad.path.display().to_string();
+        let mut rungs = Vec::with_capacity(blocks.len());
+        for (n, &b) in blocks.iter().enumerate() {
+            let at = |m: String| format!("model 0x{name_hash:08X} _P{n:03} (block {b} of {shown}): {m}");
+            let dec = mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, b).map_err(at)?;
+            // The raw entry table, so the container comes through byte for byte.
             let (_n, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
             let mut pos = 4 + entries.len() * 16;
+            let mut found = Vec::new();
             for e in &entries {
-                let end = (pos + e.chunk_size as usize).min(dec.len());
-                if e.name_hash == name_hash && e.type_hash == TYPE_HASH_MODEL && pos < end {
-                    return Some(ModelEditInputs {
-                        container: dec[pos..end].to_vec(),
-                        field_c: e.field_c,
-                        secondary_ref,
-                        packed_block_ref,
-                        source_block_index: block_index as u32,
-                    });
+                let end = pos + e.chunk_size as usize;
+                if e.name_hash == name_hash && e.type_hash == TYPE_HASH_MODEL {
+                    found.push(dec.get(pos..end).ok_or_else(|| at(format!("the entry runs past the block's {} bytes", dec.len())))?);
                 }
                 pos = end;
             }
+            let [container] = found.as_slice() else {
+                return Err(at(format!("the block holds the model {} time(s); every rung must hold it once", found.len())));
+            };
+            let path = wad.archive.paths.get(b as usize).cloned().ok_or_else(|| at("the block has no PTHS path".into()))?;
+            rungs.push(ModelRung { container: container.to_vec(), packed_field: wad.archive.indx[b as usize].packed_field, path, block: b });
         }
-        None
+        Ok(Some(ModelChain { hash: name_hash, wad: wad.path.clone(), rungs }))
     }
 
     /// The decompressed `UCFX` container for `(name_hash, type_id)`, last-mounted-wins.
