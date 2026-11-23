@@ -1,6 +1,6 @@
 //! `mercs2_physics` — Havok character controller, rigid bodies, collision queries, MOPP/heightfield.
 //!
-//! **Code map:** `docs/reverse_engineer/physics_code_map.md`.
+//! **Code map:** [`docs/reverse_engineer/physics_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/physics_code_map.md).
 //! **Owned Lua namespace(s):** — (none; this system has no Lua surface of its own — it backs the `PhysicsQuery` seam in `mercs2_core` for vehicle/combat/anim).
 //! Implements `mercs2_core::PhysicsQuery` (raycast / getClosestPoints / hkpCharacterProxy move).
 //!
