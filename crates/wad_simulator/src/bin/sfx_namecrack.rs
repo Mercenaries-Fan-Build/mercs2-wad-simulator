@@ -141,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rb = {
         let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let notes = mercs2_formats::game_paths::repo_root().join("docs").join("data");
         let names = start.join("../mercs2_workshop/data");
         let tables: Vec<PathBuf> = vec![
             mercs2_formats::game_paths::local_config_rainbow_table(start)?,
