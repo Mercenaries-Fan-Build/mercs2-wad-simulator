@@ -307,13 +307,9 @@ pub fn pick(
         OPEN_FOR_CAPTURE.with(|o| *o.borrow_mut() = None);
         open = true;
     }
-    let lw = theme::field_label_w(ui.available_width());
-    ui.horizontal(|ui| {
-        ui.add_space(lw + 4.0);
-        if ui.small_button(if open { "Close list" } else { "Choose\u{2026}" }).clicked() {
-            open = !open;
-        }
-    });
+    if theme::value_column_button(ui, if open { "Close list" } else { "Choose\u{2026}" }).clicked() {
+        open = !open;
+    }
     if required && empty {
         theme::field_note(ui, FieldState::Bad, "required");
     } else if !empty {
@@ -410,12 +406,7 @@ pub fn optional<T>(
         }
         Some(v) => {
             commit |= body(ui, v);
-            let lw = theme::field_label_w(ui.available_width());
-            let mut remove = false;
-            ui.horizontal(|ui| {
-                ui.add_space(lw + 4.0);
-                remove = ui.small_button(format!("Remove {}", label.to_lowercase())).clicked();
-            });
+            let remove = theme::value_column_button(ui, &format!("Remove {}", label.to_lowercase())).clicked();
             if remove {
                 *slot = None;
                 commit = true;
