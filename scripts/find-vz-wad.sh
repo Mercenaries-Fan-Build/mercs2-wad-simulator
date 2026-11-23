@@ -35,8 +35,7 @@ WRITE=0
 #
 #   PC        FFCS  little-endian, `sges` blocks
 #   Xbox 360  SCFF  big-endian,    `segs` blocks
-#   PS3       SCFF  big-endian     (this dump; docs/ps3_wad_wrapper.md describes an older
-#                                   1 GiB dump with an unknown/encrypted header instead)
+#   PS3       SCFF  big-endian
 #
 # The console bakes are deliberately kept: Shipments are expected to export to every platform. The
 # BUILDER cannot emit for them yet (ucfx_byteswap converts console -> PC only), so this script
@@ -54,10 +53,8 @@ wad_platform() {
 CANDIDATES=()
 [[ -n "${MERCS2_VZ_WAD:-}" ]] && CANDIDATES+=("$MERCS2_VZ_WAD")
 
-# Sibling checkouts of the notes repo, where the corpus and game files live.
-for base in "$HOME/src/mercenaries-game" "$REPO_ROOT/.." "$REPO_ROOT"; do
-    CANDIDATES+=("$base/game-files/vz.wad" "$base/game-files/pc-game-vz.wad" "$base/data/vz.wad")
-done
+# A game-files/ or data/ directory in this checkout.
+CANDIDATES+=("$REPO_ROOT/game-files/vz.wad" "$REPO_ROOT/game-files/pc-game-vz.wad" "$REPO_ROOT/data/vz.wad")
 
 # Common install locations.
 CANDIDATES+=(
@@ -87,7 +84,7 @@ if [[ -z "$FOUND" ]]; then
     cat >&2 <<EOF
 No PC vz.wad found.
 
-Searched \$MERCS2_VZ_WAD, sibling game-files/ directories, and the usual install paths.
+Searched \$MERCS2_VZ_WAD, this checkout's game-files/ and data/, and the usual install paths.
 Console bakes, if any, are listed above — they are readable but the builder cannot emit for
 them yet, so they are not selected here.
 Game-gated tests (`cargo xtask retail-test`) will FAIL until .mercs2-local.toml names one.
