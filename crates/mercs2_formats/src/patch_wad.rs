@@ -164,11 +164,15 @@ fn align_up(value: usize, alignment: usize) -> usize {
 /// instead of an `eprintln!` nobody captures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockFinding {
-    /// Two blocks claim one hash as PRIMARY. **Not fatal** — the runtime registry is first-writer-
-    /// wins, so the winner is deterministic (lowest block index), and retail ships this shape. Worth
-    /// surfacing because a duplicate a MOD introduces means its asset silently loses.
+    /// Two blocks claim one asset — one hash of one type — as PRIMARY. **Not fatal** — the runtime
+    /// registry is first-writer-wins, so the winner is deterministic (lowest block index), and retail
+    /// ships this shape. Worth surfacing because a duplicate a MOD introduces means its asset silently
+    /// loses. One hash of two types is two assets: retail `shell.wad` has `SHELL` (0x51BFF7B1) as a
+    /// movie (type 23) in `scaleform_shell` and as types 35 and 26 in the lower-numbered `resident`
+    /// block, and the front end shows the movie.
     DuplicatePrimary {
         hash: u32,
+        type_id: u32,
         kept_block: usize,
         dropped_block: usize,
         kept: String,
@@ -214,9 +218,9 @@ impl BlockFinding {
 impl std::fmt::Display for BlockFinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BlockFinding::DuplicatePrimary { hash, kept_block, dropped_block, kept, dropped } => write!(
+            BlockFinding::DuplicatePrimary { hash, type_id, kept_block, dropped_block, kept, dropped } => write!(
                 f,
-                "asset 0x{hash:08X} is claimed PRIMARY by [{kept_block}] {kept} and \
+                "asset 0x{hash:08X} (type {type_id}) is claimed PRIMARY by [{kept_block}] {kept} and \
                  [{dropped_block}] {dropped}; the registry is first-writer-wins so block \
                  {kept_block} keeps it and the other claim is silently dropped"
             ),
@@ -268,23 +272,25 @@ pub enum BlockStage {
 pub fn validate_blocks_all(blocks: &[PatchBlock], stage: BlockStage) -> Vec<BlockFinding> {
     let mut out = Vec::new();
 
-    // 1 — one primary ASET row per hash.
-    let mut primary_owner: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    // 1 — one primary ASET row per asset (hash and type).
+    let mut primary_owner: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
     for (bi, blk) in blocks.iter().enumerate() {
         for entry in &blk.aset_entries {
             if entry.u32_2 & 0xFFFF != 0xFFFF {
                 continue; // sub-entry row — repeats are legal
             }
-            if let Some(prev) = primary_owner.insert(entry.asset_hash, bi) {
+            let key = (entry.asset_hash, entry.u32_3);
+            if let Some(prev) = primary_owner.insert(key, bi) {
                 if prev != bi {
                     out.push(BlockFinding::DuplicatePrimary {
                         hash: entry.asset_hash,
+                        type_id: entry.u32_3,
                         kept_block: prev,
                         dropped_block: bi,
                         kept: blocks[prev].path_string.clone(),
                         dropped: blk.path_string.clone(),
                     });
-                    primary_owner.insert(entry.asset_hash, prev);
+                    primary_owner.insert(key, prev);
                 }
             }
         }
@@ -1172,6 +1178,31 @@ mod block_finding_tests {
             "retail ships this shape; it must not block a build"
         );
         assert!(dup.to_string().contains("first-writer-wins"), "{dup}");
+    }
+
+    /// One hash of two types is two assets, as retail `shell.wad`'s SHELL movie (type 23) and the
+    /// types 35 and 26 of that hash in its `resident` block: no duplicate.
+    #[test]
+    fn one_hash_of_two_types_is_no_duplicate() {
+        let resident = PatchBlock::from_decompressed(
+            b"payload",
+            "blocks\\Shell\\resident_P000_Q3.block".into(),
+            vec![AsetEntry::new(0x51BF_F7B1, 0xFFFF_FFFF, 0x0000_FFFF, 35), AsetEntry::new(0x51BF_F7B1, 0xFFFF_FFFF, 0x0000_FFFF, 26)],
+            None,
+        )
+        .unwrap();
+        let movie = PatchBlock::from_decompressed(
+            b"payload",
+            "blocks\\VZ\\mod_51bff7b1.block".into(),
+            vec![AsetEntry::new(0x51BF_F7B1, 0xFFFF_FFFF, 0x0000_FFFF, 23)],
+            None,
+        )
+        .unwrap();
+        let found = validate_blocks_all(&[resident, movie], BlockStage::Emitted);
+        assert!(
+            !found.iter().any(|f| matches!(f, BlockFinding::DuplicatePrimary { .. })),
+            "{found:?}"
+        );
     }
 
     /// Every finding, not just the first — the property `validate_blocks` cannot provide.
