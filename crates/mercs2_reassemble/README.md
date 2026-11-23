@@ -74,18 +74,19 @@ in the manifest.
 
 ## Usage
 
-Run it from anywhere inside the repo — the repo root is auto-detected by walking up for
-`output/_ghidra/all_functions_decomp.txt`:
+`--corpus` is required: the research corpus checkout that holds
+`output/_ghidra/all_functions_decomp.txt` and the `docs/`, `scripts/` and `mods/` sources:
 
 ```
-cargo run -p mercs2_reassemble
+cargo run -p mercs2_reassemble -- --corpus <corpus checkout>
 ```
 
-With explicit paths, and scraping an extra directory (e.g. the memory dir) for T2 references:
+With an explicit output directory, and scraping an extra directory (e.g. the memory dir) for T2
+references:
 
 ```
 cargo run -p mercs2_reassemble -- \
-  --repo-root C:/Users/Shadow/Desktop/notes-on-the-released-game \
+  --corpus C:/Users/Shadow/Desktop/notes-on-the-released-game \
   --out C:/Users/Shadow/Desktop/notes-on-the-released-game/output/engine_reassembled \
   --extra-refs C:/Users/Shadow/.claude/projects/c--Users-Shadow-Desktop-notes-on-the-released-game/memory
 ```
@@ -97,8 +98,7 @@ tier1/tier2/tier3 headline) is written to stderr.
 
 * **The output directory is deleted and recreated on every run** (`remove_dir_all` then
   `create_dir_all`). Do not keep hand-edits in `output/engine_reassembled/`.
-* The master export is mandatory: without it, repo-root auto-detection panics
-  (`could not locate repo root — pass --repo-root`).
+* The master export is mandatory: without it under `--corpus`, the run panics naming the path.
 * The caller list in the master export's header is capped at 12, so call-graph propagation does
   **not** use it — callee edges are re-derived by scanning `FUN_` tokens in the decompiled bodies, and
   callers are the inverse of that.
