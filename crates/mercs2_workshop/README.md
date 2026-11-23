@@ -226,14 +226,15 @@ pinned to the bundle `data/workshop_data_pin.env` names (`index::PINNED_CORPUS`:
 fails them on the count: re-download the bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at
 that release's unpacked `workshop_data/`.
 
-`--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
-the checkout the binary was built from: names come from this crate's
-`data/production_names.json`, and `audio_manifest.json` is copied from the repo's committed
-`workshop_data/`. Packing into that same `workshop_data/` leaves it in place. The rest is copied from the notes
-repo's `docs/` folder named by `notes_docs_dir` in `.mercs2-local.toml`. With no
-`production_names.json`, the names are merged from the raw corpora: this crate's name fragments in
-`data/`, and the `rainbow_table` and `jul08_strings` keys. A missing key or source file stops the
-pack with an error naming it.
+`--pack-data [dir]` builds the bundle (default `workshop_data`). Every source is read from the
+checkout the binary was built from: names come from this crate's `data/production_names.json`; the
+registry rows, spawnable templates and ECS schemas from this crate's `data/`; the decompiled Lua from
+`mercs2_script`'s `corpus/`; and `audio_manifest.json` and the font from the repo's committed
+`workshop_data/`. Packing into that same `workshop_data/` leaves it in place. With no
+`production_names.json`, the names are merged from the raw corpora: this crate's name fragments and
+registry rows in `data/`, the repo's `docs/data/aset_block_strings.json`, and the files named by the
+`rainbow_table`, `jul08_strings` and `bone_name_candidates` keys of `.mercs2-local.toml`. A missing key
+or source file stops the pack with an error naming it.
 
 ## Modules
 
