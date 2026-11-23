@@ -1372,7 +1372,7 @@ mod tests {
             assert_eq!(blob_abs, *xabs);
             assert!(blob_abs + rec.data_size as usize <= b.len());
             // Xbox XMA2 packets are 2048 bytes; the engine aligns the first embedded blob to that
-            // boundary (all 93 embedded wavebanks: docs/_phase3a_inferred_claims_verified.md §A.3).
+            // boundary (all 93 embedded wavebanks: https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/_phase3a_inferred_claims_verified.md §A.3).
             assert_eq!(blob_abs % 0x800, 0);
 
             let hdr = read_u32_be(b, blob_abs);
