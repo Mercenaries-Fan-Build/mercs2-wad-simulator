@@ -1,10 +1,12 @@
-//! The Driving page: one vehicle's driving systems. A systems bar picks Chassis, Powertrain,
-//! Steering or Coupling; each has a bench under the viewport and cards in the inspector, all read
-//! from the chosen template's records. Behaviour contract:
+//! The Driving page: one vehicle's driving systems. A systems bar picks one of the systems the
+//! vehicle's physics class has (a car's Chassis, Powertrain, Steering and Coupling; a tank's, a
+//! boat's and a helicopter's own); each has a bench under the viewport and cards in the inspector,
+//! all read from the chosen template's records. The car's benches and cards are here; the other
+//! classes' are in `drivingtank`, `drivingboat` and `drivingheli`. Behaviour contract:
 //! `docs/modernization/workshop_pages/driving.md`.
 
 use crate::app::WadStack;
-use crate::drivingdata::{self, CarFields, Fleet, NodeUse, Wheel};
+use crate::drivingdata::{self, FakeWheel, Fields, Fleet, Kind, NodeUse, Rotor, Spinner, Wheel, Winch};
 use crate::drivingmath::{self, Pedals};
 use crate::gui::theme;
 use crate::index::{AssetIndex, AssetRow};
@@ -49,10 +51,25 @@ pub enum System {
     Powertrain,
     Steering,
     Coupling,
+    Hull,
+    Flight,
+    Yaw,
+    Attitude,
+    Flyby,
 }
 
 impl System {
-    pub const ALL: [System; 4] = [System::Chassis, System::Powertrain, System::Steering, System::Coupling];
+    pub const ALL: [System; 9] = [
+        System::Flyby,
+        System::Chassis,
+        System::Powertrain,
+        System::Steering,
+        System::Coupling,
+        System::Hull,
+        System::Flight,
+        System::Yaw,
+        System::Attitude,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -60,12 +77,27 @@ impl System {
             System::Powertrain => "Powertrain",
             System::Steering => "Steering",
             System::Coupling => "Coupling",
+            System::Hull => "Hull",
+            System::Flight => "Flight",
+            System::Yaw => "Yaw",
+            System::Attitude => "Attitude",
+            System::Flyby => "Flyby",
         }
     }
 
     /// The system a label names, folding case.
     pub fn named(label: &str) -> Option<System> {
         System::ALL.into_iter().find(|s| s.label().eq_ignore_ascii_case(label))
+    }
+
+    /// The systems a vehicle of a physics class has, in the order the bar shows them.
+    pub fn of(kind: Kind) -> &'static [System] {
+        match kind {
+            Kind::Car | Kind::Tank => &[System::Chassis, System::Powertrain, System::Steering, System::Coupling],
+            Kind::Boat => &[System::Hull, System::Powertrain, System::Steering, System::Coupling],
+            Kind::Helicopter => &[System::Flight, System::Yaw, System::Attitude, System::Coupling],
+            Kind::Plane => &[System::Flyby, System::Coupling],
+        }
     }
 }
 
@@ -77,10 +109,22 @@ pub enum Overlay {
     TorqueSplit,
     Hardpoints,
     FullLock,
+    Probes,
+    Rotors,
+    Winch,
 }
 
 impl Overlay {
-    const ALL: [Overlay; 5] = [Overlay::Wheels, Overlay::Travel, Overlay::TorqueSplit, Overlay::Hardpoints, Overlay::FullLock];
+    const ALL: [Overlay; 8] = [
+        Overlay::Wheels,
+        Overlay::Travel,
+        Overlay::TorqueSplit,
+        Overlay::Hardpoints,
+        Overlay::FullLock,
+        Overlay::Probes,
+        Overlay::Rotors,
+        Overlay::Winch,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -89,27 +133,44 @@ impl Overlay {
             Overlay::TorqueSplit => "Show torque split",
             Overlay::Hardpoints => "Show hardpoints",
             Overlay::FullLock => "Show full lock",
+            Overlay::Probes => "Show ground probes",
+            Overlay::Rotors => "Show rotors",
+            Overlay::Winch => "Show winch reach",
         }
     }
 
-    /// The overlays a system offers.
-    fn of(system: System) -> &'static [Overlay] {
-        match system {
-            System::Chassis => &[Overlay::Wheels, Overlay::Travel],
-            System::Powertrain => &[Overlay::TorqueSplit],
-            System::Steering => &[Overlay::FullLock],
-            System::Coupling => &[Overlay::Hardpoints],
+    /// The overlays a system of a vehicle class offers.
+    fn of(kind: Kind, system: System) -> &'static [Overlay] {
+        match (kind, system) {
+            (Kind::Car, System::Chassis) => &[Overlay::Wheels, Overlay::Travel],
+            (Kind::Car, System::Powertrain) => &[Overlay::TorqueSplit],
+            (Kind::Car, System::Steering) => &[Overlay::FullLock],
+            (Kind::Tank, System::Chassis) => &[Overlay::Wheels, Overlay::Travel, Overlay::Probes],
+            (Kind::Helicopter, System::Flight) => &[Overlay::Rotors],
+            (Kind::Helicopter, System::Coupling) => &[Overlay::Hardpoints, Overlay::Winch],
+            (_, System::Coupling) => &[Overlay::Hardpoints],
+            _ => &[],
         }
     }
 }
 
 /// The level's templates, read once, and which vehicle models carry each node.
-struct Data {
-    we: WorldEntity,
+pub(crate) struct Data {
+    pub(crate) we: WorldEntity,
+    /// The car templates' value ranges and the trailers.
     fleet: Fleet,
+    /// The value ranges of the other physics classes, by class.
+    fleets: HashMap<&'static str, Fleet>,
     template_names: HashMap<u32, String>,
     /// The names of the vehicle models whose hierarchy has each node.
     by_node: HashMap<u32, Vec<String>>,
+}
+
+impl Data {
+    /// The value ranges of a physics class.
+    pub(crate) fn fleet_of(&self, class: &str) -> Option<&Fleet> {
+        if class == drivingdata::CAR_CLASS { Some(&self.fleet) } else { self.fleets.get(class) }
+    }
 }
 
 /// One exhaust the Exhaust picker plays: the effect its part's template starts, and the node it
@@ -122,14 +183,51 @@ pub struct Exhaust {
     pub turn: glam::Quat,
 }
 
-/// The chosen template of the model on show.
-struct Car {
-    key: u32,
-    fields: CarFields,
+/// A car template's physics and wheels.
+pub(crate) struct Car {
+    fields: Fields,
     wheels: Vec<Wheel>,
-    uses: Vec<NodeUse>,
+}
+
+/// What a template drives with, by its physics class.
+pub(crate) enum Drive {
+    Car(Car),
+    Tank { fields: Fields, wheels: Vec<FakeWheel> },
+    Boat { fields: Fields },
+    /// The record a player flies with and the one an AI pilot flies with.
+    Helicopter { player: Fields, ai: Option<Fields>, rotors: Vec<Rotor>, winch: Option<Winch> },
+    /// A plane `Airstrike.Flyby` flies: no physics record, and the nodes that turn by themselves.
+    Plane { spinners: Vec<Spinner> },
+}
+
+impl Drive {
+    pub(crate) fn kind(&self) -> Kind {
+        match self {
+            Drive::Car(_) => Kind::Car,
+            Drive::Tank { .. } => Kind::Tank,
+            Drive::Boat { .. } => Kind::Boat,
+            Drive::Helicopter { .. } => Kind::Helicopter,
+            Drive::Plane { .. } => Kind::Plane,
+        }
+    }
+}
+
+/// The chosen template of the model on show.
+pub(crate) struct Vehicle {
+    pub(crate) key: u32,
+    pub(crate) drive: Drive,
+    pub(crate) uses: Vec<NodeUse>,
     physical_links: usize,
     constraint_links: usize,
+}
+
+impl Vehicle {
+    fn car(&self) -> Option<&Car> {
+        match &self.drive {
+            Drive::Car(car) => Some(car),
+            _ => None,
+        }
+    }
 }
 
 /// The page's state.
@@ -141,9 +239,9 @@ pub struct Panel {
     /// The class group the vehicle list has open, when the user chose one.
     open_group: Option<&'static str>,
     model: Option<u32>,
-    /// The car templates that name the model on show, by name.
+    /// The templates of the four physics classes that name the model on show, by name.
     templates: Vec<(u32, String)>,
-    car: Option<Result<Car, String>>,
+    vehicle: Option<Result<Vehicle, String>>,
     /// The model's node positions, turns and names, by hash.
     nodes: HashMap<u32, [f32; 3]>,
     node_turns: HashMap<u32, glam::Quat>,
@@ -153,16 +251,22 @@ pub struct Panel {
     pub trailer: Option<u32>,
     /// Whether the exhausts play.
     pub exhaust: bool,
+    /// Whether a helicopter's rotors turn.
+    pub rotors: bool,
     /// The overlays that are on, by [`Overlay`] as an index.
-    pub show: [bool; 5],
+    pub show: [bool; 8],
     /// Why the chosen trailer is not drawn, why the exhausts do not play, and why the wheels do
     /// not turn.
     pub trailer_problem: Option<String>,
     pub exhaust_problem: Option<String>,
     pub lock_problem: Option<String>,
-    /// A trailer and a template to choose, by name, once the next model's templates are read.
+    /// A trailer and a template to choose, by name, once the next model's templates are read; the
+    /// system a `--ui-state` file named, which the next model must have; and the rotor state it
+    /// named.
     pending_trailer: Option<String>,
     pending_template: Option<String>,
+    pending_system: Option<System>,
+    pending_rotors: Option<bool>,
 }
 
 impl Default for Panel {
@@ -174,19 +278,22 @@ impl Default for Panel {
             open_group: None,
             model: None,
             templates: Vec::new(),
-            car: None,
+            vehicle: None,
             nodes: HashMap::new(),
             node_turns: HashMap::new(),
             node_names: HashMap::new(),
             selected_node: None,
             trailer: None,
             exhaust: false,
-            show: [true, false, false, true, false],
+            rotors: false,
+            show: [true, false, false, true, false, false, true, true],
             trailer_problem: None,
             exhaust_problem: None,
             lock_problem: None,
             pending_trailer: None,
             pending_template: None,
+            pending_system: None,
+            pending_rotors: None,
         }
     }
 }
@@ -200,6 +307,7 @@ pub enum Act {
     Node(u32),
     Trailer(Option<u32>),
     Exhaust(bool),
+    Rotors(bool),
     Overlay(Overlay),
     Contribute(&'static str),
 }
@@ -208,6 +316,8 @@ pub enum Act {
 pub enum Host {
     Load(u32, String),
     Contribute(&'static str),
+    /// Spin the helicopter's rotors up, or let them run down.
+    Rotors(bool),
 }
 
 impl Panel {
@@ -229,7 +339,7 @@ impl Panel {
     /// `0x44fb8d`), and gives every front wheel the same angle (`FUN_00449dc0`).
     pub fn steer_pose(&self) -> Vec<(u32, f32)> {
         let mut out: Vec<(u32, f32)> = Vec::new();
-        let Some(car) = self.car() else { return out };
+        let Some(car) = self.vehicle().and_then(Vehicle::car) else { return out };
         if self.system != System::Steering || !self.show[Overlay::FullLock as usize] {
             return out;
         }
@@ -244,8 +354,8 @@ impl Panel {
 
     /// The template's exhaust parts.
     fn exhaust_parts(&self) -> Vec<&NodeUse> {
-        let (Some(car), Some(data)) = (self.car(), self.data()) else { return Vec::new() };
-        car.uses.iter().filter(|u| u.class == "VehiclePart" && drivingdata::part_kind(&data.we, u.kind) == Some("Exhaust")).collect()
+        let (Some(v), Some(data)) = (self.vehicle(), self.data()) else { return Vec::new() };
+        v.uses.iter().filter(|u| u.class == "VehiclePart" && drivingdata::part_kind(&data.we, u.kind) == Some("Exhaust")).collect()
     }
 
     /// What plays while the Exhaust picker is On: each exhaust part's effect at its node. Nothing
@@ -267,15 +377,43 @@ impl Panel {
             .collect()
     }
 
-    /// The model the viewport shows, with its hierarchy. A new model picks its first car template.
-    pub fn show_model(&mut self, model: Option<(u32, &[HierNode])>, index: &AssetIndex) {
+    /// The model the viewport shows, with its hierarchy. A new model picks the first of its templates
+    /// that has one of the four physics classes, and the first system of that class when the open
+    /// system is not one of its own. Returns what the app is to do for a newly shown model: the
+    /// rotor state a `--ui-state` file named.
+    pub fn show_model(&mut self, model: Option<(u32, &[HierNode])>, index: &AssetIndex) -> Option<Host> {
         let hash = model.map(|(h, _)| h);
         if hash == self.model {
-            return;
+            return None;
         }
+        self.read_model(model, index);
+        self.keep_system();
+        // A named system the vehicle's class lacks, and a rotor state for a vehicle with no
+        // rotors, are the capture's mistake: the bench says so.
+        if let (Some(named), Some(kind)) = (self.pending_system.take(), self.kind()) {
+            if System::of(kind).contains(&named) {
+                self.system = named;
+            } else {
+                let offered: Vec<&str> = System::of(kind).iter().map(|s| s.label()).collect();
+                self.vehicle = Some(Err(format!("a {} template has no {} system; one of: {}", kind.class(), named.label(), offered.join(", "))));
+                return None;
+            }
+        }
+        let on = self.pending_rotors.take()?;
+        if !matches!(self.vehicle().map(|v| &v.drive), Some(Drive::Helicopter { rotors, .. }) if !rotors.is_empty()) {
+            self.vehicle = Some(Err("the model on show has no rotors to spin".to_string()));
+            return None;
+        }
+        self.rotors = on;
+        Some(Host::Rotors(on))
+    }
+
+    fn read_model(&mut self, model: Option<(u32, &[HierNode])>, index: &AssetIndex) {
+        let hash = model.map(|(h, _)| h);
         self.model = hash;
         self.templates.clear();
-        self.car = None;
+        self.vehicle = None;
+        self.rotors = false;
         self.nodes.clear();
         self.node_turns.clear();
         self.node_names.clear();
@@ -289,14 +427,14 @@ impl Panel {
         self.node_names =
             self.nodes.keys().filter_map(|h| index.names.get(h).map(|n| (*h, n.clone()))).collect();
         for t in index.world_templates.iter().filter(|t| t.model == hash) {
-            match drivingdata::car_fields(&data.we, t.key) {
+            match Kind::of(&data.we, t.key) {
                 Ok(Some(_)) => {
                     let name = data.template_names.get(&t.key).cloned().unwrap_or_else(|| format!("0x{:08X}", t.key));
                     self.templates.push((t.key, name));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    self.car = Some(Err(e));
+                    self.vehicle = Some(Err(e));
                     return;
                 }
             }
@@ -312,8 +450,8 @@ impl Panel {
         }
         match self.pending_template.take() {
             Some(name) => {
-                self.car = Some(match self.templates.iter().find(|t| t.1.eq_ignore_ascii_case(&name)) {
-                    Some(&(key, _)) => read_car(&data.we, key),
+                self.vehicle = Some(match self.templates.iter().find(|t| t.1.eq_ignore_ascii_case(&name)) {
+                    Some(&(key, _)) => read_vehicle(&data.we, key),
                     None => {
                         let names: Vec<&str> = self.templates.iter().map(|t| t.1.as_str()).collect();
                         Err(format!("no template of this model is named {name:?}; one of: {}", names.join(", ")))
@@ -322,7 +460,7 @@ impl Panel {
             }
             None => {
                 if let Some(&(key, _)) = self.templates.first() {
-                    self.car = Some(read_car(&data.we, key));
+                    self.vehicle = Some(read_vehicle(&data.we, key));
                 }
             }
         }
@@ -339,36 +477,58 @@ impl Panel {
 
     fn set_template(&mut self, key: u32) {
         if let (Some(Ok(data)), true) = (&self.data, self.templates.iter().any(|t| t.0 == key)) {
-            self.car = Some(read_car(&data.we, key));
+            self.vehicle = Some(read_vehicle(&data.we, key));
             self.trailer = None;
             self.exhaust_problem = None;
             self.lock_problem = None;
+            self.keep_system();
         }
     }
 
-    fn car(&self) -> Option<&Car> {
-        self.car.as_ref().and_then(|c| c.as_ref().ok())
+    /// Opens the vehicle's first system when the open one is not one its physics class has.
+    fn keep_system(&mut self) {
+        if let Some(kind) = self.kind() {
+            if !System::of(kind).contains(&self.system) {
+                self.system = System::of(kind)[0];
+            }
+        }
     }
 
-    /// Whether the model on show has a car template, so the page draws its systems.
-    pub fn has_car(&self) -> bool {
-        self.car.is_some()
+    pub(crate) fn vehicle(&self) -> Option<&Vehicle> {
+        self.vehicle.as_ref().and_then(|v| v.as_ref().ok())
     }
 
-    fn data(&self) -> Option<&Data> {
+    /// The physics class of the template on show.
+    pub fn kind(&self) -> Option<Kind> {
+        self.vehicle().map(|v| v.drive.kind())
+    }
+
+    /// Whether the model on show has a template of one of the four physics classes, so the page
+    /// draws its systems.
+    pub fn has_systems(&self) -> bool {
+        self.vehicle.is_some()
+    }
+
+    pub(crate) fn data(&self) -> Option<&Data> {
         self.data.as_ref().and_then(|d| d.as_ref().ok())
     }
 
     fn template_name(&self) -> Option<&str> {
-        let key = self.car()?.key;
+        let key = self.vehicle()?.key;
         self.templates.iter().find(|t| t.0 == key).map(|t| t.1.as_str())
     }
 
-    fn node_label(&self, hash: u32) -> String {
+    pub(crate) fn node_label(&self, hash: u32) -> String {
         self.node_names.get(&hash).cloned().unwrap_or_else(|| format!("0x{hash:08X}"))
     }
 
-    fn hitch(&self) -> Option<[f32; 3]> {
+    /// Where a node of the model on show is, at rest in model space.
+    pub(crate) fn node(&self, hash: u32) -> Option<[f32; 3]> {
+        self.nodes.get(&hash).copied()
+    }
+
+
+    pub(crate) fn hitch(&self) -> Option<[f32; 3]> {
         self.nodes.get(&pandemic_hash_m2(HITCH)).copied()
     }
 
@@ -390,7 +550,11 @@ impl Panel {
 
 fn read_data(w: &mut WadStack, index: &AssetIndex) -> Result<Data, String> {
     let we = WorldEntity::parse(&w.worldentity()?)?;
-    let fleet = Fleet::read(&we)?;
+    let fleet = Fleet::read(&we, drivingdata::CAR_CLASS)?;
+    let mut fleets = HashMap::new();
+    for class in [drivingdata::TANK_CLASS, drivingdata::BOAT_CLASS, drivingdata::HELI_CLASS, drivingdata::HELI_AI_CLASS] {
+        fleets.insert(class, Fleet::read(&we, class)?);
+    }
     let template_names = w.template_names()?;
     let lens = crate::domain::Domain::Driving;
     let labels: HashMap<u32, String> = index.models().iter().filter(|r| lens.model_lens(r)).map(|r| (r.hash, r.label())).collect();
@@ -400,7 +564,7 @@ fn read_data(w: &mut WadStack, index: &AssetIndex) -> Result<Data, String> {
         .into_iter()
         .map(|(node, models)| (node, models.iter().map(|m| labels[m].clone()).collect()))
         .collect();
-    Ok(Data { we, fleet, template_names, by_node })
+    Ok(Data { we, fleet, fleets, template_names, by_node })
 }
 
 /// Turns each posed node, with every node under it, about its own up axis in `palette`, at its
@@ -425,12 +589,24 @@ pub fn turn_nodes(palette: &mut [[[f32; 4]; 4]], hier: &[HierNode], binds: &[[[f
     Ok(())
 }
 
-fn read_car(we: &WorldEntity, key: u32) -> Result<Car, String> {
-    let fields = drivingdata::car_fields(we, key)?.ok_or_else(|| format!("template 0x{key:08X} has no car physics"))?;
-    Ok(Car {
+fn read_vehicle(we: &WorldEntity, key: u32) -> Result<Vehicle, String> {
+    let kind = Kind::of(we, key)?.ok_or_else(|| format!("template 0x{key:08X} has no vehicle physics"))?;
+    let record = |class: &'static str| drivingdata::fields(we, class, key)?.ok_or_else(|| format!("template 0x{key:08X} has no {class}"));
+    let drive = match kind {
+        Kind::Car => Drive::Car(Car { fields: record(drivingdata::CAR_CLASS)?, wheels: drivingdata::wheels(we, key)? }),
+        Kind::Tank => Drive::Tank { fields: record(drivingdata::TANK_CLASS)?, wheels: drivingdata::fake_wheels(we, key)? },
+        Kind::Boat => Drive::Boat { fields: record(drivingdata::BOAT_CLASS)? },
+        Kind::Helicopter => Drive::Helicopter {
+            player: record(drivingdata::HELI_CLASS)?,
+            ai: drivingdata::fields(we, drivingdata::HELI_AI_CLASS, key)?,
+            rotors: drivingdata::rotors(we, key)?,
+            winch: drivingdata::winch(we, key)?,
+        },
+        Kind::Plane => Drive::Plane { spinners: drivingdata::spinners(we, key)? },
+    };
+    Ok(Vehicle {
         key,
-        fields,
-        wheels: drivingdata::wheels(we, key)?,
+        drive,
         uses: drivingdata::node_uses(we, key)?,
         physical_links: drivingdata::record_count(we, "PhysicalLink", key),
         constraint_links: drivingdata::record_count(we, "ConstraintLink", key),
@@ -453,6 +629,10 @@ pub fn apply(act: Act, p: &mut Panel) -> Option<Host> {
             p.exhaust = on;
             p.exhaust_problem = None;
         }
+        Act::Rotors(on) => {
+            p.rotors = on;
+            return Some(Host::Rotors(on));
+        }
         Act::Overlay(o) => {
             p.show[o as usize] = !p.show[o as usize];
             p.lock_problem = None;
@@ -466,10 +646,15 @@ pub fn apply(act: Act, p: &mut Panel) -> Option<Host> {
 /// `template` and `trailer`.
 pub fn apply_state(p: &mut Panel, st: &crate::ui_state::UiState) -> Result<(), String> {
     if let Some(s) = &st.system {
-        p.system = System::named(s).ok_or_else(|| format!("no Driving system named {s:?}"))?;
+        let system = System::named(s).ok_or_else(|| format!("no Driving system named {s:?}"))?;
+        p.system = system;
+        p.pending_system = Some(system);
+    }
+    if let Some(value) = &st.rotors {
+        p.pending_rotors = Some(crate::ui_state::pick("rotors value", value, &[("Stopped", false), ("Spinning", true)])?);
     }
     if let Some(names) = &st.overlays {
-        p.show = [false; 5];
+        p.show = [false; 8];
         for name in names {
             let o = Overlay::ALL
                 .into_iter()
@@ -498,9 +683,28 @@ pub fn crumb(p: &Panel, class: Option<&str>) -> Vec<String> {
 
 /// The status bar's line for the open system.
 pub fn status(p: &Panel) -> Option<String> {
-    let (car, name) = (p.car()?, p.template_name()?);
+    let (v, name) = (p.vehicle()?, p.template_name()?);
+    let line = match &v.drive {
+        Drive::Car(car) => car_status(p, car)?,
+        Drive::Tank { fields, wheels } => crate::drivingtank::status(p, fields, wheels)?,
+        Drive::Boat { fields } => crate::drivingboat::status(p, fields)?,
+        Drive::Helicopter { player, ai, rotors, winch } => crate::drivingheli::status(p, player, ai.as_ref(), rotors, winch.as_ref())?,
+        Drive::Plane { spinners } => crate::drivingplane::status(p, spinners),
+    };
+    Some(format!("{name} · {line}"))
+}
+
+/// The Coupling system's status line, the same for every class.
+pub(crate) fn coupling_status(p: &Panel) -> String {
+    match p.hitch() {
+        Some(at) => format!("{HITCH} · {}", position(at)),
+        None => "no hitch node".to_string(),
+    }
+}
+
+fn car_status(p: &Panel, car: &Car) -> Option<String> {
     let f = &car.fields;
-    let line = match p.system {
+    Some(match p.system {
         System::Chassis => {
             let (front, rear) = (car.wheels.iter().filter(|w| !w.rear).count(), car.wheels.iter().filter(|w| w.rear).count());
             format!("{} wheels · {front} front, {rear} rear · mass {}", car.wheels.len(), number(f.num("Mass").ok()?))
@@ -519,15 +723,12 @@ pub fn status(p: &Panel) -> Option<String> {
                 number(s.max_speed)
             )
         }
-        System::Coupling => match p.hitch() {
-            Some(at) => format!("{HITCH} · {}", position(at)),
-            None => "no hitch node".to_string(),
-        },
-    };
-    Some(format!("{name} · {line}"))
+        System::Coupling => coupling_status(p),
+        System::Hull | System::Flight | System::Yaw | System::Attitude | System::Flyby => return None,
+    })
 }
 
-fn position(at: [f32; 3]) -> String {
+pub(crate) fn position(at: [f32; 3]) -> String {
     format!("{:.2}, {:.2}, {:.2}", at[0], at[1], at[2]).replace('-', "−")
 }
 
@@ -624,7 +825,7 @@ fn group_header(ui: &mut egui::Ui, group: &str, count: usize, open: bool) -> egu
 /// The template picker, at the right of the verb bar.
 pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
-    let Some(key) = p.car().map(|c| c.key) else { return acts };
+    let Some(key) = p.vehicle().map(|v| v.key) else { return acts };
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let at = p.templates.iter().position(|t| t.0 == key).map_or(0, |i| i + 1);
         ui.label(egui::RichText::new(format!("{at} of {}", p.templates.len())).monospace().color(theme::DIM));
@@ -647,18 +848,19 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 
 // ── centre: the systems bar and the bench ────────────────────────────────────────────────────────
 
-/// The systems bar over the viewport and the bench under it. Nothing for a model with no car
-/// template.
+/// The systems bar over the viewport and the bench under it. Nothing for a model with no template
+/// of the four physics classes.
 pub fn center(root: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
-    let Some(car) = &p.car else { return acts };
+    let Some(vehicle) = &p.vehicle else { return acts };
     let frame = |margin: egui::Margin| egui::Frame::NONE.fill(theme::G1).inner_margin(margin);
     egui::Panel::top("driving_systems")
         .exact_size(34.0)
         .resizable(false)
         .frame(crate::gui::panel_frame(frame(egui::Margin::symmetric(8, 5)), crate::gui::SeparatorEdge::Bottom))
         .show(root, |ui| {
-            let tabs: Vec<(System, &str)> = System::ALL.iter().map(|s| (*s, s.label())).collect();
+            let offered = p.kind().map_or(&[][..], System::of);
+            let tabs: Vec<(System, &str)> = offered.iter().map(|s| (*s, s.label())).collect();
             if let Some(s) = theme::tab_row(ui, &tabs, p.system) {
                 acts.push(Act::System(s));
             }
@@ -667,23 +869,30 @@ pub fn center(root: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         .exact_size(BENCH_H)
         .resizable(false)
         .frame(crate::gui::panel_frame(frame(egui::Margin::symmetric(10, 0)), crate::gui::SeparatorEdge::Top))
-        .show(root, |ui| match car {
+        .show(root, |ui| match vehicle {
             Err(e) => {
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new(e).color(theme::BAD));
             }
-            Ok(car) => match p.system {
-                System::Chassis => chassis_bench(ui, p, car),
-                System::Powertrain => powertrain_bench(ui, car),
-                System::Steering => steering_bench(ui, car),
-                System::Coupling => acts.extend(coupling_bench(ui, p, car)),
+            Ok(v) if p.system == System::Coupling => acts.extend(coupling_bench(ui, p, v)),
+            Ok(v) => match &v.drive {
+                Drive::Car(car) => match p.system {
+                    System::Chassis => chassis_bench(ui, p, v, car),
+                    System::Powertrain => powertrain_bench(ui, car),
+                    System::Steering => steering_bench(ui, car),
+                    _ => {}
+                },
+                Drive::Tank { fields, wheels } => crate::drivingtank::bench(ui, p, v, fields, wheels),
+                Drive::Boat { fields } => crate::drivingboat::bench(ui, p, v, fields),
+                Drive::Helicopter { player, ai, rotors, .. } => crate::drivingheli::bench(ui, p, player, ai.as_ref(), rotors),
+                Drive::Plane { .. } => crate::drivingplane::bench(ui),
             },
         });
     acts
 }
 
 /// A small label on a dark plate, for a mark over the model.
-fn tag(painter: &egui::Painter, at: egui::Pos2, text: String, color: Color32) {
+pub(crate) fn tag(painter: &egui::Painter, at: egui::Pos2, text: String, color: Color32) {
     let galley = painter.layout_no_wrap(text, theme::font(&egui::TextStyle::Monospace), color);
     let rect = egui::Rect::from_min_size(at, galley.size()).expand2(egui::vec2(4.0, 2.0));
     painter.rect_filled(rect, egui::CornerRadius::same(3), Color32::from_rgba_unmultiplied(14, 16, 20, 215));
@@ -695,8 +904,8 @@ fn tag(painter: &egui::Painter, at: egui::Pos2, text: String, color: Color32) {
 /// the window it fills; `vp` is the part of it the page leaves the model.
 pub fn viewport(ctx: &egui::Context, p: &Panel, proj: glam::Mat4, screen: egui::Vec2, vp: egui::Rect) -> Vec<Act> {
     let mut acts = Vec::new();
-    let (Some(car), Some(data)) = (p.car(), p.data()) else { return acts };
-    let offered = Overlay::of(p.system);
+    let (Some(v), Some(data)) = (p.vehicle(), p.data()) else { return acts };
+    let offered = Overlay::of(v.drive.kind(), p.system);
     if !offered.is_empty() {
         egui::Area::new(egui::Id::new("driving_overlays")).fixed_pos(vp.left_top() + egui::vec2(14.0, 44.0)).show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -713,9 +922,22 @@ pub fn viewport(ctx: &egui::Context, p: &Panel, proj: glam::Mat4, screen: egui::
         });
     }
     let (has_hitch, has_exhaust) = (p.hitch().is_some(), !p.exhaust_parts().is_empty());
-    if has_hitch || has_exhaust {
+    let has_rotors = matches!(&v.drive, Drive::Helicopter { rotors, .. } if !rotors.is_empty());
+    if has_hitch || has_exhaust || has_rotors {
         egui::Area::new(egui::Id::new("driving_state")).fixed_pos(vp.left_bottom() + egui::vec2(14.0, -36.0)).show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if has_rotors {
+                    ui.label(egui::RichText::new("Rotors").small().color(theme::DIM));
+                    let mut on = p.rotors;
+                    egui::ComboBox::from_id_salt("driving_rotors").selected_text(if on { "Spinning" } else { "Stopped" }).width(84.0).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut on, false, "Stopped");
+                        ui.selectable_value(&mut on, true, "Spinning");
+                    });
+                    if on != p.rotors {
+                        acts.push(Act::Rotors(on));
+                    }
+                    ui.add_space(10.0);
+                }
                 if has_hitch {
                     ui.label(egui::RichText::new("Trailer").small().color(theme::DIM));
                     let name = |key: u32| data.template_names.get(&key).cloned().unwrap_or_else(|| format!("0x{key:08X}"));
@@ -759,6 +981,32 @@ pub fn viewport(ctx: &egui::Context, p: &Panel, proj: glam::Mat4, screen: egui::
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("driving_marks"))).with_clip_rect(vp);
     let on = |o: Overlay| offered.contains(&o) && p.show[o as usize];
     let at = |pos: [f32; 3]| crate::layerview::project(proj, glam::Vec3::from(pos), screen).map(|(px, _)| px);
+    if on(Overlay::Hardpoints) {
+        for node in coupling_rows(p, v) {
+            let Some(c) = p.nodes.get(&node).and_then(|pos| at(*pos)) else { continue };
+            if p.selected_node == Some(node) {
+                diamond(&painter, c);
+                painter.circle_stroke(c, 10.0, Stroke::new(1.6, theme::BRASS));
+                let pos = p.nodes.get(&node).map(|pos| position(*pos)).unwrap_or_default();
+                tag(&painter, c + egui::vec2(14.0, -7.0), format!("{} · {pos}", p.node_label(node)), theme::BRASS);
+            } else {
+                square(&painter, c);
+            }
+        }
+    }
+    let marks = Marks { painter: &painter, at: &at, on: &on };
+    let car = match &v.drive {
+        Drive::Car(car) => car,
+        Drive::Tank { fields, wheels } => {
+            crate::drivingtank::marks(&marks, p, fields, wheels);
+            return acts;
+        }
+        Drive::Boat { .. } | Drive::Plane { .. } => return acts,
+        Drive::Helicopter { rotors, winch, .. } => {
+            crate::drivingheli::marks(&marks, p, rotors, winch.as_ref());
+            return acts;
+        }
+    };
     let wheels: Vec<(&Wheel, [f32; 3])> = car.wheels.iter().filter_map(|w| p.nodes.get(&w.susp_bone).map(|pos| (w, *pos))).collect();
     if on(Overlay::Wheels) || on(Overlay::Travel) {
         for (w, pos) in &wheels {
@@ -788,24 +1036,19 @@ pub fn viewport(ctx: &egui::Context, p: &Panel, proj: glam::Mat4, screen: egui::
             }
         }
     }
-    if on(Overlay::Hardpoints) {
-        for node in coupling_rows(p, car) {
-            let Some(c) = p.nodes.get(&node).and_then(|pos| at(*pos)) else { continue };
-            if p.selected_node == Some(node) {
-                diamond(&painter, c);
-                painter.circle_stroke(c, 10.0, Stroke::new(1.6, theme::BRASS));
-                let pos = p.nodes.get(&node).map(|pos| position(*pos)).unwrap_or_default();
-                tag(&painter, c + egui::vec2(14.0, -7.0), format!("{} · {pos}", p.node_label(node)), theme::BRASS);
-            } else {
-                square(&painter, c);
-            }
-        }
-    }
     acts
 }
 
+/// What a vehicle class draws its viewport marks with: the painter, a model-space point's place on
+/// screen, and whether an overlay is offered and on.
+pub(crate) struct Marks<'a> {
+    pub(crate) painter: &'a egui::Painter,
+    pub(crate) at: &'a dyn Fn([f32; 3]) -> Option<egui::Pos2>,
+    pub(crate) on: &'a dyn Fn(Overlay) -> bool,
+}
+
 /// A bench's header row: a title in the stencil face and a caption beside it.
-fn bench_header(ui: &mut egui::Ui, parts: &[(&str, &str)]) {
+pub(crate) fn bench_header(ui: &mut egui::Ui, parts: &[(&str, &str)]) {
     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 26.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.set_min_size(ui.max_rect().size());
         for (title, caption) in parts {
@@ -819,19 +1062,19 @@ fn bench_header(ui: &mut egui::Ui, parts: &[(&str, &str)]) {
 }
 
 /// The rest of the bench as one painted area.
-fn bench_area(ui: &mut egui::Ui) -> (egui::Rect, egui::Painter) {
+pub(crate) fn bench_area(ui: &mut egui::Ui) -> (egui::Rect, egui::Painter) {
     let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
     // The painter is the bench's, not the area's: a bench draws its key into the header row above.
     (rect.shrink2(egui::vec2(0.0, 6.0)), ui.painter().clone())
 }
 
 /// Splits a rect left and right at a fraction of its width, with a gap.
-fn split(rect: egui::Rect, at: f32) -> (egui::Rect, egui::Rect) {
+pub(crate) fn split(rect: egui::Rect, at: f32) -> (egui::Rect, egui::Rect) {
     let x = rect.left() + rect.width() * at;
     (egui::Rect::from_min_max(rect.min, egui::pos2(x - 10.0, rect.bottom())), egui::Rect::from_min_max(egui::pos2(x + 10.0, rect.top()), rect.max))
 }
 
-fn chassis_bench(ui: &mut egui::Ui, p: &Panel, car: &Car) {
+fn chassis_bench(ui: &mut egui::Ui, p: &Panel, v: &Vehicle, car: &Car) {
     let placed: Vec<(&Wheel, [f32; 3])> = car.wheels.iter().filter_map(|w| p.nodes.get(&w.susp_bone).map(|at| (w, *at))).collect();
     let mut axles: Vec<f32> = Vec::new();
     for (_, at) in &placed {
@@ -851,7 +1094,7 @@ fn chassis_bench(ui: &mut egui::Ui, p: &Panel, car: &Car) {
     let exhaust = |u: &NodeUse| u.class == "VehiclePart" && p.data().and_then(|d| drivingdata::part_kind(&d.we, u.kind)) == Some("Exhaust");
     let of = |pick: &dyn Fn(&NodeUse) -> bool| -> Vec<[f32; 3]> {
         let mut seen: Vec<u32> = Vec::new();
-        car.uses.iter().filter(|u| pick(u)).filter_map(|u| (!seen.contains(&u.node)).then(|| seen.push(u.node)).and(p.nodes.get(&u.node).copied())).collect()
+        v.uses.iter().filter(|u| pick(u)).filter_map(|u| (!seen.contains(&u.node)).then(|| seen.push(u.node)).and(p.nodes.get(&u.node).copied())).collect()
     };
     let winch = of(&|u| u.class == "ConnectPoint");
     let exhausts = of(&exhaust);
@@ -974,26 +1217,26 @@ fn chassis_bench(ui: &mut egui::Ui, p: &Panel, car: &Car) {
     }
 }
 
-fn diamond(p: &egui::Painter, c: egui::Pos2) {
+pub(crate) fn diamond(p: &egui::Painter, c: egui::Pos2) {
     let r = 5.0;
     p.add(egui::Shape::convex_polygon(vec![c + egui::vec2(0.0, -r), c + egui::vec2(r, 0.0), c + egui::vec2(0.0, r), c + egui::vec2(-r, 0.0)], theme::BRASS, Stroke::NONE));
 }
 
-fn square(p: &egui::Painter, c: egui::Pos2) {
+pub(crate) fn square(p: &egui::Painter, c: egui::Pos2) {
     p.rect_stroke(egui::Rect::from_center_size(c, egui::vec2(7.0, 7.0)), egui::CornerRadius::ZERO, Stroke::new(1.4, theme::DIM), egui::StrokeKind::Middle);
 }
 
-fn triangle(p: &egui::Painter, c: egui::Pos2) {
+pub(crate) fn triangle(p: &egui::Painter, c: egui::Pos2) {
     let pts = vec![c + egui::vec2(0.0, -4.5), c + egui::vec2(4.5, 3.5), c + egui::vec2(-4.5, 3.5), c + egui::vec2(0.0, -4.5)];
     p.add(egui::Shape::line(pts, Stroke::new(1.4, theme::DIM)));
 }
 
 /// The chart's top speed: the next multiple of 20 km/h above the cap.
-fn speed_axis(max_speed: f32) -> f32 {
+pub(crate) fn speed_axis(max_speed: f32) -> f32 {
     ((max_speed / 20.0).floor() + 1.0) * 20.0
 }
 
-fn labelled(values: Vec<f32>) -> Vec<(f32, String)> {
+pub(crate) fn labelled(values: Vec<f32>) -> Vec<(f32, String)> {
     values.into_iter().map(|v| (v, number(v))).collect()
 }
 
@@ -1120,12 +1363,13 @@ fn steering_bench(ui: &mut egui::Ui, car: &Car) {
 }
 
 /// The nodes the Coupling table lists: every named hardpoint and every node a record names.
-fn coupling_rows(p: &Panel, car: &Car) -> Vec<u32> {
+fn coupling_rows(p: &Panel, v: &Vehicle) -> Vec<u32> {
+    let wheel = |class: &str| class == drivingdata::WHEEL_CLASS || class == drivingdata::FAKE_WHEEL_CLASS;
     let mut rows: Vec<u32> = p
         .nodes
         .keys()
         .copied()
-        .filter(|h| p.node_names.get(h).is_some_and(|n| n.starts_with("hp_")) || car.uses.iter().any(|u| u.node == *h && u.class != drivingdata::WHEEL_CLASS))
+        .filter(|h| p.node_names.get(h).is_some_and(|n| n.starts_with("hp_")) || v.uses.iter().any(|u| u.node == *h && !wheel(u.class)))
         .collect();
     let hitch = pandemic_hash_m2(HITCH);
     let unnamed = |h: &u32| !p.node_names.contains_key(h);
@@ -1136,8 +1380,8 @@ fn coupling_rows(p: &Panel, car: &Car) -> Vec<u32> {
 }
 
 /// What names a node: each record's class and link name.
-fn used_by(p: &Panel, car: &Car, node: u32) -> Vec<String> {
-    car.uses
+fn used_by(p: &Panel, v: &Vehicle, node: u32) -> Vec<String> {
+    v.uses
         .iter()
         .filter(|u| u.node == node)
         .map(|u| {
@@ -1152,9 +1396,9 @@ fn used_by(p: &Panel, car: &Car, node: u32) -> Vec<String> {
         .collect()
 }
 
-fn coupling_bench(ui: &mut egui::Ui, p: &Panel, car: &Car) -> Vec<Act> {
+fn coupling_bench(ui: &mut egui::Ui, p: &Panel, v: &Vehicle) -> Vec<Act> {
     let mut acts = Vec::new();
-    let rows = coupling_rows(p, car);
+    let rows = coupling_rows(p, v);
     bench_header(ui, &[("Hardpoints", &format!("{} nodes", rows.len()))]);
     let detail_w = 230.0;
     ui.horizontal_top(|ui| {
@@ -1174,7 +1418,7 @@ fn coupling_bench(ui: &mut egui::Ui, p: &Panel, car: &Car) -> Vec<Act> {
                 for node in rows {
                     let on = p.selected_node == Some(node);
                     let col = if on { theme::BRASS } else { theme::TX };
-                    let used = used_by(p, car, node);
+                    let used = used_by(p, v, node);
                     let resp = theme::row_chip(ui, if on { theme::BRASS_SOFT } else { Color32::TRANSPARENT }, Color32::TRANSPARENT, |ui| {
                         ui.horizontal(|ui| {
                             ui.allocate_ui_with_layout(egui::vec2(cols[0] - 9.0, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1218,7 +1462,7 @@ fn coupling_bench(ui: &mut egui::Ui, p: &Panel, car: &Car) -> Vec<Act> {
             if let Some(at) = p.nodes.get(&node) {
                 row(ui, "AT", position(*at), None, false);
             }
-            let used = used_by(p, car, node);
+            let used = used_by(p, v, node);
             row(ui, "USED BY", format!("{} records", used.len()), (!used.is_empty()).then(|| used.join(" · ")), false);
             if let (Some(trailer), true, Some(at)) = (p.trailer, node == pandemic_hash_m2(HITCH), p.hitch()) {
                 let name = p.data().and_then(|d| d.template_names.get(&trailer).cloned()).unwrap_or_default();
@@ -1247,7 +1491,7 @@ fn coupling_bench(ui: &mut egui::Ui, p: &Panel, car: &Car) -> Vec<Act> {
 // ── inspector ────────────────────────────────────────────────────────────────────────────────────
 
 /// A value with its place in the fleet's range.
-fn ranged(ui: &mut egui::Ui, fleet: &Fleet, label_w: f32, label: &str, text: String, field: Option<(&str, f32)>, lit: bool) {
+pub(crate) fn ranged(ui: &mut egui::Ui, fleet: &Fleet, label_w: f32, label: &str, text: String, field: Option<(&str, f32)>, lit: bool) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.allocate_ui_with_layout(egui::vec2(label_w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -1272,14 +1516,58 @@ fn ranged(ui: &mut egui::Ui, fleet: &Fleet, label_w: f32, label: &str, text: Str
 }
 
 /// A named float field as a ranged row; nothing for a field the record lacks.
-fn field_row(ui: &mut egui::Ui, fleet: &Fleet, f: &CarFields, label: &str, name: &str, unit: &str) {
+pub(crate) fn field_row(ui: &mut egui::Ui, fleet: &Fleet, f: &Fields, label: &str, name: &str, unit: &str) {
     if let Ok(v) = f.num(name) {
         let text = if unit.is_empty() { number(v) } else { format!("{} {unit}", number(v)) };
         ranged(ui, fleet, 128.0, label, text, Some((name, v)), true);
     }
 }
 
-fn unread(ui: &mut egui::Ui, names: &[&str]) {
+/// A row of three floats with no tick: a three-float field, or three fields of one kind.
+pub(crate) fn triple_row(ui: &mut egui::Ui, fleet: &Fleet, label: &str, values: [f32; 3]) {
+    ranged(ui, fleet, 96.0, label, format!("{} · {} · {}", number(values[0]), number(values[1]), number(values[2])), None, true);
+}
+
+/// Rows of two values side by side under two headings, each with its tick: a value and where it
+/// sits in its own range. A side with no value is left empty.
+pub(crate) fn paired(ui: &mut egui::Ui, headings: [&str; 2], rows: &[(&str, [Option<(f32, Option<f32>)>; 2])]) {
+    let half = ((ui.available_width() - 104.0) / 2.0 - 6.0).max(60.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.add_space(110.0);
+        for t in headings {
+            ui.allocate_ui_with_layout(egui::vec2(half, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_size(ui.max_rect().size());
+                ui.label(theme::disp_text(t, theme::style_eyebrow(), theme::DIM));
+            });
+        }
+    });
+    for (label, sides) in rows {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.allocate_ui_with_layout(egui::vec2(104.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_size(ui.max_rect().size());
+                ui.add(egui::Label::new(egui::RichText::new(*label).color(theme::DIM)).truncate());
+            });
+            for side in sides {
+                ui.allocate_ui_with_layout(egui::vec2(half, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.set_min_size(ui.max_rect().size());
+                    let Some((v, place)) = side else { return };
+                    ui.allocate_ui_with_layout(egui::vec2(40.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_size(ui.max_rect().size());
+                        ui.label(number(*v));
+                    });
+                    if place.is_some() {
+                        let w = ui.available_width().max(8.0);
+                        theme::range_tick(ui, w, *place);
+                    }
+                });
+            }
+        });
+    }
+}
+
+pub(crate) fn unread(ui: &mut egui::Ui, names: &[&str]) {
     theme::card(ui, "Not read by the PC exe", None, |ui| {
         for name in names {
             ui.add(egui::Label::new(egui::RichText::new(*name).monospace().color(theme::DIM)).truncate());
@@ -1295,34 +1583,48 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, row: Option<&AssetRow>) -> Vec<Ac
         ui.label(egui::RichText::new(e).color(theme::BAD));
         return acts;
     }
-    let (Some(car), Some(data), Some(row)) = (p.car(), p.data(), row) else { return acts };
-    let fleet = &data.fleet;
-    let f = &car.fields;
+    let (Some(v), Some(data), Some(row)) = (p.vehicle(), p.data(), row) else { return acts };
+    let class = v.drive.kind().class();
     ui.horizontal(|ui| {
         ui.label(theme::disp_text(row.category().to_uppercase(), theme::style_eyebrow(), theme::BRASS));
-        ui.label(egui::RichText::new(drivingdata::CAR_CLASS).monospace().color(theme::DIM));
+        ui.label(egui::RichText::new(class).monospace().color(theme::DIM));
     });
     ui.add(egui::Label::new(egui::RichText::new(row.label()).heading().color(theme::TX)).truncate());
-    ui.label(egui::RichText::new(format!("0x{:08X} · template 0x{:08X}", row.hash, car.key)).monospace().color(theme::DIM));
+    ui.label(egui::RichText::new(format!("0x{:08X} · template 0x{:08X}", row.hash, v.key)).monospace().color(theme::DIM));
     ui.add_space(8.0);
+    match (&v.drive, data.fleet_of(class)) {
+        _ if p.system == System::Coupling => acts.extend(coupling_cards(ui, p, v, data)),
+        (Drive::Car(car), _) => car_cards(ui, p, car, &data.fleet),
+        (Drive::Tank { fields, wheels }, Some(fleet)) => crate::drivingtank::cards(ui, p, fields, wheels, fleet),
+        (Drive::Boat { fields }, Some(fleet)) => crate::drivingboat::cards(ui, p, fields, fleet),
+        (Drive::Helicopter { player, ai, rotors, .. }, Some(fleet)) => {
+            crate::drivingheli::cards(ui, p, player, ai.as_ref(), rotors, fleet, data.fleet_of(drivingdata::HELI_AI_CLASS))
+        }
+        (Drive::Plane { spinners }, _) => crate::drivingplane::cards(ui, p, spinners, &data.fleet),
+        (_, None) => {
+            ui.label(egui::RichText::new(format!("no value ranges were read for {class}")).color(theme::BAD));
+        }
+    }
+    theme::eyebrow(ui, "Start a contribution from here");
+    ui.horizontal_wrapped(|ui| {
+        for kind in crate::domain::Domain::Driving.kinds() {
+            if ui.button(crate::quartermaster::kind_title(kind)).on_hover_text(*kind).clicked() {
+                acts.push(Act::Contribute(kind));
+            }
+        }
+    });
+    ui.add_space(10.0);
+    acts
+}
+
+/// The car's cards for the open system.
+fn car_cards(ui: &mut egui::Ui, p: &Panel, car: &Car, fleet: &Fleet) {
+    let f = &car.fields;
     match p.system {
         System::Chassis => {
             theme::card(ui, "Axles", Some(&format!("{} car templates", fleet.templates)), |ui| {
-                let half = ((ui.available_width() - 104.0) / 2.0 - 6.0).max(60.0);
-                let header = |ui: &mut egui::Ui, a: &str, b: &str| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.add_space(110.0);
-                        for t in [a, b] {
-                            ui.allocate_ui_with_layout(egui::vec2(half, 16.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_size(ui.max_rect().size());
-                                ui.label(theme::disp_text(t, theme::style_eyebrow(), theme::DIM));
-                            });
-                        }
-                    });
-                };
-                header(ui, "FRONT", "REAR");
-                for (label, tail) in [
+                let side = |name: String| f.num(&name).ok().map(|v| (v, fleet.place(&name, v)));
+                let rows: Vec<(&str, [Option<(f32, Option<f32>)>; 2])> = [
                     ("Wheel radius", "WheelRadius"),
                     ("Susp strength", "WheelSuspStrength"),
                     ("Susp damp", "WheelSuspDamp"),
@@ -1332,30 +1634,11 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, row: Option<&AssetRow>) -> Vec<Ac
                     ("Friction side", "WheelFrictionSide"),
                     ("Brake", "Brake"),
                     ("Emergency brake", "EmergencyBrake"),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        ui.allocate_ui_with_layout(egui::vec2(104.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_size(ui.max_rect().size());
-                            ui.add(egui::Label::new(egui::RichText::new(label).color(theme::DIM)).truncate());
-                        });
-                        for end in ["Front", "Rear"] {
-                            let name = format!("{end}{tail}");
-                            ui.allocate_ui_with_layout(egui::vec2(half, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_size(ui.max_rect().size());
-                                let Ok(v) = f.num(&name) else { return };
-                                ui.allocate_ui_with_layout(egui::vec2(40.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_size(ui.max_rect().size());
-                                    ui.label(number(v));
-                                });
-                                if let Some(place) = fleet.place(&name, v) {
-                                    let w = ui.available_width().max(8.0);
-                                    theme::range_tick(ui, w, Some(place));
-                                }
-                            });
-                        }
-                    });
-                }
+                ]
+                .into_iter()
+                .map(|(label, tail)| (label, [side(format!("Front{tail}")), side(format!("Rear{tail}"))]))
+                .collect();
+                paired(ui, ["FRONT", "REAR"], &rows);
             });
             theme::card(ui, "Body", None, |ui| {
                 field_row(ui, fleet, f, "Mass", "Mass", "");
@@ -1441,55 +1724,60 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, row: Option<&AssetRow>) -> Vec<Ac
             });
             unread(ui, &drivingdata::UNREAD[7..8]);
         }
-        System::Coupling => {
-            theme::card(ui, "On this vehicle", None, |ui| {
-                match p.hitch() {
-                    Some(at) => {
-                        ranged(ui, fleet, 96.0, "Hitch", HITCH.to_string(), None, true);
-                        ranged(ui, fleet, 96.0, "Hitch at", position(at), None, true);
-                    }
-                    None => ranged(ui, fleet, 96.0, "Hitch", "None".to_string(), None, true),
-                }
-                let winch = car.uses.iter().filter(|u| u.class == "ConnectPoint").count();
-                ranged(ui, fleet, 96.0, "Winch points", winch.to_string(), None, true);
-                let count = |n: usize| if n == 0 { "None".to_string() } else { n.to_string() };
-                ranged(ui, fleet, 96.0, "PhysicalLink", count(car.physical_links), None, true);
-                ranged(ui, fleet, 96.0, "ConstraintLink", count(car.constraint_links), None, true);
-            });
-            if p.hitch().is_some() {
-                theme::card(ui, "Trailers", Some(&format!("{} templates", fleet.trailers.len())), |ui| {
-                    let mut trailers: Vec<(u32, String)> =
-                        fleet.trailers.iter().map(|k| (*k, data.template_names.get(k).cloned().unwrap_or_else(|| format!("0x{k:08X}")))).collect();
-                    trailers.sort_by(|a, b| a.1.cmp(&b.1));
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for (key, name) in trailers {
-                        let on = p.trailer == Some(key);
-                        let resp = theme::row_chip(ui, if on { theme::BRASS_SOFT } else { Color32::TRANSPARENT }, Color32::TRANSPARENT, |ui| {
-                            // The key at the right; the name has what is left and is cut short there.
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(format!("0x{key:08X}")).monospace().color(theme::DIM));
-                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                    ui.add(egui::Label::new(egui::RichText::new(name).color(if on { theme::BRASS } else { theme::TX })).truncate());
-                                });
-                            });
-                        });
-                        if resp.clicked() {
-                            acts.push(Act::Trailer(Some(key)));
-                        }
-                    }
-                });
-            }
-        }
+        System::Coupling | System::Hull | System::Flight | System::Yaw | System::Attitude | System::Flyby => {}
     }
-    theme::eyebrow(ui, "Start a contribution from here");
-    ui.horizontal_wrapped(|ui| {
-        for kind in crate::domain::Domain::Driving.kinds() {
-            if ui.button(crate::quartermaster::kind_title(kind)).on_hover_text(*kind).clicked() {
-                acts.push(Act::Contribute(kind));
+}
+
+/// The Coupling system's cards, the same for every class: what the vehicle has to couple with, a
+/// helicopter's winch, and the trailers a hitch takes.
+fn coupling_cards(ui: &mut egui::Ui, p: &Panel, v: &Vehicle, data: &Data) -> Vec<Act> {
+    let mut acts = Vec::new();
+    let fleet = &data.fleet;
+    theme::card(ui, "On this vehicle", None, |ui| {
+        match p.hitch() {
+            Some(at) => {
+                ranged(ui, fleet, 96.0, "Hitch", HITCH.to_string(), None, true);
+                ranged(ui, fleet, 96.0, "Hitch at", position(at), None, true);
             }
+            None => ranged(ui, fleet, 96.0, "Hitch", "None".to_string(), None, true),
         }
+        let winch = v.uses.iter().filter(|u| u.class == "ConnectPoint").count();
+        ranged(ui, fleet, 96.0, "Winch points", winch.to_string(), None, true);
+        let count = |n: usize| if n == 0 { "None".to_string() } else { n.to_string() };
+        ranged(ui, fleet, 96.0, "PhysicalLink", count(v.physical_links), None, true);
+        ranged(ui, fleet, 96.0, "ConstraintLink", count(v.constraint_links), None, true);
     });
-    ui.add_space(10.0);
+    if let Drive::Helicopter { winch: Some(winch), .. } = &v.drive {
+        theme::card(ui, "Winch", None, |ui| {
+            ranged(ui, fleet, 96.0, "Bone", p.node_label(winch.bone), None, true);
+            ranged(ui, fleet, 96.0, "Length", number(winch.length), None, true);
+            ranged(ui, fleet, 96.0, "Magnet radius", number(winch.magnet_radius), None, true);
+            ranged(ui, fleet, 96.0, "Autodrop under", number(winch.autodrop_length), None, true);
+        });
+    }
+    if p.hitch().is_some() {
+        theme::card(ui, "Trailers", Some(&format!("{} templates", fleet.trailers.len())), |ui| {
+            let mut trailers: Vec<(u32, String)> =
+                fleet.trailers.iter().map(|k| (*k, data.template_names.get(k).cloned().unwrap_or_else(|| format!("0x{k:08X}")))).collect();
+            trailers.sort_by(|a, b| a.1.cmp(&b.1));
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (key, name) in trailers {
+                let on = p.trailer == Some(key);
+                let resp = theme::row_chip(ui, if on { theme::BRASS_SOFT } else { Color32::TRANSPARENT }, Color32::TRANSPARENT, |ui| {
+                    // The key at the right; the name has what is left and is cut short there.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(format!("0x{key:08X}")).monospace().color(theme::DIM));
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(name).color(if on { theme::BRASS } else { theme::TX })).truncate());
+                        });
+                    });
+                });
+                if resp.clicked() {
+                    acts.push(Act::Trailer(Some(key)));
+                }
+            }
+        });
+    }
     acts
 }
 
@@ -1538,7 +1826,7 @@ mod tests {
         let mut p = Panel::default();
         apply_state(&mut p, &state(r#"{"capture":"x.png","system":"steering","overlays":["Show suspension travel"],"trailer":"Flatbed Trailer"}"#)).unwrap();
         assert_eq!(p.system, System::Steering);
-        assert_eq!(p.show, [false, true, false, false, false]);
+        assert_eq!(p.show, [false, true, false, false, false, false, false, false]);
         assert_eq!(p.pending_trailer.as_deref(), Some("Flatbed Trailer"));
         assert!(!p.exhaust);
     }
@@ -1549,7 +1837,7 @@ mod tests {
         apply_state(&mut p, &state(r#"{"capture":"x.png","exhaust":"on","template":"Austin (CIV)","overlays":["Show full lock"]}"#)).unwrap();
         assert!(p.exhaust);
         assert_eq!(p.pending_template.as_deref(), Some("Austin (CIV)"));
-        assert_eq!(p.show, [false, false, false, false, true]);
+        assert_eq!(p.show, [false, false, false, false, true, false, false, false]);
     }
 
     #[test]
@@ -1648,9 +1936,18 @@ mod tests {
 
     #[test]
     fn each_system_offers_its_own_overlays() {
-        assert_eq!(Overlay::of(System::Chassis), [Overlay::Wheels, Overlay::Travel]);
-        assert_eq!(Overlay::of(System::Powertrain), [Overlay::TorqueSplit]);
-        assert_eq!(Overlay::of(System::Steering), [Overlay::FullLock]);
+        assert_eq!(Overlay::of(Kind::Car, System::Chassis), [Overlay::Wheels, Overlay::Travel]);
+        assert_eq!(Overlay::of(Kind::Car, System::Powertrain), [Overlay::TorqueSplit]);
+        assert_eq!(Overlay::of(Kind::Car, System::Steering), [Overlay::FullLock]);
+        assert_eq!(Overlay::of(Kind::Tank, System::Chassis), [Overlay::Wheels, Overlay::Travel, Overlay::Probes]);
+        assert!(Overlay::of(Kind::Tank, System::Steering).is_empty(), "full lock is a car's");
+        assert_eq!(Overlay::of(Kind::Helicopter, System::Flight), [Overlay::Rotors]);
+        assert_eq!(Overlay::of(Kind::Helicopter, System::Coupling), [Overlay::Hardpoints, Overlay::Winch]);
+        for kind in Kind::ALL {
+            assert_eq!(Overlay::of(kind, System::Coupling)[0], Overlay::Hardpoints);
+            assert_eq!(System::of(kind).len(), 4);
+            assert_eq!(System::of(kind)[3], System::Coupling);
+        }
         // an overlay is its own index into the page's switches
         assert!(Overlay::ALL.iter().enumerate().all(|(i, o)| *o as usize == i));
     }
@@ -1740,15 +2037,15 @@ mod retail_tests {
     fn choosing_a_template_reads_that_templates_car() {
         let (mut p, index) = page(AUSTIN_MODEL, |_| {});
         assert!(p.templates.len() > 1, "{:?}", p.templates);
-        let first = p.car().expect("a car").key;
+        let first = p.vehicle().expect("a car").key;
         let other = p.templates.iter().map(|t| t.0).find(|k| *k != first).expect("a second template");
         apply(Act::Trailer(Some(0x8000_76A6)), &mut p);
         apply(Act::Template(other), &mut p);
-        assert_eq!(p.car().expect("a car").key, other);
+        assert_eq!(p.vehicle().expect("a car").key, other);
         assert_eq!(p.trailer, None, "the trailer comes off with the template");
         // a template of another model is not this model's to choose
         apply(Act::Template(0x8000_76A6), &mut p);
-        assert_eq!(p.car().expect("a car").key, other);
+        assert_eq!(p.vehicle().expect("a car").key, other);
         // a second show reads nothing again
         let mut w = WadStack::empty();
         p.ensure(&mut w, &index);
@@ -1774,7 +2071,7 @@ mod retail_tests {
         let (p, _) = page(AUSTIN_MODEL, |p| p.pending_template = Some("austin (civ)".into()));
         assert_eq!(p.template_name(), Some("Austin (CIV)"));
         let (p, _) = page(AUSTIN_MODEL, |p| p.pending_template = Some("Flatbed Trailer".into()));
-        let Some(Err(e)) = &p.car else { panic!("a template the model does not have was read") };
+        let Some(Err(e)) = &p.vehicle else { panic!("a template the model does not have was read") };
         assert!(e.contains("Flatbed Trailer") && e.contains("Austin (CIV)"), "{e}");
     }
 
@@ -1821,20 +2118,118 @@ mod retail_tests {
     /// its default width (372 leaves 347).
     #[test]
     fn every_systems_cards_fit_the_inspector() {
-        let (mut p, index) = page(AUSTIN_MODEL, |p| p.pending_template = Some("Austin (CIV)".into()));
-        let row = index.models().iter().find(|r| r.hash == AUSTIN_MODEL).expect("the Austin's row");
         let mut wide = Vec::new();
-        for system in System::ALL {
-            p.system = system;
-            for w in [275.0, 347.0] {
-                let drawn = drawn_width(w, |ui| {
-                    inspector(ui, &p, Some(row));
-                });
-                if drawn > w + 0.5 {
-                    wide.push(format!("{} at {w}: {drawn}", system.label()));
+        for (model, template, kind) in [
+            (AUSTIN_MODEL, "Austin (CIV)", Kind::Car),
+            (AMX30_MODEL, "AMX30", Kind::Tank),
+            (RIB36_MODEL, "Gar", Kind::Boat),
+            (MI35_MODEL, "Mi35", Kind::Helicopter),
+            (A10_MODEL, "Support Vehicle (A10)", Kind::Plane),
+            (C130_MODEL, "Support Vehicle (C130)", Kind::Plane),
+        ] {
+            let (mut p, index) = page(model, |p| p.pending_template = Some(template.into()));
+            assert_eq!(p.kind(), Some(kind), "{template}: {:?}", p.vehicle.as_ref().map(|v| v.as_ref().err()));
+            let row = index.models().iter().find(|r| r.hash == model).expect("the model's row");
+            for system in System::of(kind) {
+                p.system = *system;
+                assert!(status(&p).is_some(), "{template} has no {} status line", system.label());
+                for w in [275.0, 347.0] {
+                    let drawn = drawn_width(w, |ui| {
+                        inspector(ui, &p, Some(row));
+                    });
+                    if drawn > w + 0.5 {
+                        wide.push(format!("{template} {} at {w}: {drawn}", system.label()));
+                    }
                 }
             }
         }
         assert!(wide.is_empty(), "{wide:?}");
+    }
+
+    /// `vz_veh_tank_amx30_base`, `global_veh_rib36`, `vz_veh_helicopter_mi35hind`,
+    /// `ch_veh_apc_zbd2000`, `al_veh_plane_a10`.
+    const AMX30_MODEL: u32 = 0x1164_0B62;
+    const RIB36_MODEL: u32 = 0x0C95_FF35;
+    const MI35_MODEL: u32 = 0x1CE8_F54F;
+    const ZBD2000_MODEL: u32 = 0x340B_1CB8;
+    const A10_MODEL: u32 = 0x722B_EA76;
+    /// `al_veh_plane_c130`.
+    const C130_MODEL: u32 = 0x54E9_C345;
+
+    /// A model opens on the systems of its template's physics class: a tank on Chassis, a boat on
+    /// Hull, a helicopter on Flight; a plane, which has no physics record, on none.
+    #[test]
+    fn a_model_opens_on_its_own_classes_systems() {
+        for (model, kind, first) in [
+            (AMX30_MODEL, Kind::Tank, System::Chassis),
+            (RIB36_MODEL, Kind::Boat, System::Hull),
+            (MI35_MODEL, Kind::Helicopter, System::Flight),
+        ] {
+            let (p, _) = page(model, |_| {});
+            assert_eq!(p.kind(), Some(kind));
+            assert_eq!(p.system, first);
+            assert!(p.has_systems());
+        }
+        // the Steering tab a car was left on is a tank's too, and is kept
+        let (p, _) = page(AMX30_MODEL, |p| p.system = System::Steering);
+        assert_eq!(p.system, System::Steering);
+        // a plane has no physics record: its two fly-by templates open on Flyby, and the parked
+        // `A10`, a prop, is not one of them
+        let (mut p, index) = page(A10_MODEL, |_| {});
+        assert_eq!((p.kind(), p.system), (Some(Kind::Plane), System::Flyby));
+        let names: Vec<&str> = p.templates.iter().map(|t| t.1.as_str()).collect();
+        assert_eq!(names, ["Support Vehicle (A10)", "Support Vehicle (A10) low altitude"]);
+        // a model no template of the five kinds names has no systems
+        p.show_model(Some((0x1234_5678, &[])), &index);
+        assert!(!p.has_systems() && p.kind().is_none() && p.templates.is_empty());
+    }
+
+    /// The ZBD2000 has four tank templates and one boat template; choosing the boat one turns the
+    /// page to a boat's systems.
+    #[test]
+    fn a_models_templates_can_be_of_two_classes() {
+        let (mut p, _) = page(ZBD2000_MODEL, |p| p.pending_template = Some("ZBD2000".into()));
+        assert_eq!(p.kind(), Some(Kind::Tank));
+        assert_eq!(p.templates.len(), 5, "{:?}", p.templates);
+        let boat = p.templates.iter().find(|t| t.1.contains("Amphibious")).expect("the amphibious template").0;
+        apply(Act::Template(boat), &mut p);
+        assert_eq!(p.kind(), Some(Kind::Boat));
+        assert_eq!(p.system, System::Hull);
+    }
+
+    /// A `--ui-state` that names a system the vehicle's class lacks, or rotors on a vehicle with
+    /// none, is refused where the bench reads.
+    #[test]
+    fn a_named_system_or_rotor_state_the_vehicle_lacks_is_refused() {
+        let named = |system: System| move |p: &mut Panel| p.pending_system = Some(system);
+        let (p, _) = page(MI35_MODEL, named(System::Yaw));
+        assert_eq!(p.system, System::Yaw);
+        let (p, _) = page(AMX30_MODEL, named(System::Flight));
+        let Some(Err(e)) = &p.vehicle else { panic!("a tank opened on Flight") };
+        assert!(e.contains("Flight") && e.contains("Chassis"), "{e}");
+        let (p, _) = page(AMX30_MODEL, |p| p.pending_rotors = Some(true));
+        let Some(Err(e)) = &p.vehicle else { panic!("a tank span its rotors") };
+        assert!(e.contains("rotors"), "{e}");
+        let (p, _) = page(MI35_MODEL, |p| p.pending_rotors = Some(true));
+        assert!(p.rotors && p.vehicle().is_some());
+    }
+
+    /// The AMX30's six ground probes are nodes of its model, and its template names the winch a
+    /// Mi-35 lifts with.
+    #[test]
+    fn a_tank_has_its_probe_nodes_and_a_helicopter_its_rotors_and_winch() {
+        let (p, _) = page(AMX30_MODEL, |_| {});
+        for name in crate::drivingtank::PROBE_NODES {
+            assert!(p.node(pandemic_hash_m2(name)).is_some(), "{name}");
+        }
+        let Some(Drive::Tank { wheels, .. }) = p.vehicle().map(|v| &v.drive) else { panic!("not a tank") };
+        assert_eq!(wheels.len(), 14);
+        assert!(wheels.iter().all(|w| p.node(w.wheel).is_some()));
+        let (p, _) = page(MI35_MODEL, |_| {});
+        let Some(Drive::Helicopter { rotors, winch, ai, .. }) = p.vehicle().map(|v| &v.drive) else { panic!("not a helicopter") };
+        assert_eq!(rotors.len(), 2);
+        assert!(rotors.iter().all(|r| p.node(r.hub).is_some()));
+        assert!(ai.is_some());
+        assert!(winch.is_some_and(|w| p.node(w.bone).is_some()));
     }
 }
