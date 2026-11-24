@@ -2334,6 +2334,17 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
     // are queued here by keys as well as widgets.
     let mut audio_page = crate::audiopage::Panel::default();
     let mut audio_acts: Vec<crate::audiopage::Act> = Vec::new();
+    // The Driving page: one vehicle's driving systems, read from its car template.
+    let mut driving_page = crate::drivingpage::Panel::default();
+    let mut driving_acts: Vec<crate::drivingpage::Act> = Vec::new();
+    // The trailer the Driving page draws on the hitch: its template, model and entity.
+    let mut driving_trailer: Option<(u32, u32, Entity)> = None;
+    // The exhausts the Driving page plays: the model they are on with what the page asked for, and
+    // the started effects.
+    let mut driving_exhaust: (u32, Vec<crate::drivingpage::Exhaust>) = (0, Vec::new());
+    let mut driving_exhaust_ids: Vec<mercs2_engine::particles::EmitterId> = Vec::new();
+    // Whether the preview's palette holds the Driving page's full lock.
+    let mut driving_lock_shown = false;
     // The Text tab's string tables: read on a worker the first time a table is opened.
     let mut text_page = crate::textpage::Panel::default();
     let mut text_acts: Vec<crate::textpage::Act> = Vec::new();
@@ -2345,6 +2356,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
     // The Layers tab's inspector acts, and the window's size in points the viewport is projected to.
     let mut layer_acts: Vec<crate::layerview::LayerAct> = Vec::new();
     let mut layer_screen = egui::vec2(1.0, 1.0);
+    // The area the Driving page leaves the viewport, when its bars and bench are up: the model is
+    // drawn centred in it.
+    let mut driving_vp: Option<egui::Rect> = None;
     // Ctrl (or Cmd) held: the Audio tab's select-all.
     let mut ctrl = false;
     // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
@@ -2701,6 +2715,16 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 scene.forget_entity(world_scope, e);
                                 scene.unload_model(world_scope, h);
                             }
+                            if let Some((_, h, e)) = driving_trailer.take() {
+                                scene.forget_entity(world_scope, e);
+                                scene.unload_model(world_scope, h);
+                            }
+                            for id in driving_exhaust_ids.drain(..) {
+                                scene.fx_remove_effect(id);
+                            }
+                            driving_exhaust = (0, Vec::new());
+                            driving_lock_shown = false;
+                            driving_page.reset();
                             world = World::new();
                             hero_renderers.clear();
                             tex_view = None;
@@ -3309,6 +3333,34 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         }
                     }
 
+                    // ── Driving's Show full lock: the steered wheels' nodes turned over this frame's
+                    // palette. The rest palette comes back on the frame the lock goes off. ──
+                    let steer_pose = match wb == Workbench::Domain(crate::domain::Domain::Driving) {
+                        true => driving_page.steer_pose(),
+                        false => Vec::new(),
+                    };
+                    if let Some(p) = preview.as_ref().filter(|_| !steer_pose.is_empty() || driving_lock_shown) {
+                        // Whether a block above wrote this frame's palette: a face, a clip, the rotors.
+                        let written = !p.rotors.is_empty()
+                            || (p.cur_clip.is_none() && !face_bones.is_empty())
+                            || p.cur_clip.is_some_and(|ci| matches!(p.clip_cache.get(&p.clip_catalog[ci].hash), Some(Some(_))));
+                        let mut mats = match written {
+                            true => world
+                                .get::<&SkinPalette>(p.entity)
+                                .map(|s| s.mats.clone())
+                                .unwrap_or_else(|e| panic!("{}: no palette: {e}", p.label)),
+                            false => p.bind.clone(),
+                        };
+                        let binds: Vec<[[f32; 4]; 4]> = p.rig.iter().map(|b| b.world_bind).collect();
+                        match crate::drivingpage::turn_nodes(&mut mats, &p.hier_nodes, &binds, &steer_pose) {
+                            Ok(()) => {
+                                let _ = world.insert_one(p.entity, SkinPalette { mats });
+                            }
+                            Err(e) => driving_page.lock_problem = Some(e),
+                        }
+                        driving_lock_shown = !steer_pose.is_empty();
+                    }
+
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
     let mut qm_acts: Vec<crate::quartermaster::Act> = Vec::new();
@@ -3345,6 +3397,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 live_page.cam.pitch = pitch;
                                 live_page.cam.zoom = zoom;
                             }
+                            if let Some([yaw, pitch]) = st.orbit {
+                                cam_yaw = yaw;
+                                cam_pitch = pitch.clamp(-1.5, 1.5);
+                            }
                             if let Some(s) = &st.settings_section {
                                 let sections: Vec<(&str, SettingsSection)> =
                                     SettingsSection::ALL.iter().map(|s| (s.label(), *s)).collect();
@@ -3368,6 +3424,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 let (hash, label) = model(name)?;
                                 hero = Some(crate::settings::Hero { hash, label });
                             }
+                            crate::drivingpage::apply_state(&mut driving_page, &st)?;
                             if let Some(name) = &st.load {
                                 if kind == Kind::Model {
                                     let (hash, label) = model(name)?;
@@ -3756,6 +3813,12 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                                     .color(theme::BRASS_DK),
                                             );
                                         }
+                                    } else if wb == Workbench::Domain(crate::domain::Domain::Driving) {
+                                        let class = preview.as_ref().and_then(|p| index.models().iter().find(|r| r.hash == p.hash)).map(|r| r.category());
+                                        ui.label(
+                                            egui::RichText::new(crate::drivingpage::crumb(&driving_page, class).join(" \u{203a} "))
+                                                .color(theme::TX),
+                                        );
                                     } else if wb == Workbench::Settings {
                                         ui.label(egui::RichText::new(settings_section.label()).color(theme::TX));
                                     } else if wb == Workbench::Depot {
@@ -3957,6 +4020,13 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     crate::live::status(ui, &live_page);
                                 } else if wb == Workbench::Depot && phase != Phase::Setup {
                                     crate::depotpage::status(ui, &depot_page);
+                                } else if let (true, Some(line)) = (
+                                    wb == Workbench::Domain(crate::domain::Domain::Driving) && phase != Phase::Setup,
+                                    crate::drivingpage::status(&driving_page),
+                                ) {
+                                    theme::status_dot(ui, "Ready", theme::GOOD);
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(line).color(theme::DIM).small());
                                 } else if let Some((dot_color, dot_text, detail)) = saves_banner {
                                     theme::status_dot(ui, dot_text, dot_color);
                                     ui.separator();
@@ -4597,6 +4667,12 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 // keeps that lens one click away in the picker inside the editor.
                                 missions_acts.extend(crate::missions::navigator(ui, &missions_panel, &debugger));
                             }
+                            // Driving lists vehicles by class and reads the loaded one's systems.
+                            Workbench::Domain(crate::domain::Domain::Driving) => {
+                                driving_page.ensure(&mut w, &index);
+                                driving_page.show_model(preview.as_ref().map(|p| (p.hash, &p.hier_nodes[..])), &index);
+                                driving_acts.extend(crate::drivingpage::navigator(ui, &driving_page, &index, preview.as_ref().map(|p| p.hash)));
+                            }
                             Workbench::Domain(d) => {
                                 ui.label(theme::disp_text(d.label().to_uppercase(), theme::style_title(), theme::TX));
                                 ui.add_space(4.0);
@@ -4770,6 +4846,11 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                               let audio_tab = eff == Workbench::Inspect && kind == Kind::Audio;
                               if audio_tab {
                                   audio_acts.extend(crate::audiopage::inspector(ui, &audio_page));
+                              }
+                              // Driving: the open system's cards come before the model's own sections.
+                              if eff == Workbench::Domain(crate::domain::Domain::Driving) {
+                                  let row = preview.as_ref().and_then(|p| index.models().iter().find(|r| r.hash == p.hash));
+                                  driving_acts.extend(crate::drivingpage::inspector(ui, &driving_page, row));
                               }
                               // The Anims tab: the hero clips play on, and the clip chosen. The hero's
                               // own model cards follow, as for any loaded model.
@@ -6542,6 +6623,20 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                             vfx_acts.push(crate::vfxview::VfxAct::Pause);
                                         }
                                     }
+                                    // Driving: Export and textures act on the loaded model, and the
+                                    // template picker chooses whose records the page reads.
+                                    Workbench::Domain(crate::domain::Domain::Driving) => {
+                                        if ui.add_enabled(has_preview, egui::Button::new("Export  F10")).clicked() {
+                                            if let Some(p) = &preview {
+                                                actions.push(Act::OpenExport(p.hash, p.label.clone()));
+                                            }
+                                        }
+                                        ui.separator();
+                                        if ui.add_enabled(has_preview, egui::Button::new("View textures  F3")).clicked() {
+                                            actions.push(Act::TexOfPreview);
+                                        }
+                                        driving_acts.extend(crate::drivingpage::verbs(ui, &driving_page));
+                                    }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
                                     // a lens, so Export / textures / clip act on the same loaded
                                     // model. (For a non-model domain there is no preview, so these
@@ -7133,8 +7228,23 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                 movie_acts.extend(crate::movieview::center(root, v));
                             }
                         }
+                        // ── DRIVING: the systems bar over the viewport and the bench under it.
+                        if wb == Workbench::Domain(crate::domain::Domain::Driving) && tex_view.is_none() {
+                            driving_acts.extend(crate::drivingpage::center(root, &driving_page));
+                        }
                         let vp = root.available_rect_before_wrap();
+                        driving_vp = (wb == Workbench::Domain(crate::domain::Domain::Driving) && driving_page.has_car()).then_some(vp);
                         layer_screen = ctx.content_rect().size();
+                        if let (Some(vp), None) = (driving_vp, &tex_view) {
+                            // The frame's own projection: the orbit camera, its centre moved to the
+                            // middle of what the page leaves the model.
+                            let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
+                            let aspect = layer_screen.x / layer_screen.y.max(1.0);
+                            let proj = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))
+                                * crate::live_cam::off_axis(aspect, 0.05, 40000.0, crate::live_cam::centre_shift(layer_screen, vp))
+                                * Mat4::look_at_lh(eye, cam_target, Vec3::Y);
+                            driving_acts.extend(crate::drivingpage::viewport(ctx, &driving_page, proj, layer_screen, vp));
+                        }
                         // A Depot item that edits a model (a collision swap) gives the centre to the
                         // viewport, as Inspect does.
                         let depot_viewport = eff == Workbench::Depot && depot_page.viewport_item().is_some();
@@ -7589,6 +7699,110 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         crate::audiopage::apply(act, &mut audio_page);
                     }
                     audio_page.poll();
+                    // The Driving page: its acts, and what it asks of the host.
+                    for act in driving_acts.drain(..) {
+                        match crate::drivingpage::apply(act, &mut driving_page) {
+                            Some(crate::drivingpage::Host::Load(hash, label)) => actions.push(Act::LoadModelHash(hash, label)),
+                            Some(crate::drivingpage::Host::Contribute(kind)) => actions.push(Act::AddToShipment(kind, 0, String::new())),
+                            None => {}
+                        }
+                    }
+                    // The trailer on the hitch: a second model in the preview's world, its origin on
+                    // the tractor's hitch node. Kept in step with the page's choice.
+                    let want_trailer = (wb == Workbench::Domain(crate::domain::Domain::Driving) && preview.is_some())
+                        .then(|| driving_page.trailer_at(&index))
+                        .flatten();
+                    if driving_trailer.map(|(key, _, _)| key) != want_trailer.map(|(key, _, _)| key) {
+                        if let Some((_, old, e)) = driving_trailer.take() {
+                            world.despawn(e).ok();
+                            scene.forget_entity(world_scope, e);
+                            if preview.as_ref().map(|p| p.hash) != Some(old) && donor_ref.map(|(h, _)| h) != Some(old) {
+                                scene.unload_model(world_scope, old);
+                            }
+                        }
+                        if let Some((key, model, at)) = want_trailer {
+                            let loaded = if scene.has_model(world_scope, model) { Ok(()) } else { load_gpu_only(&mut w, (&mut scene, world_scope), model) };
+                            match loaded {
+                                Ok(()) => {
+                                    let rest = scene.model_rest_palette(world_scope, model);
+                                    let e = world.spawn((
+                                        Transform { translation: Vec3::from(at), rotation: Quat::IDENTITY, scale: Vec3::ONE },
+                                        ModelRef { model },
+                                        AnimState::default(),
+                                        SkinPalette { mats: rest },
+                                    ));
+                                    let rs = default_render_state(&mut w, model);
+                                    scene.set_entity_render_state(world_scope, e, rs);
+                                    driving_trailer = Some((key, model, e));
+                                }
+                                Err(e) => {
+                                    driving_page.trailer_problem = Some(e);
+                                    driving_page.trailer = None;
+                                }
+                            }
+                        }
+                        // The camera frames what stands on the pedestal now: the tractor, with the
+                        // trailer when one is on.
+                        if let (Some(p), true) = (&preview, wb == Workbench::Domain(crate::domain::Domain::Driving)) {
+                            let mut framed = (p.center, p.radius);
+                            if let Some((_, model, e)) = driving_trailer {
+                                let at = world.get::<&Transform>(e).map(|t| t.translation).unwrap_or(Vec3::ZERO);
+                                if let Some((centre, radius)) = scene.model_bounds(world_scope, model) {
+                                    framed = crate::drivingpage::enclosing(framed, (centre + at, radius));
+                                }
+                            }
+                            cam_target = framed.0;
+                            cam_dist = (framed.1 * 2.4).clamp(1.5, 15000.0) * crate::drivingpage::framing(layer_screen.y);
+                        }
+                    }
+                    // The exhausts: each exhaust part's effect at its node, while the page's picker is
+                    // On. Kept in step with the page's choice, model and template.
+                    let want_exhaust = match (&preview, wb == Workbench::Domain(crate::domain::Domain::Driving)) {
+                        (Some(p), true) => driving_page.exhausts(&index).map(|list| (p.hash, list)),
+                        _ => Ok((0, Vec::new())),
+                    };
+                    let want_exhaust = want_exhaust.unwrap_or_else(|e| {
+                        driving_page.exhaust_problem = Some(e);
+                        driving_page.exhaust = false;
+                        (0, Vec::new())
+                    });
+                    if want_exhaust != driving_exhaust {
+                        for id in driving_exhaust_ids.drain(..) {
+                            scene.fx_remove_effect(id);
+                        }
+                        let started = (|| -> Result<(), String> {
+                            if want_exhaust.1.is_empty() {
+                                return Ok(());
+                            }
+                            ensure_fx_atlas(&mut scene, world_scope, &mut w, &mut vfx_rects, &mut vfx_atlas)?;
+                            for x in &want_exhaust.1 {
+                                let src = index
+                                    .rows(Kind::Effect)
+                                    .iter()
+                                    .find(|r| r.hash == x.effect && r.type_id == mercs2_formats::types::TYPE_ID_EFFECT)
+                                    .map(|r| r.src)
+                                    .ok_or_else(|| format!("0x{:08X} is no effect of the open archives", x.effect))?;
+                                let source = w.source_mut(src).ok_or("the effect's archive is not open")?;
+                                let effect = mercs2_engine::game_world::load_effect(source, x.effect)?
+                                    .ok_or_else(|| format!("0x{:08X} is no effect of its archive", x.effect))?;
+                                let id = scene.fx_start_effect(world_scope, &effect, x.starter, x.at, true)?;
+                                driving_exhaust_ids.push(id);
+                                if let Some(e) = scene.fx_effect_mut(id) {
+                                    e.sim.set_rotation(x.turn);
+                                }
+                            }
+                            Ok(())
+                        })();
+                        driving_exhaust = want_exhaust;
+                        if let Err(e) = started {
+                            for id in driving_exhaust_ids.drain(..) {
+                                scene.fx_remove_effect(id);
+                            }
+                            driving_exhaust = (0, Vec::new());
+                            driving_page.exhaust_problem = Some(e);
+                            driving_page.exhaust = false;
+                        }
+                    }
                     for act in text_acts.drain(..) {
                         match act {
                             crate::textpage::Act::Ship(hash, label) => {
@@ -7915,6 +8129,10 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                         );
                                         cam_target = p.center;
                                         cam_dist = (p.radius * 2.4).clamp(1.5, 15000.0);
+                                        // Driving's bars and bench leave the model part of the window.
+                                        if wb == Workbench::Domain(crate::domain::Domain::Driving) {
+                                            cam_dist *= crate::drivingpage::framing(layer_screen.y);
+                                        }
                                         sel_bone = None;
                                         preview = Some(p);
                                         // The loaded row is the cursor row, however it was loaded
@@ -8467,13 +8685,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                                     Kind::Effect if row.type_id == mercs2_formats::types::TYPE_ID_EFFECT => {
                                         let (hash, label, src) = (row.hash, row.label(), row.src);
                                         let opened = (|| -> Result<crate::vfxview::VfxView, String> {
-                                            if !scene.fx_has_atlas(world_scope) {
-                                                let base = w.wads.first_mut().ok_or("no archive open")?;
-                                                let (atlas, rects) = mercs2_engine::game_world::load_fx_atlas(base)?;
-                                                scene.fx_set_atlas(world_scope, &atlas, &rects)?;
-                                                vfx_rects = rects.into_iter().map(|r| (r.key, r)).collect();
-                                                vfx_atlas = Some(atlas);
-                                            }
+                                            ensure_fx_atlas(&mut scene, world_scope, &mut w, &mut vfx_rects, &mut vfx_atlas)?;
                                             let started_by = index.effect_starters.get(&hash).cloned().unwrap_or_default();
                                             let source = w.source_mut(src).ok_or("the row's archive is not open")?;
                                             let effect = mercs2_engine::game_world::load_effect(source, hash)?
@@ -10008,6 +10220,9 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         let eye = cam_target - fwd * cam_dist;
                         let view = Mat4::look_at_lh(eye, cam_target, Vec3::Y);
                         scene.set_view(view, 0.05, 40000.0);
+                        if let Some(vp) = driving_vp {
+                            scene.set_view_shift(crate::live_cam::centre_shift(layer_screen, vp));
+                        }
                         scene.set_shadow(
                             cam_target.into(),
                             [-0.45, -1.0, -0.35],
@@ -11289,6 +11504,26 @@ fn shot_render_state(
 }
 
 /// GPU-upload a model by hash (used by the Fit bench's donor reference for a model not previewed yet).
+/// Give world `scope` what its effects draw from, when it has none: the base archive's `vfx` atlas
+/// and the `fxdict`'s rectangles, kept in `rects` and `atlas` for the cards that show them.
+fn ensure_fx_atlas(
+    scene: &mut Scene,
+    scope: mercs2_engine::scene::WorldScope,
+    w: &mut WadStack,
+    rects: &mut HashMap<u32, mercs2_formats::fxdict::FxRect>,
+    atlas: &mut Option<mercs2_formats::texture::TextureData>,
+) -> Result<(), String> {
+    if scene.fx_has_atlas(scope) {
+        return Ok(());
+    }
+    let base = w.wads.first_mut().ok_or("no archive open")?;
+    let (texture, read) = mercs2_engine::game_world::load_fx_atlas(base)?;
+    scene.fx_set_atlas(scope, &texture, &read)?;
+    *rects = read.into_iter().map(|r| (r.key, r)).collect();
+    *atlas = Some(texture);
+    Ok(())
+}
+
 fn load_gpu_only(w: &mut WadStack, (scene, scope): (&mut Scene, mercs2_engine::scene::WorldScope), hash: u32) -> Result<(), String> {
     let md = load_model_data(w, hash)?;
     scene.load_model(scope, hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
