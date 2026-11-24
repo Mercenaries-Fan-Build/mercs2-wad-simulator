@@ -29,7 +29,17 @@ its foot:
   Trailer picker draws a trailer template on the hitch node and frames the two together; the
   Exhaust picker plays each exhaust part's effect at its node (the part names a template, and that
   template's `RedEffectComponent` the effect). A selected hardpoint lists the vehicle models that
-  carry it. A vehicle with no car template shows Inspect's model sections alone. Contract:
+  carry it. The other vehicle classes open on their own systems, by the physics record the chosen
+  template carries: a tank (`_TankPhysics`; `drivingtank`) on Chassis, Powertrain, Steering and
+  Coupling, with its fake wheels and six ground probes to scale, its thrust curve and the steering
+  it keeps at speed; a boat (`_BoatPhysics`; `drivingboat`) on Hull, Powertrain, Steering and
+  Coupling, with its four springs' values against speed, thrust ahead and astern, and its steering
+  gain; a helicopter (`drivingheli`) on Flight, Yaw, Attitude and Coupling, each chart and card
+  showing the player's record (`_HelicopterPhysics`) beside the AI's (`_HelicopterPhysicsAi`), with
+  a Rotors picker and its winch on Coupling; a support plane, which has no physics record and is a
+  template whose `ObjectScript` names `supportairplane` (`drivingplane`), on Flyby (the path
+  `Airstrike.Flyby` flies and the bank in a turn) and Coupling. A model none of whose templates is
+  one of the five shows Inspect's model sections alone. Contract:
   `docs/modernization/workshop_pages/driving.md`.
 - **Audio** (Inspect's AUDIO tab, `audiopage`) lists the 12,988 voice-over lines by the banks whose
   cues play them, read from `English.wad` (`audioroute`, through `sound::wavebank_players`): the 27
@@ -179,7 +189,7 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
 `settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), on `"tab": "FACEFX"` with a `load` `face_pose` (a pose of the opened actor, held at full weight) or `face_time` (seconds into the opened set's first anim, paused), on `"tab": "WORLD LAYERS"` with a `load` `entity` (an entity of the opened layer by its label, selected and framed), `orbit` (the model viewport's camera yaw and pitch, radians; `ui_states/driving_steering_lock.json`), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
-applied once the tab's routing is read (`ui_states/audio.json`), on `"page": "Driving"` `system` (a systems-bar tab), `overlays` (the viewport chips to turn on, by label), `exhaust` (`Off` or `On`; `ui_states/driving_exhaust.json`) and with a `load` `template` (the loaded model's template to read, by name) and `trailer` (a trailer template by name; `ui_states/driving_coupling_trailer.json`), `run_wad` / `run_data` (a path
+applied once the tab's routing is read (`ui_states/audio.json`), on `"page": "Driving"` `system` (a systems-bar tab of the loaded vehicle's class), `overlays` (the viewport chips to turn on, by label), `exhaust` (`Off` or `On`; `ui_states/driving_exhaust.json`), `rotors` (`Stopped` or `Spinning`, for a helicopter; `ui_states/driving_heli_flight.json`) and with a `load` `template` (the loaded model's template to read, by name) and `trailer` (a trailer template by name; `ui_states/driving_coupling_trailer.json`), `run_wad` / `run_data` (a path
 used for this run as Settings' "Use for this run only…" does, after the first load; the capture
 waits for the reload it starts, and a path that starts none exits 2) — plus `capture` (the PNG to write,
 relative to the working directory) and `settle_frames` (default 8). The window opens, applies the state once the reference data is in
