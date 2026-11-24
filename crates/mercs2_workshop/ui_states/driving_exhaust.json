@@ -1,0 +1,9 @@
+{
+  "page": "Driving",
+  "load": "civ_veh_semi_austin",
+  "template": "Austin (CIV)",
+  "system": "Chassis",
+  "exhaust": "On",
+  "settle_frames": 180,
+  "capture": "driving_exhaust.png"
+}
