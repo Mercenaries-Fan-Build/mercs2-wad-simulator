@@ -1,0 +1,6 @@
+{
+  "page": "Driving",
+  "load": "civ_veh_semi_austin",
+  "system": "Chassis",
+  "capture": "driving_chassis.png"
+}
