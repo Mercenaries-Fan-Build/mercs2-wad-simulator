@@ -1,0 +1,7 @@
+{
+  "page": "Driving",
+  "load": "al_veh_plane_c130",
+  "template": "Support Vehicle (C130)",
+  "system": "Flyby",
+  "capture": "driving_plane_flyby.png"
+}
