@@ -1,0 +1,6 @@
+{
+  "page": "Driving",
+  "load": "civ_veh_semi_austin",
+  "system": "Coupling",
+  "capture": "driving_coupling.png"
+}

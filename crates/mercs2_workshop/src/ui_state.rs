@@ -48,6 +48,8 @@ pub struct UiState {
     pub live_replay: Option<PathBuf>,
     /// On the Live page: the camera's yaw, pitch (radians) and zoom, so a capture can aim it.
     pub live_camera: Option<[f32; 3]>,
+    /// The model viewport's orbit: the camera's yaw and pitch (radians), so a capture can aim it.
+    pub orbit: Option<[f32; 2]>,
     /// A Shipment folder to open.
     pub shipment: Option<PathBuf>,
     /// The contribution to select in that Shipment, by index.
@@ -107,6 +109,18 @@ pub struct UiState {
     pub script: Option<String>,
     /// With `script`: the function whose canvas to open, by the name the members list shows.
     pub function: Option<String>,
+    /// On the Driving page: the system to open, by its tab's label ("Chassis", "Powertrain",
+    /// "Steering", "Coupling").
+    pub system: Option<String>,
+    /// On the Driving page, with a `load`: the template of the loaded model to read, by name.
+    pub template: Option<String>,
+    /// On the Driving page, with a `load`: the trailer template to put on the hitch, by name.
+    pub trailer: Option<String>,
+    /// On the Driving page: whether the exhausts play, "Off" or "On".
+    pub exhaust: Option<String>,
+    /// On the Driving page: the overlays to turn on, each by its chip's label ("Show wheels", …);
+    /// the others are off.
+    pub overlays: Option<Vec<String>>,
     /// Where to write the captured frame (PNG).
     pub capture: PathBuf,
     /// Frames to let the window settle after the state is applied, before the capture.

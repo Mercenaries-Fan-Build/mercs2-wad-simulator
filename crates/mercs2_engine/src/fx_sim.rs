@@ -558,6 +558,11 @@ impl EffectSim {
         self.position = position;
     }
 
+    /// Turn the instance: what it emits from the next update on leaves along the new axes.
+    pub fn set_rotation(&mut self, rotation: Quat) {
+        self.rotation = rotation;
+    }
+
     /// Whether the instance has ended (`FUN_0048f4f0`).
     pub fn is_finished(&self) -> bool {
         let quiet = self.live_particles() == 0;
@@ -838,6 +843,29 @@ mod tests {
         let r = Resampled::read(&attrs, SIZE, SIZEVAR, "t").unwrap();
         assert!((r.at(0.5) - 4.95).abs() < 1e-4, "{}", r.at(0.5));
         assert!((r.at(1.0) - 9.9).abs() < 1e-4, "99 is the last sample: {}", r.at(1.0));
+    }
+
+    /// An instance turned after it starts runs as one started turned: a particle leaving along
+    /// the emitter's normal goes where the turn points it.
+    #[test]
+    fn a_turned_instance_emits_along_its_new_axes() {
+        let e = one_particle(effect(&[(LIFE, 100.0), (SPEED, 2.0)], vec![]));
+        let turn = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let run = |turned_at_start: bool, turned_after: bool| {
+            let at_start = if turned_at_start { turn } else { Quat::IDENTITY };
+            let mut s = EffectSim::new(&e, &HashMap::new(), Starter::default(), Vec3::ZERO, at_start, 12345).unwrap_or_else(|x| panic!("{x}"));
+            if turned_after {
+                s.set_rotation(turn);
+            }
+            for _ in 0..30 {
+                s.step(DT);
+            }
+            only_particle(&s).pos
+        };
+        let (upright, started_turned, turned_after) = (run(false, false), run(true, false), run(false, true));
+        assert_eq!(started_turned, turned_after);
+        assert!(upright[1] > 0.5 && upright[2].abs() < 1e-4, "{upright:?}");
+        assert!(turned_after[2] > 0.5 && turned_after[1].abs() < 1e-4, "{turned_after:?}");
     }
 
     #[test]

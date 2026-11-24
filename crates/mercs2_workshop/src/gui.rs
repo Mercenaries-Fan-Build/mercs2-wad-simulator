@@ -1064,6 +1064,66 @@ pub mod theme {
         resp
     }
 
+    /// A toggle chip drawn over the viewport: green when `on`, dim on a dark plate when off.
+    pub fn toggle_chip(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
+        let (fill, stroke, txt) =
+            if on { (GOOD_SOFT, GOOD_DK, GOOD) } else { (Color32::from_rgba_unmultiplied(14, 16, 20, 205), LINE, DIM) };
+        let pad = egui::vec2(8.0, 3.0);
+        let galley = egui::WidgetText::from(disp_text(label.to_uppercase(), style_eyebrow(), txt)).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            style_eyebrow(),
+        );
+        let size = galley.size() + 2.0 * pad;
+        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            ui.painter().rect(rect, egui::CornerRadius::same(3), fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Middle);
+            ui.painter().galley(rect.min + pad, galley, txt);
+        }
+        resp
+    }
+
+    /// One row of tabs, the open one lit brass. Returns the tab clicked.
+    pub fn tab_row<T: Copy + PartialEq>(ui: &mut egui::Ui, tabs: &[(T, &str)], open: T) -> Option<T> {
+        let mut clicked = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for &(tab, name) in tabs {
+                let on = tab == open;
+                let galley =
+                    ui.painter().layout_no_wrap(name.to_uppercase(), font(&style_eyebrow()), if on { BRASS } else { TX });
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(galley.size().x + 18.0, 24.0), egui::Sense::click());
+                let fill = if on {
+                    BRASS_SOFT
+                } else if resp.hovered() {
+                    G2
+                } else {
+                    Color32::TRANSPARENT
+                };
+                let p = ui.painter();
+                p.rect_filled(rect, egui::CornerRadius::same(4), fill);
+                p.galley(rect.center() - galley.size() / 2.0, galley, if on { BRASS } else { TX });
+                if resp.clicked() {
+                    clicked = Some(tab);
+                }
+            }
+        });
+        clicked
+    }
+
+    /// A thin track `width` wide with a brass tick at `place` (0 at its left end, 1 at its right);
+    /// the space alone for `None`.
+    pub fn range_tick(ui: &mut egui::Ui, width: f32, place: Option<f32>) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 12.0), egui::Sense::hover());
+        let Some(place) = place else { return };
+        let p = ui.painter();
+        let track = egui::Rect::from_center_size(rect.center(), egui::vec2(width, 4.0));
+        p.rect_filled(track, egui::CornerRadius::same(2), LINE);
+        let x = track.left() + place.clamp(0.0, 1.0) * (width - 2.0);
+        p.rect_filled(egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(2.0, 12.0)), egui::CornerRadius::ZERO, BRASS);
+    }
+
     /// A key → value row inside a card body: dim label left, tabular mono value right-aligned.
     pub fn kv(ui: &mut egui::Ui, key: &str, value: egui::RichText) {
         ui.horizontal(|ui| {

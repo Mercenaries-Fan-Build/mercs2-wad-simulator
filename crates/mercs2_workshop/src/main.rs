@@ -93,6 +93,10 @@ mod voiceidx; // Every wavebank clip by its hash: a FaceFX take's voice line
 mod bundle;
 mod chains; // Where the game archive and the reference bundle come from, first match wins
 mod domain;
+mod drivingdata; // The Driving page's reads: a car template's fields by name, the fleet, wheels, nodes
+mod drivingmath; // The car model's gearbox, torque and steering math, as the executable computes it
+mod drivingpage; // The Driving page: systems bar, benches and cards for one vehicle's car template
+mod plot; // Charts and scaled drawings painted by hand: data-to-pixel mapping, axes, lines, labels
 mod fetch;
 mod gui;
 mod import;
