@@ -1,0 +1,6 @@
+{
+  "page": "Driving",
+  "load": "civ_veh_semi_austin",
+  "system": "Powertrain",
+  "capture": "driving_powertrain.png"
+}
