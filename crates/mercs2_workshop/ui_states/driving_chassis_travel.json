@@ -1,0 +1,7 @@
+{
+  "page": "Driving",
+  "load": "civ_veh_semi_austin",
+  "system": "Chassis",
+  "overlays": ["Show wheels", "Show suspension travel"],
+  "capture": "driving_chassis_travel.png"
+}
