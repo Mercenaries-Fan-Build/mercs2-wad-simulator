@@ -1,0 +1,7 @@
+{
+  "page": "Driving",
+  "load": "gr_veh_boat_cigarette",
+  "template": "Piranha",
+  "system": "Steering",
+  "capture": "driving_boat_steering.png"
+}
