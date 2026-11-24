@@ -109,8 +109,9 @@ pub struct UiState {
     pub script: Option<String>,
     /// With `script`: the function whose canvas to open, by the name the members list shows.
     pub function: Option<String>,
-    /// On the Driving page: the system to open, by its tab's label ("Chassis", "Powertrain",
-    /// "Steering", "Coupling").
+    /// On the Driving page: the system to open, by its tab's label. A car and a tank have
+    /// "Chassis", "Powertrain", "Steering" and "Coupling"; a boat "Hull" in place of "Chassis"; a
+    /// helicopter "Flight", "Yaw", "Attitude" and "Coupling"; a plane "Flyby" and "Coupling".
     pub system: Option<String>,
     /// On the Driving page, with a `load`: the template of the loaded model to read, by name.
     pub template: Option<String>,
@@ -118,6 +119,8 @@ pub struct UiState {
     pub trailer: Option<String>,
     /// On the Driving page: whether the exhausts play, "Off" or "On".
     pub exhaust: Option<String>,
+    /// On the Driving page, with a `load` of a helicopter: its rotors, "Stopped" or "Spinning".
+    pub rotors: Option<String>,
     /// On the Driving page: the overlays to turn on, each by its chip's label ("Show wheels", …);
     /// the others are off.
     pub overlays: Option<Vec<String>>,
