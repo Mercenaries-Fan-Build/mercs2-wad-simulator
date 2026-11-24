@@ -93,9 +93,13 @@ mod voiceidx; // Every wavebank clip by its hash: a FaceFX take's voice line
 mod bundle;
 mod chains; // Where the game archive and the reference bundle come from, first match wins
 mod domain;
-mod drivingdata; // The Driving page's reads: a car template's fields by name, the fleet, wheels, nodes
-mod drivingmath; // The car model's gearbox, torque and steering math, as the executable computes it
-mod drivingpage; // The Driving page: systems bar, benches and cards for one vehicle's car template
+mod drivingboat; // The Driving page's boat systems: hull springs, thrust, steering gain
+mod drivingdata; // The Driving page's reads: a vehicle template's fields by name, the fleets, wheels, rotors, nodes
+mod drivingheli; // The Driving page's helicopter systems: flight, yaw, attitude, for the player and the AI record
+mod drivingmath; // The four vehicle classes' drive, steering and flight math, as the executable computes it
+mod drivingpage; // The Driving page: systems bar, benches and cards for one vehicle's template; the car's systems
+mod drivingplane; // The Driving page's plane system: the path Airstrike.Flyby flies and the bank in a turn
+mod drivingtank; // The Driving page's tank systems: running gear, thrust, steering kept
 mod plot; // Charts and scaled drawings painted by hand: data-to-pixel mapping, axes, lines, labels
 mod fetch;
 mod gui;
