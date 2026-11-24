@@ -4670,7 +4670,13 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             // Driving lists vehicles by class and reads the loaded one's systems.
                             Workbench::Domain(crate::domain::Domain::Driving) => {
                                 driving_page.ensure(&mut w, &index);
-                                driving_page.show_model(preview.as_ref().map(|p| (p.hash, &p.hier_nodes[..])), &index);
+                                if let Some(crate::drivingpage::Host::Rotors(on)) = driving_page.show_model(preview.as_ref().map(|p| (p.hash, &p.hier_nodes[..])), &index) {
+                                    actions.push(Act::RotorInput(if on { 1.0 } else { 0.0 }));
+                                }
+                                // The rotors have one state, which Inspect's section sets too.
+                                if let Some(p) = &preview {
+                                    driving_page.rotors = p.rotor_input > 0.0;
+                                }
                                 driving_acts.extend(crate::drivingpage::navigator(ui, &driving_page, &index, preview.as_ref().map(|p| p.hash)));
                             }
                             Workbench::Domain(d) => {
@@ -7233,7 +7239,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                             driving_acts.extend(crate::drivingpage::center(root, &driving_page));
                         }
                         let vp = root.available_rect_before_wrap();
-                        driving_vp = (wb == Workbench::Domain(crate::domain::Domain::Driving) && driving_page.has_car()).then_some(vp);
+                        driving_vp = (wb == Workbench::Domain(crate::domain::Domain::Driving) && driving_page.has_systems()).then_some(vp);
                         layer_screen = ctx.content_rect().size();
                         if let (Some(vp), None) = (driving_vp, &tex_view) {
                             // The frame's own projection: the orbit camera, its centre moved to the
@@ -7704,6 +7710,7 @@ fn open(opts: Options, event_loop: &ActiveEventLoop) -> impl FnMut(Event<()>, &A
                         match crate::drivingpage::apply(act, &mut driving_page) {
                             Some(crate::drivingpage::Host::Load(hash, label)) => actions.push(Act::LoadModelHash(hash, label)),
                             Some(crate::drivingpage::Host::Contribute(kind)) => actions.push(Act::AddToShipment(kind, 0, String::new())),
+                            Some(crate::drivingpage::Host::Rotors(on)) => actions.push(Act::RotorInput(if on { 1.0 } else { 0.0 })),
                             None => {}
                         }
                     }
