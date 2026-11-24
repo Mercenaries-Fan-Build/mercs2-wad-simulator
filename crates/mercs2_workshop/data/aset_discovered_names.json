@@ -16316,6 +16316,207 @@
     ],
     "0xE25098E4": [
       "global_env_rocksmall01"
+    ],
+    "0x980898B5": [
+      "global_munitions_tankbuster"
+    ],
+    "0xB9065B19": [
+      "global_munitions_bombingrun"
+    ],
+    "0xC9CBF988": [
+      "global_munitions_rocketartillery"
+    ],
+    "0xF4358256": [
+      "global_munitions_surgicalstrike"
+    ],
+    "0x1096C128": [
+      "white_freewaytrenchbridge01_overpass"
+    ],
+    "0x2BC5152C": [
+      "vz_hum_hvt01"
+    ],
+    "0x60497640": [
+      "ch_hum_super_soldier"
+    ],
+    "0xF0A40B98": [
+      "pmc_hum_gauge"
+    ],
+    "0xEB1E0F6E": [
+      "global_bullettracer_yellowwhite"
+    ],
+    "0x39074F35": [
+      "global_bullettracer_mg_yellowwhite"
+    ],
+    "0x738993DF": [
+      "global_veh_ruin_68valiant"
+    ],
+    "0xE6941471": [
+      "global_veh_ruin_phoenix"
+    ],
+    "0x41D7AC6F": [
+      "global_veh_ruin_transport"
+    ],
+    "0xAEAA53E7": [
+      "global_veh_ruin_m35cargo"
+    ],
+    "0xB14399D8": [
+      "global_veh_ruin_amx30base"
+    ],
+    "0x1B388028": [
+      "global_veh_ruin_m151_50cal"
+    ],
+    "0xF4309A98": [
+      "global_veh_att_antenna_a"
+    ],
+    "0x95F4BA55": [
+      "civ_veh_car_68valiant_4door"
+    ],
+    "0x3CAC72AB": [
+      "civ_veh_car_phoenix_rtr_crappy"
+    ],
+    "0x9C3D4104": [
+      "civ_veh_car_phoenix_rtr_racing"
+    ],
+    "0x25B3F7BC": [
+      "pmc_veh_plane_ov1bronco"
+    ],
+    "0x07B982D6": [
+      "gr_veh_helicopter_uh1huey_transport"
+    ],
+    "0x845FF0E6": [
+      "vz_state_gurjob002_01_pristine_tinygeometry_tgr08_tgc29_0x00143bd0"
+    ],
+    "0x95DF42C4": [
+      "global_weapon_as12atgm"
+    ],
+    "0x9DD1FAC0": [
+      "global_weapon_strategicmissile"
+    ],
+    "0x8A20DDDE": [
+      "global_weapon_watermine"
+    ],
+    "0x321FCBB2": [
+      "global_phonebhandset"
+    ],
+    "0x2B18AE79": [
+      "global_clothes_fxmodel_a"
+    ],
+    "0xC911586E": [
+      "global_clothes_fxmodel_b"
+    ],
+    "0x2B14314B": [
+      "global_clothes_fxmodel_c"
+    ],
+    "0xA9203098": [
+      "global_clothes_fxmodel_d"
+    ],
+    "0x9AC820F5": [
+      "commercial_roadstraight10_crater"
+    ],
+    "0xA7E8876E": [
+      "commercial_roadstraight20_crater"
+    ],
+    "0x5F743FEC": [
+      "global_debris_branch01"
+    ],
+    "0x7C7F44E0": [
+      "global_debris_asphaltsm02"
+    ],
+    "0xA681C595": [
+      "global_debris_asphaltsm03"
+    ],
+    "0x9C706CB6": [
+      "global_debris_asphaltsm04"
+    ],
+    "0x4598BC15": [
+      "global_debris_concretesm01"
+    ],
+    "0xA391014A": [
+      "global_debris_concretesm02"
+    ],
+    "0xC5937567": [
+      "global_debris_concretesm03"
+    ],
+    "0x438BECFC": [
+      "global_debris_concretesm04"
+    ],
+    "0x6E17152D": [
+      "global_debris_concretesm01_fxmodel"
+    ],
+    "0x02CAE9AA": [
+      "global_debris_concretesm02_fxmodel"
+    ],
+    "0xBA0A5B9B": [
+      "global_debris_concretesm03_fxmodel"
+    ],
+    "0x20146000": [
+      "global_debris_concretesm04_fxmodel"
+    ],
+    "0xFE8BE18C": [
+      "global_debris_woodchunk01"
+    ],
+    "0x1889CBE3": [
+      "global_debris_woodchunk02"
+    ],
+    "0x47A45054": [
+      "vz_state_gurcon005_junglebase_tinygeometry_tgr11_tgc25_0x00144e02"
+    ],
+    "0x8EDF5903": [
+      "vz_state_pirjob012_05_pristine_tinygeometry_tgr07_tgc33_0x00143d74"
+    ],
+    "0xACD54F3A": [
+      "vz_state_chijob006_d_pristine_tinygeometry_tgr30_tgc22_0x00143b6c"
+    ],
+    "0xE538060F": [
+      "global_debris_vehiclechunk_aa"
+    ],
+    "0x5B3AFE68": [
+      "global_debris_vehiclechunk_ab"
+    ],
+    "0x453D1A5D": [
+      "global_debris_vehiclechunk_ac"
+    ],
+    "0x3B2BC17E": [
+      "global_debris_vehiclechunk_ad"
+    ],
+    "0x5D2E359B": [
+      "global_debris_vehiclechunk_ae"
+    ],
+    "0xC33114C4": [
+      "global_debris_vehiclechunk_af"
+    ],
+    "0xDD337C49": [
+      "global_debris_vehiclechunk_ag"
+    ],
+    "0x4349E32A": [
+      "global_debris_vehiclechunk_ah"
+    ],
+    "0x654C5747": [
+      "global_debris_vehiclechunk_ai"
+    ],
+    "0x3B4E53C0": [
+      "global_debris_vehiclechunk_aj"
+    ],
+    "0x5B3F7B96": [
+      "global_debris_vehiclechunk_al"
+    ],
+    "0xBD425473": [
+      "global_debris_vehiclechunk_am"
+    ],
+    "0x54BC61A2": [
+      "global_weapon_tripod_dualmount"
+    ],
+    "0x3F64A225": [
+      "global_hedgechunk_fxmodel"
+    ],
+    "0xB5655D69": [
+      "global_fx_palmfrond_a"
+    ],
+    "0x935E6C1E": [
+      "global_fx_palmfrond_b"
+    ],
+    "0xFFB1CE7A": [
+      "gr_veh_helicopter_uh1huey_doorguns"
     ]
   }
 }
