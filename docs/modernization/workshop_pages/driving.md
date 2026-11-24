@@ -1,9 +1,11 @@
-# Driving — behaviour contract (Chassis · Powertrain · Steering · Coupling)
+# Driving — behaviour contract (a car's, a tank's, a boat's, a helicopter's and a plane's systems)
 
 The design is the "Driving" row of the Workshop Polish Pass canvas: `DrivingChassis`, `DrivingPowertrain`,
 `DrivingSteering` and `Driving` (the Coupling board). Driving stops being Inspect with a vehicle filter
 and becomes a page about one vehicle's driving systems: a systems bar, a 3D viewport with overlays and
-preview-state pickers, a fixed bench under it, and system cards on the right.
+preview-state pickers, a fixed bench under it, and system cards on the right. The four boards draw a
+car; the other vehicle classes use the same layout with the systems their own records give
+([Other vehicle classes](#other-vehicle-classes)).
 
 Every row is an element: what the user does, what happens, where the data comes from, what it writes,
 what is missing, and what proves it. Nothing is drawn without its row being true. The page reads the
@@ -55,20 +57,32 @@ Defaults taken where the boards and the code disagree. D5 to D9 are the user's t
 - **D2 — Panel widths stay the user's.** The boards draw 240 and 370; the page uses the shared held
   panels (220–360 and 300–480) at whatever width they were left.
 - **D3 — Field names ship in the Workshop.** A table of the 97 `_CarPhysicsV2` and 5 `_CarWheel` names,
-  hashed at load with `pandemic_hash_m2`. A schema hash with no name in the table stops the page with a
-  message naming the hash.
+  and of the 28 `_TankPhysics`, 65 `_BoatPhysics` and 22 `_HelicopterPhysics` names, hashed at load with
+  `pandemic_hash_m2`. A schema hash with no name in the table stops the page with a message naming the
+  hash.
 - **D4 — Units are shown only where proven:** km/h, rad, rad/s, rpm, s, m for node positions. Every other
   field shows a bare number.
-- **D5 — The systems bar lists four systems.** Occupants, Lights & FX, Damage and Cameras have no boards,
-  so they have no tabs yet.
-- **D6 — Car physics only.** The four systems read `_CarPhysicsV2`. A vehicle with tank, boat, helicopter
-  or jet physics opens with no systems bar and the existing model sections.
+- **D5 — The systems bar lists a car's four systems.** Occupants, Lights & FX, Damage and Cameras have
+  no boards, so they have no tabs yet.
+- **D6 — The systems follow the template's class.** A template is a car, a tank, a boat or a helicopter
+  by the physics record it carries (`_CarPhysicsV2`, `_TankPhysics`, `_BoatPhysics`,
+  `_HelicopterPhysics`), and a plane when it has none of them and its `ObjectScript` names
+  `supportairplane`. The systems bar lists that class's systems; Coupling is every class's last. A
+  model whose templates are none of the five opens with no systems bar and the existing model sections.
+  A model's templates can be of two classes (the ZBD2000 has four tank templates and one boat one): the
+  template picker lists them all and the page follows the chosen one.
 - **D7 — Pickers in this pass: Trailer and Exhaust.** Exhaust is Off or On, since nothing in the data
   separates idle from running. Lights and Riders are not drawn until the two UNPROVEN rows above are read.
 - **D8 — Contribution chips stay `Domain::Driving.kinds()`:** New model, Replace texture, New texture,
   Destruction states. The boards' "Template edit" and "Lua patch" are not kind titles and come off.
 - **D9 — Classes in the vehicle list stay as they are.** The fuel trailer stays under SEMI and the towed
   fuel tank under TOWED. Only the Trailer picker and the Trailers card use the `EngineTorque` 0 rule.
+- **D10 — A helicopter shows both its records.** Every chart draws the player's record and the AI's, and
+  every card sets the two values side by side, as the Axles card sets front beside rear.
+- **D11 — A helicopter's speeds are m/s and its yaw rates rad/s.** The executable compares them with the
+  body's velocity as it stands, the same velocity it multiplies by 3.6 before comparing with a car's km/h.
+- **D12 — A value range is a class's own.** A tank's tick sits between the lowest and highest value
+  across the tank templates, a helicopter's AI value across the AI records.
 
 ## Page and navigation
 
@@ -82,7 +96,7 @@ Defaults taken where the boards and the code disagree. D5 to D9 are the user's t
 | Template picker | Lists the templates that name the model, by name; shows the position (1 of 4); choosing one re-reads every card, chart and overlay | `AssetIndex.world_templates` filtered by model | — | picker; per-template records | test: Austin model lists its templates; values change with the choice |
 | Systems bar | One tab per system; click swaps the bench, the right-hand cards and the overlay toggles | `drivingpage::System` | — | tab strip helper in `gui.rs` | test: `apply(Act::System)`; capture per system |
 | Status bar | Template name and the system's headline values | computed, per system rows below | — | — | capture |
-| `--ui-state` | Keys `system`, `template`, `trailer`, `exhaust`, `overlays` on `page: "Driving"`; `load` works on the page; `orbit` aims the model viewport's camera on any page | `ui_state.rs`, `drivingpage::apply_state` | — | keys; `load` on a domain page | captures `ui_states/driving_*.json` |
+| `--ui-state` | Keys `system`, `template`, `trailer`, `exhaust`, `rotors`, `overlays` on `page: "Driving"`; `load` works on the page; `orbit` aims the model viewport's camera on any page. A `system` the loaded vehicle's class lacks, and `rotors` on a vehicle with none, are refused: the bench says which | `ui_state.rs`, `drivingpage::apply_state`, `Panel::show_model` | — | keys; `load` on a domain page | captures `ui_states/driving_*.json`; test: a tank named onto Flight |
 | Type and panels | Sizes from `theme::type_scale()`; the bench is 270 px, not resizable; a card row never draws wider than the inspector: a value with no range bar is cut short at the row's end | `gui.rs` | — | bottom bench panel | `no_hard_coded_font_sizes_in_the_workshop_sources`; fit test of every system's cards in a 300 and a 372 px panel |
 
 ## Data the page loads
@@ -90,7 +104,7 @@ Defaults taken where the boards and the code disagree. D5 to D9 are the user's t
 | Element | Action → effect | Data / code | Writes | Missing | Proof |
 |---|---|---|---|---|---|
 | Template records | On first show the page parses the worldentity once and keeps it | `WadStack::worldentity`, `WorldEntity::parse` | — | a held copy (boot keeps derived tables only) | test: second show does not re-parse |
-| Named fields | A template's `_CarPhysicsV2` record as name → value | `Component::decode`, the D3 table | — | `drivingdata::car_fields` | test: Austin `MaxSpeed` 90, `GearRatio1` 3.7, `SteerMaxAngle` 0.8 |
+| Named fields | A template's physics record as name → value, for each class's record | `Component::decode`, the D3 tables | — | `drivingdata::fields` | test: Austin `MaxSpeed` 90, `GearRatio1` 3.7, `SteerMaxAngle` 0.8 |
 | Fleet range | Lowest and highest value of each field over every `_CarPhysicsV2` record, and the template count | one pass over `we.groups_of("_CarPhysicsV2")` | — | `drivingdata::Fleet` | test: 454 templates in retail `vz.wad` alone (the page reads the open stack, overlays included); `Mass` 200 to 28,500; `EngineTorque` 0 to 1,800 |
 | Wheels | The template's `_CarWheel` records: node, axle | `we.groups_of("_CarWheel")`, `WorldEntity.enums` | — | decoder | test: Austin 6 wheels, 2 front and 4 rear |
 | Node positions | Each HIER node's model-space position by name hash | `Preview.hier_nodes`, parent chain as `layerview::node_worlds` | — | `node_worlds` made shared | test: Austin front axle z 4.07, hitch (0, 1.20, −3.10) |
@@ -150,6 +164,79 @@ Defaults taken where the boards and the code disagree. D5 to D9 are the user's t
 | Ride height | The trailer origin's height above the tractor's origin, which is the hitch node's height | node positions | — | — | test: Flatbed on Austin 1.20 |
 | Trace rows for `ConstraintLink` | Not drawn: they are notes about the executable, not values of this vehicle | — | — | — | — |
 
+## Other vehicle classes
+
+No board draws these; they follow the car boards' layout (D6). The executable reads are of pc-v10, by
+agent disassembly unless a row says the instructions or bytes were read again for this contract ("re-read").
+
+### Facts
+
+| Fact | Evidence | Grade |
+|---|---|---|
+| Each class's record is read by field name: `_TankPhysics` 28 fields (72 templates), `_BoatPhysics` 65 (110), `_HelicopterPhysics` 22 and `_HelicopterPhysicsAi` the same without `Mass` (143 each), in retail `vz.wad` | loaders `FUN_00659a80`, `FUN_006584a0`, `FUN_00659e80`, `FUN_0065a120`; test `every_template_of_the_four_classes_has_one_kind_and_every_field_a_name` | PROVEN |
+| The boat field `0x44EFC403` is `ShallowAngDamp`: the name hashes to it and is in the Xbox build's field strings between the same neighbours. The PC loader asks for `fShallowAngDamp` (string at `0xBC80BC`, hash `0xE9D7CA1F`), finds no such field and takes 0, so the field does nothing on PC | `pandemic_hash_m2`; exe bytes at file `0x7C80BC` (re-read); default at `0x658984` | PROVEN (the string and hashes), agent read (the default) |
+| A tank and a boat share an engine curve: straight lines through (0, `EngineTorqueRatio0`), (`EngineTorquePos1`, `Ratio1`), (`EngineTorquePos2`, `Ratio2`), (1, `Ratio3`) over speed ÷ `MaxSpeed`; thrust is the curve × `EngineTorque` × 200 × the engine state, and stops at the cap | tank `0x4560aa`–`0x45616e` (re-read), `0xB984A8` = 200 (bytes); boat `FUN_004464f0`, `0x44754b` | PROVEN |
+| A tank's and a boat's `MaxSpeed` is km/h; a boat's `MaxSpeedReverse` and `LowSpeedLimit` too | ×3.6 (`0xBA8734`) at tank `0x455df1`, after the divide by `MaxSpeed` at `0x455de8`, and at boat `0x447f84` (re-read) | PROVEN |
+| The engine state follows the throttle keeping `EngineInertia` of its error every 1/60 s; a tank's steering keeps `SteerInertia` while the input is held and `SteerInertiaNoInput` when it is let go, a boat's `SteerInertia` and `SteerNoInputInertia` | smoother `FUN_00714d90`; tank `0x455e27`, `0x45570f`, `0x455767`; boat `0x447fdc` (re-read) | PROVEN |
+| A tank keeps `1 − HiSpeedSteerLoss × speed ÷ MaxSpeed` of its steering, between 0 and 1; it turns by a yaw couple of `SteerSpeed` × that × the steer state, with no ground contact needed | `FUN_004555e0`, `0x4556da`, `0x455707` | PROVEN (agent) |
+| A tank rides on six ground probes that start at the nodes `hp_wheel_fl`, `_fr`, `_rl`, `_rr`, `_ml`, `_mr`, each `SpringCmpLength` above its node and `SpringExpLength` below it | strings at `0xBAA428`–`0xBAA464` (re-read); `FUN_00454de0`, `FUN_00456840` | PROVEN |
+| A tank's wheels are `BoneCtrlFakeWheel` records, drawn and never loaded: each casts its own ray of `WheelRadius` + `SuspensionLength`. The AMX30 has 14: ten of radius 0.41 with 0.45 of travel, four of 0.27 with none | update `0x432f10`; `we-template AMX30` | PROVEN |
+| A boat's steering gain is `Steering × (1 − HighSpeedSteerLoss × speed ÷ MaxSpeed) × a` + `LowSpeedSteering` × engine × throttle × `(1 − a)` + `NoSpeedSteering` while slower than a quarter of `MaxSpeedReverse` (at most 10 km/h), with `a` = speed ÷ `LowSpeedLimit` up to 1 | `FUN_00447f00`, `0x447f06`–`0x4480e0` (re-read) | PROVEN |
+| A boat floats on four springs at the corners of its hull. Each spring's start and end offset, strength and dampening run from the `Lo` value at rest to the `Hi` value at `MaxSpeed` | `FUN_00446930`, `FUN_004477a0` | PROVEN (agent) |
+| A boat's `RollFromTurning` and `PitchFromAcceleration` are radians: the executable takes their sine | sine table `0xCF2900`, `FUN_00446bd0` | PROVEN (agent) |
+| A helicopter's forward speed closes on `MaxFwdSpeed` × stick at `FwdSpeedAcc` per second; with the stick let go that gain is cut by `FwdSpeedNoInputInertia`. Sideways the same with `MaxRightSpeed`, `RightSpeedAcc` | `FUN_00451ca0`, `0x452155`–`0x4522d9` | PROVEN (agent) |
+| A full yaw input asks for `LowSpeedYawSpeed` at rest, `MaxYawSpeed` at `LowSpeedLimit`, and loses `HiSpeedYawLoss` of that by `MaxFwdSpeed` | `FUN_00452fe0` (re-read, whole function) | PROVEN |
+| Past `BankSpeedLimit` a helicopter banks up to `MaxRollBank` at `MaxFwdSpeed`; the bank times `BankYawAmplification` times the side stick adds to the yaw rate | `0x4522db`–`0x452366` | PROVEN (agent) |
+| A helicopter pitches to `MaxPitch × (0.33 × stick + 0.66 × speed ÷ MaxFwdSpeed)` and rolls to `MaxRollSide` plus the bank on the side stick and `(0.25 + 0.75 × speed ÷ MaxFwdSpeed) × MaxRollFwd` on the yaw stick; the angles are radians | `FUN_00452540`; `0xDFDD74`, `0xBEB42C`, `0xBBC7EC` (bytes) | PROVEN (constants), agent read (formula) |
+| A helicopter template has two records. The AI's is used when the owner's byte `+0x40` is 0; who sets it is not read | `FUN_00439850` | PROVEN (agent); the caller UNPROVEN |
+| A rotor turns at `SpinDir` × 30 rad/s × the rotor speed; its blur node shows above 0.3 of full speed and its blade node below 0.9 | `0x638000`; `0xB977D0`, `0xB9B688`, `0xBB3E44` (bytes) | PROVEN |
+| A plane has no physics record. A support plane's template names the script `supportairplane` (`0x1E47A21C`); `A10`, the parked one, is a prop with `_BuildingPhysics` | `we-template`; `pandemic_hash_m2` | PROVEN |
+| `Airstrike.Flyby(template, spawnX, spawnZ, targetX, targetZ, y, speed, callback, args)` flies it: level from the spawn to the target, then two more spans as long as that run, each climbing a quarter of it, then straight on until it leaves the world. The speed is distance per second and 200 when not given; the callback runs at the target | binding `0x5AD650`, worker `0x62A440`, flight `0x62C130`; `0xB984A8`, `0xBBC7EC` (bytes) | PROVEN (agent); the start of the flight passes through SecuROM-virtualised code (`0x62D2A0`), so the callback's moment is INFERRED |
+| A plane banks 0.3 rad per rad/s it yaws, to at most 0.7 × π/2 | `0x62c89f`, `0x62c911`–`0x62c927` (re-read); `0xB9B688`, `0xDFDDD8`, `0xDF6AD4` (bytes) | PROVEN |
+
+### Tank (`drivingtank.rs`)
+
+| Element | Action → effect | Data / code | Proof |
+|---|---|---|---|
+| Systems | Chassis, Powertrain, Steering, Coupling | `System::of(Kind::Tank)` | test `a_model_opens_on_its_own_classes_systems` |
+| Chassis bench | Side and top blueprint to one scale: each fake wheel at its node with its radius, each ground probe as a line from its ray's top to its end, the distances between probes | `fake_wheels`, the six probe nodes, `SpringExpLength`, `SpringCmpLength` | capture `driving_tank_chassis` |
+| Chassis cards | Suspension (probe count, spring fields), Grip, Body, Wheels (one row per radius and travel) | named fields, tank `Fleet` | fit test |
+| Chips | Show wheels, Show suspension travel (a fake wheel's `SuspensionLength`), Show ground probes | `drivingtank::marks` | capture |
+| Powertrain bench | Thrust against km/h with the throttle held: the curve's four knots, nothing from the cap; beside it the engine state against seconds | `drivingmath::thrust`, `remaining` | test: AMX30 400,000 at rest, 180,000 at 18 km/h, 0 at 45; capture `driving_tank_powertrain` |
+| Steering bench | Share of steering kept against km/h; turning-in and release against seconds | `tank_steer_factor`, `remaining` | test: 0.9 at the AMX30's cap; capture `driving_tank_steering` |
+
+### Boat (`drivingboat.rs`)
+
+| Element | Action → effect | Data / code | Proof |
+|---|---|---|---|
+| Systems | Hull, Powertrain, Steering, Coupling | `System::of(Kind::Boat)` | test |
+| Hull bench | The springs' start and end offsets against km/h, and their strength and dampening against km/h | the eight `Spring…` fields | capture `driving_boat_hull` |
+| Hull cards | Springs (low speed beside high speed, samples per spring, water smoothing), Water, Body, Lean, Wake; Not read by the PC exe: `ShallowAngDamp` | named fields, boat `Fleet` | fit test |
+| Powertrain bench | Thrust ahead against km/h to `MaxSpeed`, and astern with `EngineReverseTorque` to `MaxSpeedReverse`; the engine state against seconds | `drivingtank::thrust_bench` | capture `driving_boat_powertrain` |
+| Steering bench | Steering gain against km/h on throttle and coasting, with `LowSpeedLimit` marked; turning-in and release against seconds | `drivingmath::boat_steer_gain` | test: RIB36 0.1 stopped coasting, 1.6 stopped on throttle, 0.75 at the cap; capture `driving_boat_steering` |
+| Steering cards | Steering, Handbrake, Rudder (bone, max angle, inertia) | named fields | fit test |
+
+### Helicopter (`drivingheli.rs`)
+
+| Element | Action → effect | Data / code | Proof |
+|---|---|---|---|
+| Systems | Flight, Yaw, Attitude, Coupling | `System::of(Kind::Helicopter)` | test |
+| Flight bench | Share of the forward speed target reached against seconds with the stick held, and the share left with it let go, for the player and the AI; a bar for each of the three speed limits | `drivingmath::servo_reached` (the limit of the executable's per-step rule) | test; capture `driving_heli_flight` |
+| Flight cards | Speed (player beside AI), Body (`Mass`, `KickBack`), Rotors (hub, spin direction, blur nodes) | both records, `rotors` | fit test |
+| Yaw bench | Yaw rate against m/s, with the line a full side stick adds through the bank; the bank against m/s | `heli_yaw_rate`, `heli_bank` | test: Mi-35 4 at rest, 3 at 10, 1.8 at 35; capture `driving_heli_yaw` |
+| Attitude bench | Pitch against m/s with the stick held and let go; roll against m/s on the side stick and on the yaw stick | `heli_pitch`, `heli_bank` | test; capture `driving_heli_attitude` |
+| Chips | Show rotors (each hub and its spin direction); on Coupling, Show winch reach (a line `Length` below the winch bone) | `drivingheli::marks` | capture |
+| Winch card | On Coupling: bone, length, magnet radius, the length it drops its load under | `drivingdata::winch` | test: Mi-35 length 5, magnet radius 1 |
+| Rotors picker | Stopped or Spinning: the same rotor control Inspect's Rotors section has | `Act::Rotors` → the preview's rotor input | test: `--ui-state` `rotors` on a tank is refused |
+
+### Plane (`drivingplane.rs`)
+
+| Element | Action → effect | Data / code | Proof |
+|---|---|---|---|
+| Systems | Flyby, Coupling | `System::of(Kind::Plane)` | test: the A10 lists its two fly-by templates and not the prop |
+| Flyby bench | The path's five control points, height against distance in runs from spawn to target; the bank against yaw rate | `drivingmath::flyby_points`, `flyby_bank` | test; capture `driving_plane_flyby` |
+| Flyby cards | Flyby (script, speed when not given, climb per exit span, bank per rad/s, bank limit); Turning nodes (each `BoneCtrlLocalRotation`: node, speed, axis) | constants read from the executable; `drivingdata::spinners` | test: the gunship's four propellers, two each way |
+
 ## Viewport
 
 | Element | Action → effect | Data / code | Writes | Missing | Proof |
@@ -157,6 +244,7 @@ Defaults taken where the boards and the code disagree. D5 to D9 are the user's t
 | Orbit, pan, zoom | As Inspect | `app.rs` camera | — | — | existing |
 | Overlay chips | The toggles of the open system, top left; green when on | `theme::chip` variant | — | green-on chip | capture |
 | Trailer picker | None or a trailer template; the same value as the Trailers card | `Panel.trailer` | — | picker row on the viewport | test: `apply(Act::Trailer)` |
+| Rotors picker | Stopped or Spinning, drawn for a helicopter template with a `Rotor` record; the value is the preview's rotor control, which Inspect's Rotors section sets too | `Panel.rotors`, `Act::RotorInput` | — | — | capture `driving_heli_flight` |
 | Exhaust picker | Off or On, drawn for a template with an exhaust part: on plays each type-6 `VehiclePart`'s effect at its node, turned as the node is, repeating; a part whose `PartData` names no effect-starting template, or whose node the model lacks, turns the picker off and says why beside it | `drivingdata::started_by_name` over `index.effect_starters`, `game_world::load_effect`, `scene.fx_start_effect`, `EffectSim::set_rotation` | — | effects beside a live preview (today opening an effect closes it); the instance's rotation after it starts | capture `driving_exhaust`; test: Austin plays two, one each side at 4.30 |
 | Model caption | Model name and hash, bottom right | `Preview` | — | — | capture |
 
@@ -169,7 +257,13 @@ Defaults taken where the boards and the code disagree. D5 to D9 are the user's t
 | Idle and running exhaust | Evidence that the game plays different effects or rates; types 7 and 8 (`ExhaustStart`, `ExhaustStop`) are on no semi |
 | `ConstraintLink` preview | A run of the game with a `ConstraintLink` record, to see what it does |
 | Occupants, Lights & FX, Damage, Cameras systems | Boards |
-| Tank, boat, helicopter, jet systems | Boards, and each class's field read |
+| A boat's springs and wake on the model | The hull's bounding box as the executable takes it (the collision shape's, `FUN_00446930`), and the frame `WakeOffset` is in |
+| A boat's rudder turned | Who reads the rudder angle the actor keeps (`+0x158`) and about which axis of `VisRudderBone` |
+| A tank's tread scroll | What drives `MaterialCtrlTankTread` (`0x68f1e0`) |
+| A helicopter's yaw response over time | The body's inertia, which is the collision shape's and not a field |
+| Which scripts fly a plane, and how fast | The `Airstrike.Flyby` call sites of the level's Lua with their template and speed arguments |
+| Planes whose template names another script | `Support Vehicle (Autogunship)` and the paradrop templates are flown by `Airstrike.Flyby` too and name scripts other than `supportairplane` |
+| Turrets | Boards: a `Turret` record's yaw and pitch limits and speeds, on 400 templates |
 
 ## Corrections to the boards
 
