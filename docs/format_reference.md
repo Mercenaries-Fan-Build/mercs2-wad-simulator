@@ -913,7 +913,7 @@ is `_convert_phy2_body` (Python) / `convert_phy2_be_to_le` (Rust):
    between the platforms.
 
 PS3's `layoutRules` are `4, 0, 1, 1` where Xbox's are `4, 0, 0, 1`, and its
-`hkpMoppCode` is chunked with an opcode PC does not have, so a PS3 packfile takes PC's
+`hkpMoppCode` is chunked with an opcode ten of PC's 14 walkers do not have, so a PS3 packfile takes PC's
 rules and its MOPP is recomputed ([`mopp_bytecode_format.md`](reverse_engineer/mopp_bytecode_format.md)).
 
 **Two crashes this fixed** (both inside the exe's VM-based protection layer, so
