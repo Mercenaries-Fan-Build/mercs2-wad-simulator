@@ -1420,64 +1420,71 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         }
     };
 
-    for (i, c) in s.manifest.contributions.iter().enumerate() {
-        let stripe = match p.row_severity(i) {
-            Some(x) => sev_colour(x),
-            // Not "nothing wrong" — "nothing to report yet". Green is earned by shipping.
-            None if p.report.is_some() => theme::GOOD_DK,
-            None => theme::LINE2,
-        };
-        let selected = p.selected == Some(i);
-        let resp = egui::Frame::NONE
-            .fill(if selected { theme::BRASS_SOFT } else { Color32::TRANSPARENT })
-            .inner_margin(egui::Margin { left: 9, right: 8, top: 6, bottom: 7 })
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(theme::disp_text(c.kind().to_uppercase(), theme::style_eyebrow(), theme::DIM));
-                ui.label(
-                    egui::RichText::new(contribution_name(c))
-                        .color(if selected { theme::BRASS } else { theme::TX }),
-                );
-                if let Some(d) = worst_on(p, i) {
-                    ui.horizontal(|ui| {
-                        sev_chip(ui, d.severity);
-                        ui.label(
-                            egui::RichText::new(d.rule.code).monospace().color(theme::DIM),
-                        );
-                    });
-                    ui.label(egui::RichText::new(short(d.rule.title)).small().color(theme::DIM));
-                }
-            })
-            .response;
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(resp.rect.min, egui::vec2(3.0, resp.rect.height())),
-            0.0,
-            stripe,
-        );
-        let resp = resp.interact(egui::Sense::click());
-        if resp.clicked() {
-            acts.push(Act::Select(i));
-        }
-        let mut menu: Vec<Act> = Vec::new();
-        theme::context_menu(&resp, |ui| {
-            add_menu(ui, &mut menu);
-            if ui.button("Remove this contribution").clicked() {
-                menu.push(Act::Remove(i));
-                ui.close();
+    // The queue scrolls under the header: a Shipment can hold more rows than the panel is tall.
+    theme::scroll_vertical().id_salt("qm-queue").auto_shrink([false, false]).show(ui, |ui| {
+        for (i, c) in s.manifest.contributions.iter().enumerate() {
+            let stripe = match p.row_severity(i) {
+                Some(x) => sev_colour(x),
+                // Not "nothing wrong" — "nothing to report yet". Green is earned by shipping.
+                None if p.report.is_some() => theme::GOOD_DK,
+                None => theme::LINE2,
+            };
+            let selected = p.selected == Some(i);
+            let resp = egui::Frame::NONE
+                .fill(if selected { theme::BRASS_SOFT } else { Color32::TRANSPARENT })
+                .inner_margin(egui::Margin { left: 9, right: 8, top: 6, bottom: 7 })
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(theme::disp_text(c.kind().to_uppercase(), theme::style_eyebrow(), theme::DIM));
+                    ui.label(
+                        egui::RichText::new(contribution_name(c))
+                            .color(if selected { theme::BRASS } else { theme::TX }),
+                    );
+                    if let Some(d) = worst_on(p, i) {
+                        ui.horizontal(|ui| {
+                            sev_chip(ui, d.severity);
+                            ui.label(
+                                egui::RichText::new(d.rule.code).monospace().color(theme::DIM),
+                            );
+                        });
+                        ui.label(egui::RichText::new(short(d.rule.title)).small().color(theme::DIM));
+                    }
+                })
+                .response;
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(resp.rect.min, egui::vec2(3.0, resp.rect.height())),
+                0.0,
+                stripe,
+            );
+            let resp = resp.interact(egui::Sense::click());
+            if resp.clicked() {
+                acts.push(Act::Select(i));
             }
-        });
-        acts.extend(menu);
-    }
+            let mut menu: Vec<Act> = Vec::new();
+            theme::context_menu(&resp, |ui| {
+                add_menu(ui, &mut menu);
+                if ui.button("Remove this contribution").clicked() {
+                    menu.push(Act::Remove(i));
+                    ui.close();
+                }
+            });
+            acts.extend(menu);
+        }
 
-    // The empty space below the rows is still the queue, so right-clicking it adds too — otherwise
-    // an empty Shipment would have nothing to right-click at all.
-    let rest = ui.available_rect_before_wrap();
-    if rest.height() > 4.0 {
-        let bg = ui.interact(rest, ui.scope_id().with("qm_queue_bg"), egui::Sense::click());
-        let mut menu: Vec<Act> = Vec::new();
-        theme::context_menu(&bg, |ui| add_menu(ui, &mut menu));
-        acts.extend(menu);
-    }
+        // The empty space below the rows is still the queue, so right-clicking it adds too — otherwise
+        // an empty Shipment would have nothing to right-click at all. Inside the scroll area the space
+        // below the rows is unbounded, so it ends where the visible queue ends.
+        let rest = egui::Rect::from_min_max(
+            ui.cursor().min,
+            egui::pos2(ui.max_rect().right(), ui.clip_rect().bottom()),
+        );
+        if rest.height() > 4.0 {
+            let bg = ui.interact(rest, ui.scope_id().with("qm_queue_bg"), egui::Sense::click());
+            let mut menu: Vec<Act> = Vec::new();
+            theme::context_menu(&bg, |ui| add_menu(ui, &mut menu));
+            acts.extend(menu);
+        }
+    });
     acts
 }
 
@@ -4546,6 +4553,29 @@ mod tests {
         assert_eq!(s.manifest.shipment.name, "mercs2-qm-test-scaffold");
         s.manifest.validate().expect("scaffolded manifest must validate");
         assert!(s.manifest.contributions.is_empty());
+    }
+
+    /// blow-it-up-again holds 131 contributions; the queue scrolls inside the panel's height
+    /// rather than running off its bottom, where the rows past it could not be reached.
+    #[test]
+    fn a_long_queue_scrolls_inside_the_panel() {
+        let d = tmp("long_queue");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).expect("scaffold");
+        let s = p.shipment.as_mut().expect("opened");
+        for i in 0..131 {
+            s.manifest.contributions.push(stub("add_texture", i).expect("add_texture stub"));
+        }
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 600.0));
+        let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+        let mut bottom = f32::INFINITY;
+        crate::gui::run_headless(&ctx, input, |ui| {
+            navigator(ui, &p);
+            bottom = ui.min_rect().bottom();
+        });
+        assert!(bottom <= screen.bottom() + 0.5, "the queue ran to y={bottom}, past the panel's bottom at {}", screen.bottom());
     }
 
     // ---- dependencies editor ------------------------------------------------------------
