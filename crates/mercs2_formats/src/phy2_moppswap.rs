@@ -176,14 +176,24 @@ fn mesh_of_mopp(
     Ok((mesh, keys))
 }
 
+/// The mesh under the `hkpMoppCode` at `mopp_index` of a `PHY2` body, and the shape key of each of its
+/// triangles, in the mesh's triangle order.
+pub fn phy2_mopp_mesh(body: &[u8], mopp_index: usize) -> Result<(crate::havok::MeshShape, Vec<u32>), String> {
+    let (off, raw, mopps) = locate_mopps(body)?;
+    let src = *mopps
+        .get(mopp_index)
+        .ok_or_else(|| format!("mopp_index {mopp_index} out of range (body has {})", mopps.len()))?;
+    mesh_of_mopp(&body[off..], &raw, src)
+}
+
 /// Recompute every `hkpMoppCode` of a little-endian PHY2 body from the mesh under it, for a body whose
 /// codes PC cannot run. Each recomputed code's keys are the source code's, or the body is refused. So is
 /// one longer than its source: that grows the packfile and moves the wrapper, whose pointers are
-/// body-absolute.
+/// body-absolute. A code is computed under the first of [`mopp::Tuning::TO_FIT`] that fits its source.
 pub fn rebake_phy2_mopps(body: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = body.to_vec();
     for i in 0..count_phy2_mopps(body) {
-        let (next, report) = swap_phy2_mopp(&out, i, SwapMode::Spatial)?;
+        let (next, report) = swap(&out, i, SwapMode::Spatial, true)?;
         if report.grew {
             return Err(format!(
                 "MOPP {i} recomputed to {} bytes, past the {} of its source",
@@ -200,7 +210,9 @@ pub fn count_phy2_mopps(body: &[u8]) -> usize {
     locate_mopps(body).map(|(_, _, m)| m.len()).unwrap_or(0)
 }
 
-/// Build the replacement `m_data` buffer (and, for spatial, the new `MoppInfo`) for one MOPP.
+/// Build the replacement `m_data` buffer (and, for spatial, the new `MoppInfo`) for one MOPP. With
+/// `fit`, a spatial code is computed under the first of [`mopp::Tuning::TO_FIT`] that is no longer than
+/// the code it replaces, and under the last when none is.
 fn build_replacement(
     body: &[u8],
     off: usize,
@@ -208,6 +220,7 @@ fn build_replacement(
     src: usize,
     mode: SwapMode,
     source_keys: &[u32],
+    fit: bool,
 ) -> Result<(Vec<u8>, Option<mopp::MoppInfo>), String> {
     let pk = &body[off..];
     let n = {
@@ -240,7 +253,18 @@ fn build_replacement(
                 .iter()
                 .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
                 .collect();
-            let (code, info) = mopp::encode_keyed(&tris, &mesh.vertices, &keys);
+            let room = u32_le(pk, raw.data_pk + src + 36) as usize;
+            let tunings = if fit { &mopp::Tuning::TO_FIT[..] } else { &mopp::Tuning::TO_FIT[..1] };
+            let mut built = None;
+            for &tuning in tunings {
+                let code = mopp::encode_keyed_tuned(&tris, &mesh.vertices, &keys, tuning);
+                let fits = code.0.len() <= room;
+                built = Some(code);
+                if fits {
+                    break;
+                }
+            }
+            let (code, info) = built.expect("a tuning list is never empty");
             Ok((code, Some(info)))
         }
     }
@@ -253,6 +277,11 @@ pub fn swap_phy2_mopp(
     mopp_index: usize,
     mode: SwapMode,
 ) -> Result<(Vec<u8>, MoppSwapReport), String> {
+    swap(body, mopp_index, mode, false)
+}
+
+/// [`swap_phy2_mopp`], a spatial code fitted to the one it replaces when `fit` ([`build_replacement`]).
+fn swap(body: &[u8], mopp_index: usize, mode: SwapMode, fit: bool) -> Result<(Vec<u8>, MoppSwapReport), String> {
     let (off, raw, mopps) = locate_mopps(body)?;
     let mopp_count = mopps.len();
     let src = *mopps
@@ -275,7 +304,7 @@ pub fn swap_phy2_mopp(
     let old_count = u32_le(&body[off..], raw.data_pk + src + 36) as usize;
 
     // Build the replacement bytes (+ optional new frame).
-    let (new_buf, new_info) = build_replacement(body, off, &raw, src, mode, &src_keys)?;
+    let (new_buf, new_info) = build_replacement(body, off, &raw, src, mode, &src_keys, fit)?;
     let new_len = new_buf.len();
 
     // The packfile slice and the trailing wrapper (preserved verbatim).

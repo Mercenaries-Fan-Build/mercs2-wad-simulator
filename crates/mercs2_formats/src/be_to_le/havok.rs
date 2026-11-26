@@ -737,6 +737,17 @@ pub fn phy2_pool_padding(body: &[u8]) -> Vec<usize> {
 /// Havok packfile. Swap the prefix as u32, class-aware-convert the packfile.
 /// If no packfile magic is present, fall back to a plain u32 sweep.
 pub fn convert_phy2_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
+    let out = convert_phy2_be_to_le_as_baked(be)?;
+    // PS3's MOPP codes are chunked for the SPUs, with an opcode ten of the PC exe's 14 walkers do not have.
+    match find_sub(be, &HAVOK_MAGIC) {
+        Some(magic_off) if be[magic_off + 16..magic_off + 20] == PS3_LAYOUT => crate::phy2_moppswap::rebake_phy2_mopps(&out),
+        _ => Ok(out),
+    }
+}
+
+/// [`convert_phy2_be_to_le`] with every `hkpMoppCode` as its platform baked it: a PS3 body keeps its
+/// chunked codes.
+pub fn convert_phy2_be_to_le_as_baked(be: &[u8]) -> Result<Vec<u8>, String> {
     match find_sub(be, &HAVOK_MAGIC) {
         Some(magic_off) => {
             let mut out = Vec::with_capacity(be.len());
@@ -768,10 +779,6 @@ pub fn convert_phy2_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
                 out.extend_from_slice(&rest[t..]); // ragged tail
             }
             swap_wrapper_pools(&mut out, magic_off + pf_size)?;
-            // PS3's MOPP codes are chunked for the SPUs, with an opcode the PC VM does not have.
-            if rest[16..20] == PS3_LAYOUT {
-                return crate::phy2_moppswap::rebake_phy2_mopps(&out);
-            }
             Ok(out)
         }
         None => {
