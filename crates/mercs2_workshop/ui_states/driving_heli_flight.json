@@ -1,0 +1,9 @@
+{
+  "page": "Driving",
+  "load": "vz_veh_helicopter_mi35hind",
+  "template": "Mi35",
+  "system": "Flight",
+  "rotors": "Spinning",
+  "settle_frames": 300,
+  "capture": "driving_heli_flight.png"
+}

@@ -1,10 +1,12 @@
-//! What the Driving page reads from a level's worldentity and a model's hierarchy: a car template's
-//! physics record by field name, where each value sits among every car template, the template's
-//! wheels, the trailer templates, and where a model's nodes are.
+//! What the Driving page reads from a level's worldentity and a model's hierarchy: a vehicle
+//! template's physics record by field name, where each value sits among every template of its
+//! class, the template's wheels, rotors and winch, the trailer templates, and where a model's nodes
+//! are.
 //!
 //! The worldentity schema stores a field's name hash only, so the names are here. They are the
 //! strings the PC executable's loaders pass to its field reader: `_CarPhysicsV2` in `FUN_00658f60`,
-//! `_CarWheel` at `0x6599c0`.
+//! `_CarWheel` at `0x6599c0`, `_BoatPhysics` in `FUN_006584a0`, `_TankPhysics` in `FUN_00659a80`,
+//! the helicopter records in `FUN_00659e80` and `FUN_00659df0`.
 
 use crate::drivingmath::{Axles, Gearbox, Steering};
 use glam::{Mat4, Quat};
@@ -122,6 +124,150 @@ pub const CAR_FIELDS: [&str; 97] = [
 /// Every `_CarWheel` field, in record order.
 pub const WHEEL_FIELDS: [&str; 5] = ["SuspBone", "VisYawBone", "VisRotBone", "VisPosBone", "Axle"];
 
+pub const TANK_CLASS: &str = "_TankPhysics";
+pub const BOAT_CLASS: &str = "_BoatPhysics";
+pub const HELI_CLASS: &str = "_HelicopterPhysics";
+pub const HELI_AI_CLASS: &str = "_HelicopterPhysicsAi";
+
+/// Every `_TankPhysics` field, in record order.
+pub const TANK_FIELDS: [&str; 28] = [
+    "Mass",
+    "MaxSpeed",
+    "Brake",
+    "SteerSpeed",
+    "SteerInertia",
+    "SteerInertiaNoInput",
+    "SpringDamp",
+    "SpringStrength",
+    "FwdFriction",
+    "SideFriction",
+    "SpringExpLength",
+    "SpringCmpLength",
+    "EngineOffsetY",
+    "GravityFactor",
+    "HiSpeedSteerLoss",
+    "HiSpeedGrip",
+    "AngDampX",
+    "AngDampY",
+    "AngDampZ",
+    "CenterOfMassOffset",
+    "EngineTorque",
+    "EngineInertia",
+    "EngineTorqueRatio0",
+    "EngineTorqueRatio1",
+    "EngineTorqueRatio2",
+    "EngineTorqueRatio3",
+    "EngineTorquePos1",
+    "EngineTorquePos2",
+];
+
+/// Every `_BoatPhysics` field, in record order.
+pub const BOAT_FIELDS: [&str; 65] = [
+    "Mass",
+    "MaxSpeed",
+    "MaxSpeedReverse",
+    "Steering",
+    "WaterDragSide",
+    "WaterDragFwd",
+    "WaterDragUp",
+    "AngDampYaw",
+    "OutOfWaterGravityFactorUp",
+    "OutOfWaterGravityFactorDown",
+    "EngineTorqueMultiAtCollision",
+    "HullFriction",
+    "AngDampRoll",
+    "AngDampPitch",
+    "BrakeDrag",
+    "NoSpeedSteering",
+    "LowSpeedSteering",
+    "LowSpeedLimit",
+    "HighSpeedSteerLoss",
+    "SteerInertia",
+    "SteerNoInputInertia",
+    "AirCtrlSteering",
+    "EngineTorque",
+    "EngineReverseTorque",
+    "EngineInertia",
+    "EngineTorqueRatio0",
+    "EngineTorqueRatio1",
+    "EngineTorqueRatio2",
+    "EngineTorqueRatio3",
+    "EngineTorquePos1",
+    "EngineTorquePos2",
+    "RollFromTurning",
+    "RollInertia",
+    "PitchFromAcceleration",
+    "PitchUpSpeed",
+    "PitchDownInertia",
+    "SpringLoSpeedStartOffset",
+    "SpringLoSpeedEndOffset",
+    "SpringHiSpeedStartOffset",
+    "SpringHiSpeedEndOffset",
+    "SpringLoSpeedStrength",
+    "SpringHiSpeedStrength",
+    "SpringLoSpeedDampening",
+    "SpringHiSpeedDampening",
+    "HandBrakeInertia",
+    "HandBrakeSteerBoost",
+    "HandBrakeAntiSideDrag",
+    "HandBrakeMomentumKeep",
+    "ShallowDepth",
+    "ShallowLinDamp",
+    "ShallowAngDamp",
+    "SpringWaterSmoothing",
+    "CollisionStabilization",
+    "CenterOfMassOffset",
+    "VisRudderBone",
+    "VisRudderMaxAngle",
+    "VisRudderInertia",
+    "WakeOffset",
+    "WakeRate",
+    "WakeSpeed",
+    "WakeLifeTime",
+    "WakeSize",
+    "NumSamplesPerSpringX",
+    "NumSamplesPerSpringZ",
+    "FlipOnLandEnable",
+];
+
+/// Every `_HelicopterPhysics` field, in record order. `_HelicopterPhysicsAi` has the same fields
+/// without `Mass`.
+pub const HELI_FIELDS: [&str; 22] = [
+    "Mass",
+    "MaxElevationSpeed",
+    "MaxFwdSpeed",
+    "MaxRightSpeed",
+    "FwdSpeedAcc",
+    "RightSpeedAcc",
+    "MaxYawSpeed",
+    "YawAcc",
+    "YawDamp",
+    "MaxPitch",
+    "PitchAccel",
+    "MaxRollFwd",
+    "MaxRollSide",
+    "RollAccel",
+    "LowSpeedYawSpeed",
+    "LowSpeedLimit",
+    "HiSpeedYawLoss",
+    "BankSpeedLimit",
+    "MaxRollBank",
+    "BankYawAmplification",
+    "FwdSpeedNoInputInertia",
+    "KickBack",
+];
+
+/// The field names of a physics class.
+fn class_fields(class: &str) -> Result<&'static [&'static str], String> {
+    match class {
+        CAR_CLASS => Ok(&CAR_FIELDS),
+        TANK_CLASS => Ok(&TANK_FIELDS),
+        BOAT_CLASS => Ok(&BOAT_FIELDS),
+        HELI_CLASS | HELI_AI_CLASS => Ok(&HELI_FIELDS),
+        other => Err(format!("the Driving page has no field table for {other}")),
+    }
+}
+
 /// The `_CarPhysicsV2` fields no code of the PC executable reads. The constructor `FUN_00449460`
 /// and the gearbox copy `FUN_0044fc10` give each field's place in the car actor; none of these has
 /// a reader among the car actor's functions (`0x437000`–`0x451000`). `torqueFactorAtMaxRPM` is
@@ -169,22 +315,24 @@ fn named_values(comp: &Component, r: &Record, names: &[&'static str]) -> Result<
         .collect()
 }
 
-/// One template's `_CarPhysicsV2` record by field name.
+/// One template's physics record by field name.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CarFields {
+pub struct Fields {
+    /// The record's class.
+    pub class: &'static str,
     values: BTreeMap<&'static str, FieldValue>,
 }
 
-impl CarFields {
+impl Fields {
     fn value(&self, name: &str) -> Result<FieldValue, String> {
-        self.values.get(name).copied().ok_or_else(|| format!("{CAR_CLASS} has no field {name}"))
+        self.values.get(name).copied().ok_or_else(|| format!("{} has no field {name}", self.class))
     }
 
     /// A float field.
     pub fn num(&self, name: &str) -> Result<f32, String> {
         match self.value(name)? {
             FieldValue::F32(v) => Ok(v),
-            other => Err(format!("{CAR_CLASS}.{name} is {other:?}, not a float")),
+            other => Err(format!("{}.{name} is {other:?}, not a float", self.class)),
         }
     }
 
@@ -192,8 +340,13 @@ impl CarFields {
     pub fn vec3(&self, name: &str) -> Result<[f32; 3], String> {
         match self.value(name)? {
             FieldValue::Vec3(v) => Ok(v),
-            other => Err(format!("{CAR_CLASS}.{name} is {other:?}, not three floats")),
+            other => Err(format!("{}.{name} is {other:?}, not three floats", self.class)),
         }
+    }
+
+    /// A whole-number, enum or name-hash field.
+    pub fn word(&self, name: &str) -> Result<u32, String> {
+        word(self.class, &self.values, name)
     }
 
     /// The gearbox and torque-curve fields.
@@ -247,16 +400,208 @@ fn records_of<'a>(we: &'a WorldEntity, class: &'a str, key: u32) -> impl Iterato
     we.groups_of(class).flat_map(move |c| c.records.iter().filter(move |r| r.keys.contains(&key)).map(move |r| (c, r)))
 }
 
-/// A template's car physics by field name; `None` for a template that has no `_CarPhysicsV2`
+/// A template's record of a physics class by field name; `None` for a template that has no such
 /// record. An error for a template with more than one.
-pub fn car_fields(we: &WorldEntity, key: u32) -> Result<Option<CarFields>, String> {
-    let mut found = records_of(we, CAR_CLASS, key);
+pub fn fields(we: &WorldEntity, class: &'static str, key: u32) -> Result<Option<Fields>, String> {
+    let mut found = records_of(we, class, key);
     let Some((comp, r)) = found.next() else { return Ok(None) };
     if found.next().is_some() {
-        return Err(format!("template 0x{key:08X} has more than one {CAR_CLASS} record"));
+        return Err(format!("template 0x{key:08X} has more than one {class} record"));
     }
-    let names = field_names(comp, &CAR_FIELDS)?;
-    Ok(Some(CarFields { values: named_values(comp, r, &names)? }))
+    let names = field_names(comp, class_fields(class)?)?;
+    Ok(Some(Fields { class, values: named_values(comp, r, &names)? }))
+}
+
+/// The script of a plane `Airstrike.Flyby` flies: a support plane's template has no physics
+/// record, and its `ObjectScript` names this (`0x1E47A21C`).
+pub const FLYBY_SCRIPT: &str = "supportairplane";
+pub const SCRIPT_CLASS: &str = "ObjectScript";
+
+/// How a template drives: the physics class it carries, or for a plane the script that marks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Car,
+    Tank,
+    Boat,
+    Helicopter,
+    Plane,
+}
+
+impl Kind {
+    /// The kinds that have a physics class.
+    pub const ALL: [Kind; 4] = [Kind::Car, Kind::Tank, Kind::Boat, Kind::Helicopter];
+
+    /// The class that makes a template of this kind: its physics class (a helicopter also carries
+    /// `_HelicopterPhysicsAi`), or a plane's `ObjectScript`.
+    pub fn class(self) -> &'static str {
+        match self {
+            Kind::Car => CAR_CLASS,
+            Kind::Tank => TANK_CLASS,
+            Kind::Boat => BOAT_CLASS,
+            Kind::Helicopter => HELI_CLASS,
+            Kind::Plane => SCRIPT_CLASS,
+        }
+    }
+
+    /// The kind of a template: the one of the four physics classes it has, else a plane when its
+    /// `ObjectScript` names [`FLYBY_SCRIPT`], else `None`. An error for a template with more than
+    /// one physics class.
+    pub fn of(we: &WorldEntity, key: u32) -> Result<Option<Kind>, String> {
+        let mut found = Kind::ALL.into_iter().filter(|k| records_of(we, k.class(), key).next().is_some());
+        let kind = found.next();
+        match (kind, found.next()) {
+            (Some(kind), Some(other)) => Err(format!("template 0x{key:08X} has both {} and {}", kind.class(), other.class())),
+            (Some(kind), None) => Ok(Some(kind)),
+            (None, _) => {
+                let script = pandemic_hash_m2(FLYBY_SCRIPT);
+                for (comp, r) in records_of(we, SCRIPT_CLASS, key) {
+                    if word_required(comp, &comp.decode(&r.payload)?, "ScriptName")? == script {
+                        return Ok(Some(Kind::Plane));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+pub const SPINNER_CLASS: &str = "BoneCtrlLocalRotation";
+
+/// One `BoneCtrlLocalRotation` record: a node that turns by itself, as a plane's propeller does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spinner {
+    /// `ControlledBone`.
+    pub bone: u32,
+    pub axis: [f32; 3],
+    /// `RotationSpeed`.
+    pub speed: f32,
+}
+
+/// A template's self-turning nodes, in record order.
+pub fn spinners(we: &WorldEntity, key: u32) -> Result<Vec<Spinner>, String> {
+    records_of(we, SPINNER_CLASS, key)
+        .map(|(comp, r)| {
+            let v = comp.decode(&r.payload)?;
+            let hash = pandemic_hash_m2("LocalAxis");
+            let i = comp.schema.fields.iter().position(|f| f.name_hash == hash).ok_or_else(|| format!("{SPINNER_CLASS} has no field LocalAxis"))?;
+            let Some(Value::Field(FieldValue::Vec3(axis))) = v.get(i) else { return Err(format!("{SPINNER_CLASS}.LocalAxis is not three floats")) };
+            Ok(Spinner { bone: word_required(comp, &v, "ControlledBone")?, axis: *axis, speed: num_named(comp, &v, "RotationSpeed")? })
+        })
+        .collect()
+}
+
+/// A float field of a decoded record, found by its name's hash.
+fn num_named(comp: &Component, values: &[Value], name: &str) -> Result<f32, String> {
+    let hash = pandemic_hash_m2(name);
+    let i = comp.schema.fields.iter().position(|f| f.name_hash == hash).ok_or_else(|| format!("{} has no field {name}", comp.class))?;
+    match values.get(i) {
+        Some(Value::Field(FieldValue::F32(v))) => Ok(*v),
+        other => Err(format!("{}.{name} is {other:?}, not a float", comp.class)),
+    }
+}
+
+/// A word field a class must have.
+fn word_required(comp: &Component, values: &[Value], name: &str) -> Result<u32, String> {
+    word_named(comp, values, name)?.ok_or_else(|| format!("{} has no field {name}", comp.class))
+}
+
+pub const FAKE_WHEEL_CLASS: &str = "BoneCtrlFakeWheel";
+
+/// One `BoneCtrlFakeWheel` record: a wheel of a tracked vehicle, which is drawn but carries no
+/// load.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FakeWheel {
+    /// `SuspensionStartBone`.
+    pub start: u32,
+    /// `ControlledSuspensionBone`; 0 on a wheel with no suspension.
+    pub suspension: u32,
+    /// `ControlledWheelBone`.
+    pub wheel: u32,
+    pub radius: f32,
+    /// `SuspensionLength`.
+    pub travel: f32,
+    pub max_expansion_speed: f32,
+}
+
+/// A template's fake wheels, in record order.
+pub fn fake_wheels(we: &WorldEntity, key: u32) -> Result<Vec<FakeWheel>, String> {
+    records_of(we, FAKE_WHEEL_CLASS, key)
+        .map(|(comp, r)| {
+            let v = comp.decode(&r.payload)?;
+            Ok(FakeWheel {
+                start: word_required(comp, &v, "SuspensionStartBone")?,
+                suspension: word_required(comp, &v, "ControlledSuspensionBone")?,
+                wheel: word_required(comp, &v, "ControlledWheelBone")?,
+                radius: num_named(comp, &v, "WheelRadius")?,
+                travel: num_named(comp, &v, "SuspensionLength")?,
+                max_expansion_speed: num_named(comp, &v, "MaxExpansionSpeed")?,
+            })
+        })
+        .collect()
+}
+
+pub const ROTOR_CLASS: &str = "Rotor";
+
+/// One `Rotor` record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rotor {
+    /// `RotorHubBoneName`.
+    pub hub: u32,
+    pub spin_dir: f32,
+    /// `FirstRotorBladeBoneName`; 0 on a rotor with no blade nodes.
+    pub first_blade: u32,
+    pub min_angle: f32,
+    pub max_angle: f32,
+    /// `RotorBlurOnBone` and `RotorBlurOffBone`.
+    pub blur_on: u32,
+    pub blur_off: u32,
+}
+
+/// A template's rotors, in record order.
+pub fn rotors(we: &WorldEntity, key: u32) -> Result<Vec<Rotor>, String> {
+    records_of(we, ROTOR_CLASS, key)
+        .map(|(comp, r)| {
+            let v = comp.decode(&r.payload)?;
+            Ok(Rotor {
+                hub: word_required(comp, &v, "RotorHubBoneName")?,
+                spin_dir: num_named(comp, &v, "SpinDir")?,
+                first_blade: word_required(comp, &v, "FirstRotorBladeBoneName")?,
+                min_angle: num_named(comp, &v, "MinRotorAngle")?,
+                max_angle: num_named(comp, &v, "MaxRotorAngle")?,
+                blur_on: word_required(comp, &v, "RotorBlurOnBone")?,
+                blur_off: word_required(comp, &v, "RotorBlurOffBone")?,
+            })
+        })
+        .collect()
+}
+
+pub const WINCH_CLASS: &str = "Winch";
+
+/// A template's `Winch` record: the cable a helicopter lifts with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Winch {
+    pub length: f32,
+    /// `WinchBone`.
+    pub bone: u32,
+    pub magnet_radius: f32,
+    /// `RetractAutodropWhenLengthShorterThan`.
+    pub autodrop_length: f32,
+}
+
+/// A template's winch; `None` for a template with no `Winch` record. An error for more than one.
+pub fn winch(we: &WorldEntity, key: u32) -> Result<Option<Winch>, String> {
+    let mut found = records_of(we, WINCH_CLASS, key);
+    let Some((comp, r)) = found.next() else { return Ok(None) };
+    if found.next().is_some() {
+        return Err(format!("template 0x{key:08X} has more than one {WINCH_CLASS} record"));
+    }
+    let v = comp.decode(&r.payload)?;
+    Ok(Some(Winch {
+        length: num_named(comp, &v, "Length")?,
+        bone: word_required(comp, &v, "WinchBone")?,
+        magnet_radius: num_named(comp, &v, "MagnetRadius")?,
+        autodrop_length: num_named(comp, &v, "RetractAutodropWhenLengthShorterThan")?,
+    }))
 }
 
 /// One wheel of a template.
@@ -301,23 +646,23 @@ pub fn wheels(we: &WorldEntity, key: u32) -> Result<Vec<Wheel>, String> {
         .collect()
 }
 
-/// Where each float field's values run across every car template, and which templates are
-/// trailers.
+/// Where each float field's values run across every template of one physics class, and which car
+/// templates are trailers.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Fleet {
-    /// How many templates have a `_CarPhysicsV2` record.
+    /// How many templates have a record of the class.
     pub templates: usize,
     range: HashMap<&'static str, (f32, f32)>,
-    /// The templates whose `EngineTorque` is 0, by key.
+    /// The car templates whose `EngineTorque` is 0, by key. Empty for the other classes.
     pub trailers: Vec<u32>,
 }
 
 impl Fleet {
-    /// One pass over every `_CarPhysicsV2` record of the worldentity.
-    pub fn read(we: &WorldEntity) -> Result<Fleet, String> {
+    /// One pass over every record of a physics class in the worldentity.
+    pub fn read(we: &WorldEntity, class: &str) -> Result<Fleet, String> {
         let mut fleet = Fleet::default();
-        for comp in we.groups_of(CAR_CLASS) {
-            let names = field_names(comp, &CAR_FIELDS)?;
+        for comp in we.groups_of(class) {
+            let names = field_names(comp, class_fields(class)?)?;
             for r in &comp.records {
                 fleet.templates += r.keys.len();
                 let values = named_values(comp, r, &names)?;
@@ -326,7 +671,7 @@ impl Fleet {
                     let e = fleet.range.entry(name).or_insert((v, v));
                     *e = (e.0.min(v), e.1.max(v));
                 }
-                if values.get("EngineTorque") == Some(&FieldValue::F32(0.0)) {
+                if class == CAR_CLASS && values.get("EngineTorque") == Some(&FieldValue::F32(0.0)) {
                     fleet.trailers.extend(&r.keys);
                 }
             }
@@ -361,13 +706,17 @@ pub struct NodeUse {
 }
 
 /// The classes whose records name a node, with the field that holds it.
-const NODE_FIELDS: [(&str, &str); 6] = [
+const NODE_FIELDS: [(&str, &str); 10] = [
     ("ConnectPoint", "BoneName"),
     ("VehiclePart", "PartName"),
     ("SeatLink", "HardPoint"),
     ("EntranceLink", "HardPoint"),
     ("PhysicalLink", "HardPoint"),
+    (WINCH_CLASS, "WinchBone"),
+    (ROTOR_CLASS, "RotorHubBoneName"),
+    (SPINNER_CLASS, "ControlledBone"),
     (WHEEL_CLASS, "SuspBone"),
+    (FAKE_WHEEL_CLASS, "ControlledWheelBone"),
 ];
 
 /// A word field of a decoded record, found by its name's hash; `None` when the class has no such
@@ -495,7 +844,7 @@ mod tests {
 
     #[test]
     fn no_two_field_names_share_a_hash() {
-        for names in [&CAR_FIELDS[..], &WHEEL_FIELDS[..]] {
+        for names in [&CAR_FIELDS[..], &WHEEL_FIELDS[..], &TANK_FIELDS[..], &BOAT_FIELDS[..], &HELI_FIELDS[..]] {
             let hashes: std::collections::BTreeSet<u32> = names.iter().map(|n| pandemic_hash_m2(n)).collect();
             assert_eq!(hashes.len(), names.len());
         }
@@ -534,7 +883,7 @@ mod retail_tests {
     #[test]
     fn the_austins_physics_reads_by_field_name() {
         let (_, we) = retail();
-        let f = car_fields(&we, AUSTIN).unwrap().expect("the Austin is a car");
+        let f = fields(&we, CAR_CLASS,AUSTIN).unwrap().expect("the Austin is a car");
         assert_eq!(f.num("MaxSpeed").unwrap(), 90.0);
         assert_eq!(f.num("GearRatio1").unwrap(), 3.7);
         assert_eq!(f.num("SteerMaxAngle").unwrap(), 0.8);
@@ -543,11 +892,102 @@ mod retail_tests {
         assert_eq!(f.values.len(), CAR_FIELDS.len());
     }
 
+    /// `AMX30`, `RIB36` and `Mi35`.
+    const AMX30: u32 = 0x8000_7255;
+    const RIB36: u32 = 0x8000_638F;
+    const MI35: u32 = 0x8000_8531;
+
+    #[test]
+    fn a_tank_a_boat_and_a_helicopter_read_by_field_name() {
+        let (_, we) = retail();
+        assert_eq!(Kind::of(&we, AUSTIN).unwrap(), Some(Kind::Car));
+        assert_eq!(Kind::of(&we, AMX30).unwrap(), Some(Kind::Tank));
+        assert_eq!(Kind::of(&we, RIB36).unwrap(), Some(Kind::Boat));
+        assert_eq!(Kind::of(&we, MI35).unwrap(), Some(Kind::Helicopter));
+        // `Assault Rifle`
+        assert_eq!(Kind::of(&we, 0x8000_436F).unwrap(), None);
+
+        let tank = fields(&we, TANK_CLASS, AMX30).unwrap().unwrap();
+        assert_eq!(tank.values.len(), TANK_FIELDS.len());
+        assert_eq!((tank.num("Mass").unwrap(), tank.num("MaxSpeed").unwrap(), tank.num("EngineTorque").unwrap()), (32000.0, 45.0, 2000.0));
+        assert_eq!(tank.num("EngineTorquePos2").unwrap(), 0.6);
+        assert_eq!(tank.vec3("CenterOfMassOffset").unwrap(), [0.0, -0.5, 0.22]);
+
+        let boat = fields(&we, BOAT_CLASS, RIB36).unwrap().unwrap();
+        assert_eq!(boat.values.len(), BOAT_FIELDS.len());
+        assert_eq!((boat.num("Mass").unwrap(), boat.num("MaxSpeed").unwrap(), boat.num("MaxSpeedReverse").unwrap()), (1200.0, 90.0, 35.0));
+        assert_eq!((boat.num("ShallowAngDamp").unwrap(), boat.num("SpringWaterSmoothing").unwrap()), (0.0, 0.5));
+        assert_eq!(boat.vec3("WakeOffset").unwrap(), [0.0, 0.0, 3.0]);
+        assert_eq!((boat.word("NumSamplesPerSpringX").unwrap(), boat.word("NumSamplesPerSpringZ").unwrap()), (1, 1));
+
+        let heli = fields(&we, HELI_CLASS, MI35).unwrap().unwrap();
+        assert_eq!(heli.values.len(), HELI_FIELDS.len());
+        assert_eq!((heli.num("Mass").unwrap(), heli.num("MaxFwdSpeed").unwrap(), heli.num("MaxYawSpeed").unwrap()), (20000.0, 35.0, 3.0));
+        assert_eq!(heli.word("KickBack").unwrap(), 1);
+        let ai = fields(&we, HELI_AI_CLASS, MI35).unwrap().unwrap();
+        assert_eq!(ai.values.len(), HELI_FIELDS.len() - 1);
+        assert_eq!((ai.num("MaxFwdSpeed").unwrap(), ai.num("MaxYawSpeed").unwrap()), (30.0, 2.0));
+        assert!(ai.num("Mass").is_err());
+    }
+
+    /// A support plane's template has no physics record and names the `supportairplane` script; the
+    /// parked `A10` is a prop and no vehicle. The gunship's four propellers turn by themselves.
+    #[test]
+    fn a_plane_is_a_template_the_support_airplane_script_flies() {
+        let (_, we) = retail();
+        assert_eq!(pandemic_hash_m2(FLYBY_SCRIPT), 0x1E47_A21C);
+        // `Support Vehicle (A10)`, `A10`, `Support Vehicle (Autogunship)`
+        assert_eq!(Kind::of(&we, 0x8000_845C).unwrap(), Some(Kind::Plane));
+        assert_eq!(Kind::of(&we, 0x8000_76AE).unwrap(), None);
+        assert!(spinners(&we, 0x8000_845C).unwrap().is_empty());
+        let props = spinners(&we, 0x8000_A3BF).unwrap();
+        assert_eq!(props.len(), 4);
+        assert!(props.iter().all(|s| s.axis == [0.0, 0.0, 1.0] && s.speed.abs() == 10.0), "{props:?}");
+        assert_eq!(props.iter().filter(|s| s.speed > 0.0).count(), 2);
+    }
+
+    #[test]
+    fn every_template_of_the_four_classes_has_one_kind_and_every_field_a_name() {
+        let (_, we) = retail();
+        let mut count = HashMap::new();
+        for kind in Kind::ALL {
+            let fleet = Fleet::read(&we, kind.class()).unwrap();
+            count.insert(kind, fleet.templates);
+            for comp in we.groups_of(kind.class()) {
+                for key in comp.records.iter().flat_map(|r| &r.keys) {
+                    assert_eq!(Kind::of(&we, *key).unwrap(), Some(kind), "0x{key:08X}");
+                }
+            }
+        }
+        Fleet::read(&we, HELI_AI_CLASS).unwrap();
+        assert_eq!((count[&Kind::Car], count[&Kind::Tank], count[&Kind::Boat], count[&Kind::Helicopter]), (454, 72, 110, 143));
+    }
+
+    #[test]
+    fn the_amx30_has_fourteen_fake_wheels_and_the_mi35_two_rotors_and_a_winch() {
+        let (_, we) = retail();
+        let wheels = fake_wheels(&we, AMX30).unwrap();
+        assert_eq!(wheels.len(), 14);
+        assert_eq!(wheels.iter().filter(|w| w.suspension != 0).count(), 10);
+        assert!(wheels.iter().filter(|w| w.suspension != 0).all(|w| w.radius == 0.41 && w.travel == 0.45));
+        assert!(wheels.iter().filter(|w| w.suspension == 0).all(|w| w.radius == 0.27 && w.travel == 0.0));
+        assert!(fake_wheels(&we, AUSTIN).unwrap().is_empty());
+
+        let rotors = rotors(&we, MI35).unwrap();
+        assert_eq!(rotors.len(), 2);
+        assert_eq!((rotors[0].spin_dir, rotors[1].spin_dir), (-1.0, 1.0));
+        assert!(rotors.iter().all(|r| r.blur_on != 0 && r.blur_off != 0 && r.first_blade == 0));
+
+        let winch = winch(&we, MI35).unwrap().expect("the Mi-35 has a winch");
+        assert_eq!((winch.length, winch.magnet_radius), (5.0, 1.0));
+        assert_eq!(super::winch(&we, AUSTIN).unwrap(), None);
+    }
+
     #[test]
     fn a_template_without_car_physics_has_no_car_fields() {
         let (_, we) = retail();
         // `Assault Rifle`
-        assert_eq!(car_fields(&we, 0x8000_436F).unwrap(), None);
+        assert_eq!(fields(&we, CAR_CLASS,0x8000_436F).unwrap(), None);
     }
 
     #[test]
@@ -556,7 +996,7 @@ mod retail_tests {
         let wheels = wheels(&we, AUSTIN).unwrap();
         assert_eq!(wheels.len(), 6);
         assert_eq!(wheels.iter().filter(|w| !w.rear).count(), 2);
-        let f = car_fields(&we, AUSTIN).unwrap().unwrap();
+        let f = fields(&we, CAR_CLASS,AUSTIN).unwrap().unwrap();
         let (g, a) = (f.gearbox().unwrap(), f.axles(&wheels).unwrap());
         assert!((drivingmath::upshift_kmh(&g, &a, 1) - 42.45).abs() < 0.01);
     }
@@ -564,7 +1004,7 @@ mod retail_tests {
     #[test]
     fn the_fleet_spans_every_car_template() {
         let (_, we) = retail();
-        let fleet = Fleet::read(&we).unwrap();
+        let fleet = Fleet::read(&we, CAR_CLASS).unwrap();
         assert_eq!(fleet.templates, 454);
         assert_eq!(fleet.range("Mass"), Some((200.0, 28500.0)));
         assert_eq!(fleet.range("EngineTorque"), Some((0.0, 1800.0)));
@@ -574,7 +1014,7 @@ mod retail_tests {
     #[test]
     fn the_trailers_are_the_templates_with_no_engine_torque() {
         let (mut w, we) = retail();
-        let fleet = Fleet::read(&we).unwrap();
+        let fleet = Fleet::read(&we, CAR_CLASS).unwrap();
         let names = w.template_names().unwrap();
         let mut trailers: Vec<&str> = fleet.trailers.iter().map(|k| names[k].as_str()).collect();
         trailers.sort_unstable();

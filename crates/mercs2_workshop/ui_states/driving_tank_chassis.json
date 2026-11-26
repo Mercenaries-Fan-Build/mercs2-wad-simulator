@@ -1,0 +1,8 @@
+{
+  "page": "Driving",
+  "load": "vz_veh_tank_amx30_base",
+  "template": "AMX30",
+  "system": "Chassis",
+  "overlays": ["Show wheels", "Show ground probes"],
+  "capture": "driving_tank_chassis.png"
+}

@@ -1,0 +1,7 @@
+{
+  "page": "Driving",
+  "load": "vz_veh_helicopter_mi35hind",
+  "template": "Mi35",
+  "system": "Yaw",
+  "capture": "driving_heli_yaw.png"
+}

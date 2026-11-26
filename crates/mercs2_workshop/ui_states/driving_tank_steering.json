@@ -1,0 +1,7 @@
+{
+  "page": "Driving",
+  "load": "vz_veh_tank_amx30_base",
+  "template": "AMX30",
+  "system": "Steering",
+  "capture": "driving_tank_steering.png"
+}
