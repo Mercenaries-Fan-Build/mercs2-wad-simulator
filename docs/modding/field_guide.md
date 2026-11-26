@@ -311,11 +311,17 @@ So if `packed_field` is stale, too small, or byte-swapped:
 - **Over-claimed** (an unswapped Xbox-BE u16: `0x0003` read as `0x0300`) → the engine streams
   24 MB for a 66 KB block → source over-read → same livelock.
 
-**The fix.** `packed_field` must be recomputed from the **decompressed** size:
+**The fix.** The page count must be recomputed from the **decompressed** size, and the high byte kept:
 
 ```
-packed_field = ceil(decompressed_size / 0x8000)
+packed_field = (tier << 24) | ceil(decompressed_size / 0x8000)
 ```
+
+`tier` is the block's LOD rung `N` (`_P00N`), and the engine uses it as the block's eviction class
+([`reverse_engineer/render_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/render_core_code_map.md)
+§8). A block re-emitted from an existing one copies the source
+block's tier (`PatchBlock::from_decompressed(.., Some(source_packed_field))`); a new block that is an
+asset's `_P000` is tier 0. Writing tier 0 on a finer rung makes it unevictable by coarse requests.
 
 Route block edits through a tool that does this: `wad_builder replace-block` sets it **exactly**
 from the decompressed size; `wad_builder merge-blocks` **bumps it up** if the source undersized it.

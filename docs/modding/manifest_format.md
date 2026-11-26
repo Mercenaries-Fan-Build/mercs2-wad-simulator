@@ -219,8 +219,9 @@ qm extract-states al_veh_boat_destroyer --game <dir> > src/states.yaml
 The dump reads in names where a hash reverses (states, HIER nodes, commands) and keeps the script
 opcodes as plain integers; edit it and point `states:` at it. The whole family is **regenerated** from
 your file every build, so you can **add or remove** nodes and states, not only rewrite them — the
-writer rebuilds the descriptor table, re-bases the container, and recomputes the CSUM. A no-op (edit
-nothing) still ships the container byte-for-byte, proven across all 1,311 retail destructibles.
+writer rebuilds the descriptor table, re-bases the container, and recomputes the CSUM. Re-serialising an
+unedited machine (`serialize_state_machine`) reproduces the container byte-for-byte for all 1,311 retail
+destructibles.
 
 ⚠ **State names are the engine's global vocabulary, not labels you own.** `SetState` /
 `SetStateOnMsg` key on a shared set of hashes — `PristineState`, `DamagedState`, `DestroyedState`,
@@ -231,10 +232,15 @@ command scripts** (which HIER subtrees to `SHOW`/`HIDE`, which emitters to start
 slots — change what a state *does*, using state identities the model and the vocabulary already
 carry.
 
-The overlay carries **only** the edited model as a single-entry block — no block-mate is shadowed.
-Its ASET row is copied from the base and the builder re-points `_P000` at the new block while
-sentinelling the finer LOD rungs (which degrade to coarse tier at distance, they do not dangle), so
-the LOD chain is recomputed rather than the whole base block re-emitted.
+The overlay carries the model's **whole LOD chain** and nothing else — no block-mate is shadowed. The
+machine lives in the `_P000` container (1,059 of the 1,311 destructibles also have finer `_P001`/`_P002`
+rungs holding the near geometry), so the build emits one single-entry block per rung the model's ASET row
+names: `_P000` with the edited container, each finer rung with its retail container byte-for-byte. Each
+block keeps its source block's INDX tier byte, each entry's third word is restated as the byte sum of the
+rungs before it, and the row names the new blocks
+([`docs/aset_format.md`](../aset_format.md) §The LOD chain lives in the ASET row). The build fails, naming
+the rung, when the stack's chain for the model is shorter than base `vz.wad`'s or a rung block does not
+hold the model exactly once. `replace_phy2` carries the chain the same way.
 
 The **permanent, world-scale** counterpart — making a building ruined for the rest of a mission — is
 the `vz_state` overlay, a separate mechanism scoped in
