@@ -83,6 +83,25 @@ Clone a multi-rung asset by copying only its `_P000` block and you ship the coar
 finer rungs behind it. Use `AsetEntry::lod_chain()` (`mercs2_formats::ffcs`) rather than
 re-deriving the packing.
 
+**How the engine reads the row.** `FUN_00875760` reads the row's `+4..+0xB` as four u16 block indices,
+`[_P003, _P002, _P001, _P000]`, and indexes them by **slot `3-N`** for rung `_P00N`; the block index it
+takes is the one it streams. Nothing on that path reads a block's PTHS path. The block's INDX tier byte
+(`format_reference.md` §2, `INDX`) rides along as the stream node's eviction class
+([`reverse_engineer/render_core_code_map.md`](https://github.com/Mercenaries-Fan-Build/notes-on-the-released-game/blob/main/docs/reverse_engineer/render_core_code_map.md) §8).
+
+**What a model's rungs hold** (`mercs2_probe model-chains <vz.wad> <out.tsv>`, retail PC, exits 0 when all
+of it holds). 3,007 model rows name 4,407 rungs — 3,007 `_P000`, 1,236 `_P001`, 164 `_P002`, 0 `_P003`:
+
+- each rung block holds the model's `(hash, model)` entry exactly once, and no chain has a gap;
+- each rung block's INDX tier is `N` and its path ends `_P00N_Q(3-N)`;
+- the destruction machine (`SWIT`/`NODE`/`STAT`/`CHDR`/`CEXE`) is in `_P000` only — 1,311 models, 1,059 of
+  them with finer rungs;
+- each entry's third word (`field_c`) is the byte sum of the model's containers in the rungs before it:
+  0 in `_P000`, the `_P000` container's length in `_P001`, and so on. The rung install loop
+  (`FUN_00875d80`) does not read it; other readers are unchecked. Re-emitting a chain whose `_P000`
+  changed size therefore restates every finer rung's word;
+- 686 of the finer-rung blocks also hold other assets (up to 73).
+
 ### ⚠ The Xbox layout is MIRRORED — do not apply the PC decode to a 360 WAD
 
 Everything above is measured on **PC** `vz.wad`. The 360 bake packs the same two block indices in
