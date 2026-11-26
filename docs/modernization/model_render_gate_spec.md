@@ -325,6 +325,31 @@ so the new gate at `view_state = 0x01`, all nodes enabled, must be **bit-identic
 `view_state` is **not** a spawn constant — it is recomputed per frame from camera distance
 (`OBJ+0x354 + view*0x24` holds `n`). Nothing to capture; compute it the way `FUN_00470740` does.
 
+### 6a-2. The selector's arguments and the main view's factor (2026-11-25)
+
+Read from the pc-v10 instructions at the selector's two call sites and from retail memory captures.
+
+- **`FUN_0047724e` → `FUN_00470740` (site `0x004773bb`).** `k` is the float at `view + 0xe70`
+  (`0x0047739d FLD [EDI+0xe70]`, stored to the pushed slot at `0x004773b4`), `view = owner + idx·0xe80
+  + 0x10`, `idx` the word at `owner + 0x2b92`. The distance in XMM0 is the object's cached
+  `OBJ + 0x36c + idx·0x24`; the model in EDX is `*(OBJ + 0x1e0)`. `OBJ + 0x368 + idx·0x24` caches the
+  `k` the rung was computed with, and the rung is recomputed when the view's `k` differs from it.
+- **`FUN_0042f920` (site `0x0042fa36`)** passes `k = 1.0` (`FLD1`).
+- **The selector holds `x = dist / (scale · k)` to at least `0.2`** (`DAT_00b9854c` = `0x3E4CCCCD`)
+  before taking the exponent.
+- **`owner` is the static `0x017CFAF0`** (`*0x00DFC2F8`). Two views. In five v1.0 captures (the
+  `23fe7f38` PMC one at 640×480; Chris mid-mission, flying-winch and new-game, and Mattias jacket, at
+  1600×900) the float the selector reads is **`1.0` for `idx` 0** (`0x017D0970`) and **`0x3F2C092D`
+  ≈ 0.67202 for `idx` 1** (`0x017D17F0`).
+- **The main camera is `idx` 1.** In the mid-mission capture viewport 1 holds the live eye
+  (`dump-render`), and the render object of an entity 6.7 m from it (`0x1E74FBC0`) has, in its
+  `idx` 1 block, rung 0, `view_state` 3, cached `k` 0.67202 and cached distance 6.728; its `idx` 0
+  block was never computed (cached `k` −1.0).
+- **So for the main camera, rung `n ≥ 1` starts at `header+0x38 × 0.67202 × 2^(n-1)` metres.** A house
+  with the reference 100 leaves rung 0 at 67.2 m and enters rung 2 at 134.4 m.
+- No store to `view + 0xe70` was found statically (the view/projection builder `FUN_00858f30` is a
+  SecuROM indirect stub), so what changes the factor is not known.
+
 ### 6a. Live x32dbg confirmations (2026-07-10)
 
 Captured render objects via a single-shot BP at `FUN_00472a50` (`OBJ` in `ECX`; delete the BP the
