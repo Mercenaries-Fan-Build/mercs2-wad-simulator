@@ -54,7 +54,7 @@ scale exponent. **Operands are big-endian.** All PROVEN from the VM switch unles
 | Opcode | Len | Action |
 |---|---|---|
 | `0x00` | 1 | **RETURN** — end this branch |
-| `0x01–0x04` | 4 | REANCHOR + rescale child frame (unary, continue). *coord math INFERRED; length PROVEN* |
+| `0x01–0x04` | 4 | REANCHOR + rescale child frame (unary, continue): `origin[k] += code[+1+k] << shift`, then `shift -= opcode`. *PROVEN — see "Re-anchors and cuts in the retail walkers"* |
 | `0x05` | var | JUMP8: `pc += code[+1] + 2` |
 | `0x06` | var | JUMP16: `pc += code[+1]*256 + code[+2] + 3` |
 | `0x07` | var | JUMP24: `pc += BE16(+1)*256 + code[+3] + 4` |
@@ -62,7 +62,7 @@ scale exponent. **Operands are big-endian.** All PROVEN from the VM switch unles
 | `0x09` | 2 | key_base **+=** `code[+1]` |
 | `0x0a` | 3 | key_base **+=** `BE16(+1)` |
 | `0x0b` | 5 | key_base **=** `BE32(+1)` (absolute set) |
-| `0x0c` | 3 | PS3 only, INVALID on PC: jump to chunk `BE16(+1)`, at `BE16(+1) * 512`. See "PS3 chunked code" |
+| `0x0c` | 3 | Jump to chunk `BE16(+1)`, at `BE16(+1) * 512`. Only PS3 codes hold it; 4 of the PC exe's 14 walkers follow it and 10 take it for an unknown command. See "PS3 chunked code" |
 | `0x0d–0x0f` | — | INVALID |
 | `0x10–0x12` | 4+ | **SPLIT** axis (op−0x10). `code[+1]`=LEFT.max plane, `code[+2]`=RIGHT.min plane. LEFT child @ `pc+4`, RIGHT @ `pc+4+code[+3]`. *plane geometry PROVEN* |
 | `0x13–0x1c` | 4+ | **SPLIT** on 26-DOP diagonal planes. LEFT@+4, RIGHT@+4+code[+3]. *diagonal-plane geometry INFERRED* |
@@ -94,9 +94,22 @@ across it. On one DLC cell, `dlc01_terrain_r07_c05` (6,024 triangles), the code 
 of them backward, and it walks to the same 6,024 keys as the Xbox code over the same mesh. The Xbox code is
 68,249 bytes where the PS3 code is 116,736.
 
-PC has no `0x0C`, so a PS3 collider's MOPP is recomputed from its mesh
+The retail PC exe (pc-v10; pc-v11 is the same code at other addresses) has 14 MOPP walkers, each a
+`cmp 0x6b; ja; movzx; jmp [table]` dispatch, named here by the Havok source file its unknown-command
+message cites. Four have a case for `0x0C` that does
+`pc = [code+0x20] + BE16(+1) * 512` (`code+0x20` is `m_data`'s pointer): AabbCast `0x928E00`, Obb `0xA48E10`
+(case at `0xA491E8`), LongRay `0xA49B10` (case at `0xA4A74A`) and Modify `0xA4DB70`. The other ten send
+`0x0C` to their "Unknown command" handler, which does not advance `pc`: the four float-AABB walkers
+(`0xA446E0`, `0xA45900`, `0xA46DC0`, `0xA47DD0`), EarlyExitObb `0xA4AFE0`, Sphere `0xA4BAD0`, KDop `0xA4C380`
+and the three FindAll walkers (`0xA4D130`, `0xA4D4D0`, `0xA4D830`). Those ten are reached only through
+wrappers no direct or absolute reference in either image points at, which does not show they never run.
+Jumps `0x05–0x07` add an unsigned operand in all 14, so on PC a code can only jump forward within itself.
+
+A PS3 collider's MOPP is therefore recomputed from its mesh
 (`mercs2_formats::phy2_moppswap::rebake_phy2_mopps`), which requires the recomputed keys to equal the
-source's. `mopp::decode_chunked` walks the source.
+source's and the recomputed code to fit the source's bytes. `mopp::decode_chunked` walks the source;
+`be_to_le::havok::convert_phy2_be_to_le_as_baked` converts a body and keeps its chunked codes, for
+measuring them.
 
 ## Split geometry — the plane operands + child-visit rule (PROVEN)
 Resolves the earlier "coordinate math INFERRED" note. Ground truth = the VM switch in
@@ -124,10 +137,72 @@ branch when the query is disjoint from the tightened box.) Implemented as `mopp.
 max-on-axis rounded UP, and the offset child's `code[+2]` = its true min-on-axis rounded DOWN — so a query
 can never miss a boundary triangle. **Root operand shift is `16`** (the measured engine value — see above)
 and the frame divides the widest extent by `0xFF0000` (a 24-bit frame) so the AABB-max face maps to
-`int = 0xFF0000 = 0xFF<<16`, representable as an upper bound. REANCHOR is not emitted (encoder stays at root
-byte precision; finer bounds would need `0x01–0x04`). *(Historically shift `8` / `÷0xFF00`, which was
+`int = 0xFF0000 = 0xFF<<16`, representable as an upper bound. The frame is taken over the vertices the
+triangles use, not the whole pool. *(Historically shift `8` / `÷0xFF00`, which was
 internally self-consistent but off by 256× vs the engine — the root cause of the authored-floor spatial-MOPP
 fall-through, fixed 2026-08-16.)*
+
+A node of the encoder's is, in order: one re-anchor (`0x01–0x04`) where a frame at the node's own corner
+holds it at a finer shift; a cut (`0x26–0x28`) on each axis where the node's box is slack against what its
+ancestors' planes leave it; a key-base raise (`0x09`/`0x0a`/`0x0b`) where that shortens the node's terminals
+by more than the raise costs; then a terminal or a split. The half of a split that is lower on its axis
+always goes inline: `code[+1]` bounds the inline child above and `code[+2]` the offset child below, so the
+other way round each plane would bound a half on the side its parent already bounds and the split would
+prune nothing. `mopp::Tuning` holds the two thresholds (the fewest bits a re-anchor may gain, the least
+share of a node's inherited extent a cut may remove); `phy2_moppswap` tries `Tuning::TO_FIT` in turn when a
+code has to fit the bytes of the one it replaces.
+
+## Re-anchors and cuts in the retail walkers (PROVEN, pc-v10)
+
+Read from the Obb walker `0xA48E10` and the LongRay walker `0xA49B10` of the retail PC exe:
+
+- **Query frame (Obb).** The walker holds the query in the code's 24-bit integer frame, one unit wider on
+  each side: `qmin = round((q.min - offset) * (1/scale)) - 1`, `qmax = round((q.max - offset) * (1/scale)) + 1`.
+  At a node it compares them shifted down to the node's frame.
+- **Re-anchor `0x01–0x04`** (Obb at `0xA49203`, LongRay at `0xA4A765`): `origin[k] += code[+1+k] << shift` for
+  the three axes, then `shift -= opcode`. No bound is checked. Obb keeps the origin in the node's own units
+  and a shift that counts up from 0, so its form of the same move is `origin[k] = (origin[k] + code[+1+k])
+  << opcode`; LongRay keeps the ray in floats and does `ray[k] = (ray[k] - code[+1+k]) * 2^opcode`.
+- **Split `0x10–0x12`:** the inline child is visited iff `qmin < code[+1]`, the offset child iff
+  `qmax > code[+2]`; the two operands are read independently of each other.
+- **Cut `0x26–0x28`:** the branch is left when `qmax < code[+1]` or `qmin >= code[+2]`.
+
+`mopp::query_aabb` walks with these rules. `mopp::query_aabb_steps` also returns how many opcodes the walk
+read.
+
+## What Havok's own codes hold
+
+`mercs2_probe mopp-census <pc wad>` walks every code of every PHY2 body and counts opcodes, opcode pairs
+along a branch, the shift each re-anchor, split and cut sits at, a split's two bounds against each other
+and a cut's width; `--archive <big-endian archive>` does the same for a console archive. The census of
+retail PC `vz.wad` (4,380 codes in 1,964 bodies) is [`docs/data/mopp_census_pc_retail.tsv`](../data/mopp_census_pc_retail.tsv).
+Across those codes:
+
+- No `0x52` terminal. A key more than 16 bits past the key base is a `0x53`.
+- No re-anchor directly after a re-anchor.
+- No frame below shift 7 (four re-anchors reach 7).
+- No `0x26–0x28` cut whose two bounds are the same plane, in 7.5 million cuts.
+- No `0x10–0x12` split whose inline bound is exactly one above its offset bound: that case is always the
+  3-byte `0x20–0x22` form.
+- No `0x00`, no `0x29–0x2b` cut and no `0x60–0x6b` property; every other opcode of the table above occurs.
+
+The PS3 DLC package's 233 codes hold nothing retail PC's do not except the chunk jump and the pairs it
+makes; their lowest shift is 8.
+
+The encoder keeps to the first four (`mopp.rs::a_code_stays_inside_what_retail_codes_hold`). It differs in
+two things, both listed by `mopp-census <built wad> --never-in docs/data/mopp_census_pc_retail.tsv`: it
+writes a split whose bounds are one apart in the 4-byte form, and its split over an inline child past
+64 KiB (below) puts the JUMP24 in the offset child of a `0x23–0x25`, where Havok's JUMP24s follow a
+`0x10–0x12`.
+
+## How selective a code is
+
+`mercs2_probe mopp-selectivity <pc wad> (--blocks a,b,c | --match <path part>)` casts ray-like segments (a
+2 m vertical probe, a 25 m level ray, a 60 m slanted ray) through each collider and reports, for the code
+in the file and for the code the encoder computes over the same mesh, the triangles the walk hands back,
+the count whose box the segment overlaps, and the opcodes read. `--archive <big-endian archive>` measures
+a console archive's codes as its platform baked them against the code its conversion writes. Any triangle
+a segment overlaps that a code does not hand back, and any collider that cannot be measured, is exit 1.
 
 **Child offsets past 64 KiB (PROVEN from the retail engine, 2026-09-27).** The widest offset a split
 carries is 16 bits. All 14 MOPP virtual machines in the unpacked retail `Mercenaries2.exe` (Ghidra decomp,
