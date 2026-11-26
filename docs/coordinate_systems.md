@@ -5,6 +5,35 @@ binary data, glTF export, and Unreal Engine 5.
 
 ---
 
+## Game → Unreal: the `mercs2_ue` conversion
+
+[`crates/mercs2_ue/src/space.rs`](../crates/mercs2_ue/src/space.rs) is the one implementation of the
+game-to-Unreal conversion in this repository:
+
+| | Game | Unreal |
+|---|---|---|
+| position | `(x, y, z)` metres | `(100·x, 100·z, 100·y)` centimetres |
+| direction | `(x, y, z)` | `(x, z, y)` |
+| rotation quaternion | `(x, y, z, w)` | `(-x, -z, -y, w)` |
+| yaw about the up axis | `θ` about +Y | `-θ` about +Z |
+| triangle `(a, b, c)` | `cross(b - a, c - a)` along the normal | same order |
+
+Exchanging Y and Z is a **reflection** (determinant -1); it does not preserve handedness. The two
+spaces need one: retail's projection carries a mirror (`m00` = -1.92 at viewport `+0xB30` with the
+camera's right vector at +X, the `23fe7f38` PMC capture — the engine's copy is
+`mercs2_engine::camera::clip_mirror`), so looking along +Z, +X is on the LEFT of the screen. Unreal's
+axes are X forward, Y right, Z up with no mirror in its projection.
+
+Because the map is a reflection, a rotation's axis goes through it and its angle changes sign, which
+is the quaternion row above; exchanging the Y and Z components alone (`(qx, qz, qy, qw)`) is the
+inverse of the right rotation. The tests beside `space.rs` check every row, and
+`crates/mercs2_ue/tests/retail.rs` measures the triangle row on shipped models.
+
+The sections below describe the Python export pipeline (`tools/mercs2_coords.py` in the notes
+repository).
+
+---
+
 ## The Three Systems
 
 | System | Handedness | Up axis | Forward | Right | Convention |
@@ -57,31 +86,32 @@ Both pipelines produce the same UE position for any given game point.
 ### Why rotation works differently from position
 
 The mesh pipeline gets the "free" RH→LH conversion from UE's glTF importer.
-Placements bypass glTF entirely. The direct `(x,y,z)→(x,z,y)` swap is a
-coordinate relabeling that preserves left-handedness (it's an even permutation
-composed with the identity on handedness). Therefore rotations transfer directly.
+Placements bypass glTF entirely. The direct `(x,y,z)→(x,z,y)` swap exchanges
+two axes, which is a reflection (an odd permutation), so a rotation does not
+transfer directly: its angle changes sign. See "Game → Unreal" above.
 
 ### Yaw (Y-axis rotation in game → Z-axis rotation in UE)
 
 Game yaw is a rotation around +Y (up). In UE, the corresponding "up" rotation
-is around +Z. Because both systems are left-handed and the swap preserves this,
-a positive yaw in game (clockwise when viewed from above) corresponds to the
-same positive yaw in UE.
+is around +Z. The swap is a reflection, so a positive yaw in game corresponds
+to the NEGATED yaw in UE, which is also what `tools/mercs2_coords.py` found
+against four landmarks (PMC HQ, the pool, the estate walls).
 
 ```python
 def game_yaw_to_ue_yaw_deg(game_yaw_rad: float) -> float:
-    return math.degrees(game_yaw_rad)
+    return -math.degrees(game_yaw_rad)
 ```
 
 ### Full Quaternion (preserving pitch and roll)
 
-Game quaternion `(qx, qy, qz, qw)` is defined in LH Y-up basis.
-To convert to LH Z-up, swap the Y and Z imaginary components:
+Game quaternion `(qx, qy, qz, qw)` is defined in the game's Y-up basis.
+To convert to Unreal's Z-up, swap the Y and Z imaginary components and negate
+all three (the reflection reverses the angle):
 
 ```python
-ue_qx = game_qx   # X axis unchanged
-ue_qy = game_qz   # game Z → UE Y (N-S axis)
-ue_qz = game_qy   # game Y → UE Z (up axis)
+ue_qx = -game_qx  # X axis
+ue_qy = -game_qz  # game Z → UE Y
+ue_qz = -game_qy  # game Y → UE Z (up axis)
 ue_qw = game_qw   # scalar unchanged
 ```
 

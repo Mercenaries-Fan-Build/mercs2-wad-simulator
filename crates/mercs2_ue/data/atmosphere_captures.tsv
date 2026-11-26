@@ -1,0 +1,22 @@
+# The game's lighting at four captured moments, read from retail memory (pc-v10 addresses).
+#
+# Each row is the light block the game builds every frame for its renderer (`FUN_00465630`, at
+# 0x018C2190) and two fields of the live atmosphere struct S = *(*(0x00E7ADFC) + 0x104):
+#   time       S+0x10   the time of day, 0..1 across the day
+#   sun_*      S+0x20   the unit direction toward the sun, game axes (Y up); the block's row 0 is its negation
+#   light_*    row 1    the directional light's colour, light intensity folded in (= S+0x40)
+#   rim_*      row 2    the rim colour (= S+0x110)
+#   face<n>_*  rows 3-8 the six ambient faces: ambient cube face n x ambient colour (S+0x80+16n x S+0x70)
+#   mie_g      S+0x120  the Henyey-Greenstein constant of the sky's Mie phase function (fScatterHGg)
+# Which direction each ambient face lights is not read from the shaders.
+#
+# capture: the file under game-files/memory-dumps/ and the first 8 hex digits of its sha256.
+#   time_0.10  updated-chris-exports/20261103_new-game-first-mission-start.dmp  c0c96bca
+#   time_0.20  updated-chris-exports/20261021_chris-jacobs-mid-mission.dmp      90ba9ef2
+#   time_0.51  23fe7f38_cracked-cruise/pmc/process.dmp                          e2bd3d63  (20261021_mattias-nilson-jacket-skin.dmp 820330c8 holds the same block)
+#   time_0.85  updated-chris-exports/20261021_chris-jacobs-flying-winch.dmp     84ae7906
+name	time	sun_x	sun_y	sun_z	light_r	light_g	light_b	rim_r	rim_g	rim_b	face0_r	face0_g	face0_b	face1_r	face1_g	face1_b	face2_r	face2_g	face2_b	face3_r	face3_g	face3_b	face4_r	face4_g	face4_b	face5_r	face5_g	face5_b	mie_g
+time_0.10	0.10	0.82362	0.30924	0.47541	0.52119	0.45847	0.45433	0.19946	0.32670	0.40744	0.35766	0.36895	0.44762	0.28070	0.29059	0.35384	0.34528	0.35600	0.43232	0.18370	0.18997	0.23109	0.25414	0.26251	0.31897	0.25654	0.26556	0.32329	0.51202
+time_0.20	0.20	0.70058	0.58793	0.40439	1.10417	0.92258	0.58566	0.28988	0.24596	0.23278	0.18731	0.32320	0.45592	0.12710	0.21838	0.34334	0.21006	0.37343	0.53753	0.08295	0.15286	0.20826	0.15386	0.28171	0.40807	0.15654	0.25987	0.41370	0.70896
+time_0.51	0.51	-0.02719	0.99951	-0.01572	1.28760	1.26090	1.17555	0.37813	0.33856	0.29459	0.20451	0.21013	0.22514	0.27994	0.29109	0.31003	0.32687	0.33587	0.35986	0.08884	0.09129	0.09781	0.27994	0.29109	0.31003	0.20115	0.20669	0.22145	0.42581
+time_0.85	0.85	-0.77133	0.45418	-0.44584	1.17380	0.96824	0.83041	0.24183	0.24183	0.24183	0.19460	0.28654	0.43980	0.20997	0.30128	0.40918	0.24411	0.34764	0.47599	0.10754	0.13695	0.20320	0.15022	0.23808	0.35073	0.14168	0.20437	0.34238	0.80488

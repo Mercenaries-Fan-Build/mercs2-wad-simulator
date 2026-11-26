@@ -1,0 +1,33 @@
+[package]
+name = "mercs2_ue"
+version = "0.1.0"
+edition = "2021"
+publish = false                # linked into an Unreal Engine plugin; nothing on crates.io depends on it
+description = "Mercenaries 2 game data for Unreal Engine: models, textures, layers and terrain cells behind a C interface, already in Unreal's space."
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+
+# `staticlib` is what the Unreal plugin links (`libmercs2_ue.a` / `mercs2_ue.lib`, with
+# `include/mercs2_ue.h`); `rlib` is what this crate's own tests link.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# The decoders. Every game format is read by these two crates; this one only converts their output to
+# Unreal's space and hands it across the C boundary.
+mercs2_engine = { workspace = true }
+mercs2_formats = { workspace = true }
+mercs2_core = { workspace = true }
+
+[dev-dependencies]
+glam = "0.27" # same version mercs2_core pins; the conversion tests check against its rotations
+
+[features]
+# Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
+# run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "retail"
+required-features = ["retail"]
