@@ -20,11 +20,11 @@ use mercs2_formats::types::{
 };
 use mercs2_formats::ucfx::{parse_ucfx_tree, UcfxNode};
 
-struct Chunk {
-    block: String,
-    name: u32,
-    ty: u32,
-    body: Vec<u8>,
+pub(crate) struct Chunk {
+    pub(crate) block: String,
+    pub(crate) name: u32,
+    pub(crate) ty: u32,
+    pub(crate) body: Vec<u8>,
 }
 
 fn be32(b: &[u8], o: usize) -> Result<u32, String> {
@@ -33,7 +33,7 @@ fn be32(b: &[u8], o: usize) -> Result<u32, String> {
 
 /// Every chunk of a console archive that `keep` accepts, each with the path of its block. A block is a
 /// big-endian `[count]`, 16-byte rows of name, type, a third word and size, then the bodies back to back.
-fn archive_chunks(path: &Path, keep: impl Fn(u32, u32) -> bool) -> Result<Vec<Chunk>, String> {
+pub(crate) fn archive_chunks(path: &Path, keep: impl Fn(u32, u32) -> bool) -> Result<Vec<Chunk>, String> {
     let (doh, _) = load_stfs_or_doh(path)?;
     let (_, rows) = parse_be_ffcs(&doh)?;
     let indx = rows.iter().find(|r| r.tag == "INDX").ok_or("no INDX")?;

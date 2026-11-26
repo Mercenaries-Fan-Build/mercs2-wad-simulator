@@ -1,0 +1,9 @@
+{
+  "page": "Driving",
+  "load": "civ_veh_semi_austin",
+  "template": "Austin (CIV)",
+  "system": "Steering",
+  "overlays": ["Show full lock"],
+  "orbit": [3.6, -0.35],
+  "capture": "driving_steering_lock.png"
+}

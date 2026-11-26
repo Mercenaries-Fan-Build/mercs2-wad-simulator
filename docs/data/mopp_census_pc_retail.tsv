@@ -1,0 +1,286 @@
+cut at shift	  7	8
+cut at shift	  8	256
+cut at shift	  9	3171
+cut at shift	 10	21137
+cut at shift	 11	2073478
+cut at shift	 12	3675047
+cut at shift	 13	876174
+cut at shift	 14	473349
+cut at shift	 15	267093
+cut at shift	 16	150438
+cut width	1	62521
+cut width	16+	7027917
+cut width	2-15	449713
+opcode	0x01 reanchor	777391
+opcode	0x02 reanchor	280754
+opcode	0x03 reanchor	18431
+opcode	0x04 reanchor	7156
+opcode	0x05 jump8	6113
+opcode	0x06 jump16	19015
+opcode	0x07 jump24	4013
+opcode	0x09 keybase+u8	240908
+opcode	0x0a keybase+be16	336595
+opcode	0x0b keybase=be32	525054
+opcode	0x10 split	757005
+opcode	0x11 split	251368
+opcode	0x12 split	745519
+opcode	0x13 split-dop	81994
+opcode	0x14 split-dop	54137
+opcode	0x15 split-dop	1462753
+opcode	0x16 split-dop	334231
+opcode	0x17 split-dop	78383
+opcode	0x18 split-dop	55565
+opcode	0x19 split-dop	24298
+opcode	0x1a split-dop	17469
+opcode	0x1b split-dop	22529
+opcode	0x1c split-dop	12505
+opcode	0x20 split-1value	451310
+opcode	0x21 split-1value	6426
+opcode	0x22 split-1value	448436
+opcode	0x23 split-16bit	100800
+opcode	0x24 split-16bit	13805
+opcode	0x25 split-16bit	101654
+opcode	0x26 cut	1999989
+opcode	0x27 cut	3558843
+opcode	0x28 cut	1981319
+opcode	0x30 terminal	1106937
+opcode	0x31 terminal	795177
+opcode	0x32 terminal	250110
+opcode	0x33 terminal	165697
+opcode	0x34 terminal	88685
+opcode	0x35 terminal	68592
+opcode	0x36 terminal	53104
+opcode	0x37 terminal	49185
+opcode	0x38 terminal	44999
+opcode	0x39 terminal	45660
+opcode	0x3a terminal	45163
+opcode	0x3b terminal	47304
+opcode	0x3c terminal	47929
+opcode	0x3d terminal	49656
+opcode	0x3e terminal	50417
+opcode	0x3f terminal	51755
+opcode	0x40 terminal	52096
+opcode	0x41 terminal	52219
+opcode	0x42 terminal	51563
+opcode	0x43 terminal	50578
+opcode	0x44 terminal	49375
+opcode	0x45 terminal	47529
+opcode	0x46 terminal	45247
+opcode	0x47 terminal	42990
+opcode	0x48 terminal	40501
+opcode	0x49 terminal	38146
+opcode	0x4a terminal	36316
+opcode	0x4b terminal	34849
+opcode	0x4c terminal	32840
+opcode	0x4d terminal	30672
+opcode	0x4e terminal	28128
+opcode	0x4f terminal	22346
+opcode	0x50 terminal+u8	599276
+opcode	0x51 terminal+be16	328361
+opcode	0x53 terminal+be32	481165
+pair	cut -> cut	2239566
+pair	cut -> keybase+be16	210847
+pair	cut -> keybase+u8	140536
+pair	cut -> keybase=be32	289444
+pair	cut -> split	666921
+pair	cut -> split-16bit	63313
+pair	cut -> split-1value	246497
+pair	cut -> split-dop	827535
+pair	cut -> terminal	1996538
+pair	cut -> terminal+be16	219702
+pair	cut -> terminal+be32	289810
+pair	cut -> terminal+u8	349442
+pair	jump16 -> cut	7615
+pair	jump16 -> keybase+be16	273
+pair	jump16 -> keybase+u8	178
+pair	jump16 -> keybase=be32	300
+pair	jump16 -> reanchor	5662
+pair	jump16 -> split	2706
+pair	jump16 -> split-16bit	307
+pair	jump16 -> split-1value	758
+pair	jump16 -> split-dop	1214
+pair	jump16 -> terminal	2
+pair	jump24 -> cut	116
+pair	jump24 -> keybase+be16	55
+pair	jump24 -> keybase+u8	5
+pair	jump24 -> keybase=be32	41
+pair	jump24 -> reanchor	407
+pair	jump24 -> split	2130
+pair	jump24 -> split-16bit	23
+pair	jump24 -> split-1value	1219
+pair	jump24 -> split-dop	17
+pair	jump8 -> cut	2448
+pair	jump8 -> keybase+be16	50
+pair	jump8 -> keybase+u8	67
+pair	jump8 -> keybase=be32	20
+pair	jump8 -> reanchor	1329
+pair	jump8 -> split	585
+pair	jump8 -> split-16bit	975
+pair	jump8 -> split-1value	74
+pair	jump8 -> split-dop	565
+pair	keybase+be16 -> split	125541
+pair	keybase+be16 -> split-16bit	5899
+pair	keybase+be16 -> split-1value	30523
+pair	keybase+be16 -> split-dop	174632
+pair	keybase+u8 -> split	109480
+pair	keybase+u8 -> split-16bit	2942
+pair	keybase+u8 -> split-1value	42019
+pair	keybase+u8 -> split-dop	86467
+pair	keybase=be32 -> split	108754
+pair	keybase=be32 -> split-16bit	4211
+pair	keybase=be32 -> split-1value	68304
+pair	keybase=be32 -> split-dop	343785
+pair	reanchor -> cut	971318
+pair	reanchor -> keybase+be16	5683
+pair	reanchor -> keybase+u8	5363
+pair	reanchor -> keybase=be32	5893
+pair	reanchor -> split	32728
+pair	reanchor -> split-16bit	20392
+pair	reanchor -> split-1value	22076
+pair	reanchor -> split-dop	20279
+pair	root -> cut	4341
+pair	root -> split	20
+pair	root -> split-16bit	3
+pair	root -> split-1value	1
+pair	root -> split-dop	15
+pair	split(far child) -> cut	709345
+pair	split(far child) -> jump16	1
+pair	split(far child) -> jump24	1538
+pair	split(far child) -> keybase+be16	27562
+pair	split(far child) -> keybase+u8	26498
+pair	split(far child) -> keybase=be32	29769
+pair	split(far child) -> reanchor	215712
+pair	split(far child) -> split	157052
+pair	split(far child) -> split-16bit	17766
+pair	split(far child) -> split-1value	54633
+pair	split(far child) -> split-dop	120371
+pair	split(far child) -> terminal	303765
+pair	split(far child) -> terminal+be16	16984
+pair	split(far child) -> terminal+be32	4725
+pair	split(far child) -> terminal+u8	68171
+pair	split(near child) -> cut	662827
+pair	split(near child) -> jump16	148
+pair	split(near child) -> jump24	1391
+pair	split(near child) -> keybase+be16	26567
+pair	split(near child) -> keybase+u8	21496
+pair	split(near child) -> keybase=be32	31063
+pair	split(near child) -> reanchor	187456
+pair	split(near child) -> split	235684
+pair	split(near child) -> split-16bit	18429
+pair	split(near child) -> split-1value	52794
+pair	split(near child) -> split-dop	151244
+pair	split(near child) -> terminal	286989
+pair	split(near child) -> terminal+be16	13863
+pair	split(near child) -> terminal+be32	4913
+pair	split(near child) -> terminal+u8	59028
+pair	split-16bit(far child) -> cut	24340
+pair	split-16bit(far child) -> keybase+be16	4694
+pair	split-16bit(far child) -> keybase+u8	3049
+pair	split-16bit(far child) -> keybase=be32	5929
+pair	split-16bit(far child) -> reanchor	81885
+pair	split-16bit(far child) -> split	29890
+pair	split-16bit(far child) -> split-16bit	22369
+pair	split-16bit(far child) -> split-1value	37077
+pair	split-16bit(far child) -> split-dop	7018
+pair	split-16bit(far child) -> terminal	4
+pair	split-16bit(far child) -> terminal+be16	1
+pair	split-16bit(far child) -> terminal+be32	1
+pair	split-16bit(far child) -> terminal+u8	2
+pair	split-16bit(near child) -> cut	22157
+pair	split-16bit(near child) -> keybase+be16	3984
+pair	split-16bit(near child) -> keybase+u8	2354
+pair	split-16bit(near child) -> keybase=be32	5841
+pair	split-16bit(near child) -> reanchor	72969
+pair	split-16bit(near child) -> split	35114
+pair	split-16bit(near child) -> split-16bit	26490
+pair	split-16bit(near child) -> split-1value	37813
+pair	split-16bit(near child) -> split-dop	9537
+pair	split-1value(far child) -> cut	256205
+pair	split-1value(far child) -> jump24	547
+pair	split-1value(far child) -> keybase+be16	22892
+pair	split-1value(far child) -> keybase+u8	19436
+pair	split-1value(far child) -> keybase=be32	68591
+pair	split-1value(far child) -> reanchor	191027
+pair	split-1value(far child) -> split	56672
+pair	split-1value(far child) -> split-16bit	15492
+pair	split-1value(far child) -> split-1value	149400
+pair	split-1value(far child) -> split-dop	114656
+pair	split-1value(far child) -> terminal	6554
+pair	split-1value(far child) -> terminal+be16	900
+pair	split-1value(far child) -> terminal+be32	2394
+pair	split-1value(far child) -> terminal+u8	1406
+pair	split-1value(near child) -> cut	266001
+pair	split-1value(near child) -> jump16	24
+pair	split-1value(near child) -> jump24	523
+pair	split-1value(near child) -> keybase+be16	21927
+pair	split-1value(near child) -> keybase+u8	8753
+pair	split-1value(near child) -> keybase=be32	64769
+pair	split-1value(near child) -> reanchor	197617
+pair	split-1value(near child) -> split	54713
+pair	split-1value(near child) -> split-16bit	15485
+pair	split-1value(near child) -> split-1value	140111
+pair	split-1value(near child) -> split-dop	124739
+pair	split-1value(near child) -> terminal	6735
+pair	split-1value(near child) -> terminal+be16	1048
+pair	split-1value(near child) -> terminal+be32	2547
+pair	split-1value(near child) -> terminal+u8	1180
+pair	split-dop(far child) -> cut	1183810
+pair	split-dop(far child) -> jump16	10591
+pair	split-dop(far child) -> jump24	7
+pair	split-dop(far child) -> jump8	47
+pair	split-dop(far child) -> keybase+be16	5886
+pair	split-dop(far child) -> keybase+u8	7536
+pair	split-dop(far child) -> keybase=be32	8943
+pair	split-dop(far child) -> reanchor	65417
+pair	split-dop(far child) -> split	72375
+pair	split-dop(far child) -> split-16bit	1506
+pair	split-dop(far child) -> split-1value	11735
+pair	split-dop(far child) -> split-dop	76138
+pair	split-dop(far child) -> terminal	513612
+pair	split-dop(far child) -> terminal+be16	38375
+pair	split-dop(far child) -> terminal+be32	86897
+pair	split-dop(far child) -> terminal+u8	60989
+pair	split-dop(near child) -> cut	1190062
+pair	split-dop(near child) -> jump16	8251
+pair	split-dop(near child) -> jump24	7
+pair	split-dop(near child) -> jump8	6066
+pair	split-dop(near child) -> keybase+be16	6175
+pair	split-dop(near child) -> keybase+u8	5637
+pair	split-dop(near child) -> keybase=be32	14451
+pair	split-dop(near child) -> reanchor	64251
+pair	split-dop(near child) -> split	63527
+pair	split-dop(near child) -> split-16bit	657
+pair	split-dop(near child) -> split-1value	11138
+pair	split-dop(near child) -> split-dop	85652
+pair	split-dop(near child) -> terminal	501566
+pair	split-dop(near child) -> terminal+be16	37488
+pair	split-dop(near child) -> terminal+be32	89878
+pair	split-dop(near child) -> terminal+u8	59058
+reanchor to shift	  7	4
+reanchor to shift	  8	93
+reanchor to shift	  9	1012
+reanchor to shift	 10	5440
+reanchor to shift	 11	381767
+reanchor to shift	 12	431082
+reanchor to shift	 13	159087
+reanchor to shift	 14	69769
+reanchor to shift	 15	35478
+split at shift	  7	4
+split at shift	  8	117
+split at shift	  9	1637
+split at shift	 10	10463
+split at shift	 11	940461
+split at shift	 12	2424529
+split at shift	 13	853562
+split at shift	 14	365557
+split at shift	 15	266030
+split at shift	 16	157827
+split bounds	bounds equal	1137
+split bounds	near bound 1 below far bound	1059
+split bounds	near bound 2+ above far bound	1726102
+split bounds	near bound 2+ below far bound	25594
+total	PHY2 bodies	1964
+total	codes	4380
+total	deepest split nesting	27
+total	longest code, bytes	378326
+total	lowest shift	7

@@ -24,7 +24,9 @@
 //! triangle, and [`query_aabb`] is the real VM's pruning walk (narrowphase stripped). The no-miss and
 //! semantics-cross-check gates below prove `query_aabb(encode(mesh)) ⊇ {tris overlapping the query}` on
 //! synthetic + real `WpMeshShape16` data, and that `query_aabb` matches Havok's VM on real `vz.wad`
-//! MOPPs. Only axis splits are emitted (`0x10–0x12` / `0x23–0x25`); the 26-DOP diagonal splits
+//! MOPPs. A node re-anchors (`0x01–0x04`), cuts (`0x26–0x28`) and raises its key base (`0x09–0x0b`)
+//! ahead of its split, and holds nothing retail's own codes do not, bar the two differences the format
+//! doc lists under "What Havok's own codes hold". Only axis splits are emitted (`0x10–0x12` / `0x23–0x25`); the 26-DOP diagonal splits
 //! (`0x13–0x1c`) are still avoided by the encoder — `query_aabb` handles them by visiting both children
 //! unpruned (their plane geometry is INFERRED; conservative fallback). See the "Split geometry" section
 //! of `docs/reverse_engineer/mopp_bytecode_format.md`.
@@ -93,33 +95,76 @@ impl Decoded {
 /// LEFT child inline — pre-order). The dispatch mirrors the HCT VM switch exactly; see the opcode
 /// table in the module docs. A clean tree yields `error = None` and `consumed == code.len()`.
 pub fn decode(code: &[u8]) -> Decoded {
-    walk(code, false)
+    walk(code, false).0
 }
 
 /// Bytes of a chunk of a [`decode_chunked`] MOPP.
 const CHUNK: usize = 512;
 
 /// [`decode`] of a PS3 MOPP: 512-byte chunks padded with `0xCD`, joined by opcode `0x0C`, a jump to the
-/// chunk numbered by its BE16 operand, with the walk's key base unchanged. The PC VM has no such opcode,
-/// so a PC body never holds this form: [`crate::phy2_moppswap::rebake_phy2_mopps`] replaces it.
+/// chunk numbered by its BE16 operand, with the walk's key base unchanged. Four of the retail PC exe's
+/// 14 walkers follow that jump (AabbCast `0x928E00`, Obb `0xA48E10`, LongRay `0xA49B10`, Modify
+/// `0xA4DB70`, pc-v10); the other ten take it for an unknown command, so a PC body never holds this
+/// form: [`crate::phy2_moppswap::rebake_phy2_mopps`] replaces it.
 pub fn decode_chunked(code: &[u8]) -> Decoded {
-    walk(code, true)
+    walk(code, true).0
 }
 
-fn walk(code: &[u8], chunked: bool) -> Decoded {
+/// One instruction a walk of a code reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Step {
+    /// Where the instruction starts.
+    pub pc: usize,
+    pub op: u8,
+    /// The shift its byte operands are read at: [`ROOT_SHIFT`] at the root, lowered by each re-anchor
+    /// above it.
+    pub shift: i32,
+    /// The opcode the walk came to it from, and whether as that split's offset child. `None` at the
+    /// root.
+    pub after: Option<(u8, bool)>,
+    /// How many splits it lies under.
+    pub depth: usize,
+}
+
+/// Every instruction [`decode`] reaches, in its order, and the error it stopped at, if any. With an
+/// error, the last step is the instruction that raised it.
+pub fn steps(code: &[u8]) -> (Vec<Step>, Option<String>) {
+    let (decoded, steps) = walk(code, false);
+    (steps, decoded.error)
+}
+
+/// [`steps`] of a code [`decode_chunked`] reads.
+pub fn steps_chunked(code: &[u8]) -> (Vec<Step>, Option<String>) {
+    let (decoded, steps) = walk(code, true);
+    (steps, decoded.error)
+}
+
+/// A branch a walk has yet to take.
+struct Pending {
+    pc: usize,
+    kb: u32,
+    shift: i32,
+    after: Option<(u8, bool)>,
+    depth: usize,
+}
+
+fn walk(code: &[u8], chunked: bool) -> (Decoded, Vec<Step>) {
     let mut keys = Vec::new();
+    let mut steps = Vec::new();
     let mut consumed = vec![false; code.len()];
     let mut error: Option<String> = None;
 
-    let mut stack: Vec<(usize, u32)> = vec![(0, 0)];
+    let mut stack = vec![Pending { pc: 0, kb: 0, shift: ROOT_SHIFT as i32, after: None, depth: 0 }];
 
-    'outer: while let Some((mut pc, mut kb)) = stack.pop() {
+    'outer: while let Some(Pending { mut pc, mut kb, mut shift, mut after, mut depth }) = stack.pop() {
         loop {
             if pc >= code.len() {
                 error = Some(format!("pc out of bounds @ {pc}"));
                 break 'outer;
             }
             let op = code[pc];
+            steps.push(Step { pc, op, shift, after, depth });
+            after = Some((op, false));
             // Bounds-check the operand span before reading it; mark it consumed.
             macro_rules! need {
                 ($n:expr) => {{
@@ -139,6 +184,7 @@ fn walk(code: &[u8], chunked: bool) -> Decoded {
                 } // RETURN — end this branch
                 0x01..=0x04 => {
                     need!(4);
+                    shift -= op as i32;
                     pc += 4;
                 } // REANCHOR + rescale (unary, continue)
                 0x05 => {
@@ -175,13 +221,15 @@ fn walk(code: &[u8], chunked: bool) -> Decoded {
                 0x10..=0x1c => {
                     // SPLIT (axis 0x10–0x12; 26-DOP 0x13–0x1c share this layout): hdr 4, RIGHT @ +code[+3].
                     need!(4);
-                    stack.push((pc + 4 + code[pc + 3] as usize, kb));
+                    depth += 1;
+                    stack.push(Pending { pc: pc + 4 + code[pc + 3] as usize, kb, shift, after: Some((op, true)), depth });
                     pc += 4;
                 }
                 0x20..=0x22 => {
                     // SPLIT (compressed 1-value axis): hdr 3, RIGHT @ +code[+2].
                     need!(3);
-                    stack.push((pc + 3 + code[pc + 2] as usize, kb));
+                    depth += 1;
+                    stack.push(Pending { pc: pc + 3 + code[pc + 2] as usize, kb, shift, after: Some((op, true)), depth });
                     pc += 3;
                 }
                 0x23..=0x25 => {
@@ -189,7 +237,8 @@ fn walk(code: &[u8], chunked: bool) -> Decoded {
                     need!(7);
                     let loff = be(code, pc + 3, 2) as usize;
                     let roff = be(code, pc + 5, 2) as usize;
-                    stack.push((pc + 7 + roff, kb));
+                    depth += 1;
+                    stack.push(Pending { pc: pc + 7 + roff, kb, shift, after: Some((op, true)), depth });
                     pc += 7 + loff;
                 }
                 0x26..=0x28 => {
@@ -245,11 +294,12 @@ fn walk(code: &[u8], chunked: bool) -> Decoded {
         }
     }
 
-    Decoded {
+    let decoded = Decoded {
         keys,
         consumed: consumed.iter().filter(|&&b| b).count(),
         error,
-    }
+    };
+    (decoded, steps)
 }
 
 /// Undo the legacy blind-u32 byteswap: un-reverse every aligned 4-byte word.
@@ -392,14 +442,17 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
     encode_keyed(tris, verts, &keys)
 }
 
-/// The shortest terminal that emits `key` over the root's key base of 0.
+/// The lowest shift a frame of ours goes to. The 4,380 codes of retail `vz.wad` re-anchor no lower.
+const MIN_SHIFT: u32 = 7;
+
+/// The shortest terminal Havok's own codes use that emits `key` over a key base of 0. The 4,380 codes
+/// of retail `vz.wad` hold no `0x52` (a BE24 operand): a key past 16 bits is a `0x53` there.
 fn leaf(key: u32) -> Vec<u8> {
     let [a, b, c, d] = key.to_be_bytes();
     match key {
         0..=0x1F => vec![0x30 + d],
         0x20..=0xFF => vec![0x50, d],
         0x100..=0xFFFF => vec![0x51, c, d],
-        0x1_0000..=0xFF_FFFF => vec![0x52, b, c, d],
         _ => vec![0x53, a, b, c, d],
     }
 }
@@ -407,15 +460,25 @@ fn leaf(key: u32) -> Vec<u8> {
 /// [`encode`] where triangle `t` emits `keys[t]`: a mesh of several subparts keys a triangle by its
 /// subpart and its place there, not by its place in the mesh.
 pub fn encode_keyed(tris: &[[u32; 3]], verts: &[[f32; 3]], keys: &[u32]) -> (Vec<u8>, MoppInfo) {
-    // Quantization frame from the vertex AABB (uniform scale on the widest axis).
+    encode_keyed_tuned(tris, verts, keys, Tuning::default())
+}
+
+/// [`encode_keyed`] under a [`Tuning`] other than the default.
+pub fn encode_keyed_tuned(tris: &[[u32; 3]], verts: &[[f32; 3]], keys: &[u32], tuning: Tuning) -> (Vec<u8>, MoppInfo) {
+    // A vertex of a triangle. Out-of-range indices fall back to the origin — the decoder is
+    // geometry-agnostic, and real meshes never carry them.
+    let vc = |i: u32| -> [f32; 3] { verts.get(i as usize).copied().unwrap_or([0.0; 3]) };
+    // Quantization frame from the AABB of the vertices the triangles use (uniform scale on the widest
+    // axis). A pool shared with other meshes holds vertices this code never reaches, and a frame over
+    // them would spend its 24 bits on space the mesh does not fill.
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for v in verts {
+    for v in tris.iter().flatten().map(|&i| vc(i)) {
         for k in 0..3 {
             lo[k] = lo[k].min(v[k]);
             hi[k] = hi[k].max(v[k]);
         }
     }
-    if verts.is_empty() {
+    if tris.is_empty() {
         lo = [0.0; 3];
         hi = [0.0; 3];
     }
@@ -434,24 +497,23 @@ pub fn encode_keyed(tris: &[[u32; 3]], verts: &[[f32; 3]], keys: &[u32]) -> (Vec
         return (vec![0x00], info);
     }
 
-    // Per-triangle world AABB (over its 3 verts) + centroid. Out-of-range indices fall back to the
-    // origin — the decoder is geometry-agnostic, and real meshes never carry them.
-    let vc = |i: u32| -> [f32; 3] { verts.get(i as usize).copied().unwrap_or([0.0; 3]) };
-    #[derive(Clone, Copy)]
+    // Each triangle's box in the integer frame the walkers hold a query in (`int = (world - offset) /
+    // scale`, 24 bits at the root), rounded outward, and its centroid.
     struct Tri {
-        lo: [f32; 3],
-        hi: [f32; 3],
+        lo: [i64; 3],
+        hi: [i64; 3],
         c: [f32; 3],
     }
+    let int = |w: f32, k: usize| (w - info.offset[k]) as f64 / info.scale as f64;
     let tri: Vec<Tri> = tris
         .iter()
         .map(|t| {
             let (a, b, c) = (vc(t[0]), vc(t[1]), vc(t[2]));
-            let (mut l, mut h) = ([f32::MAX; 3], [f32::MIN; 3]);
+            let (mut l, mut h) = ([i64::MAX; 3], [i64::MIN; 3]);
             for v in [a, b, c] {
                 for k in 0..3 {
-                    l[k] = l[k].min(v[k]);
-                    h[k] = h[k].max(v[k]);
+                    l[k] = l[k].min((int(v[k], k).floor() as i64).clamp(0, ROOT_INT));
+                    h[k] = h[k].max((int(v[k], k).ceil() as i64).clamp(0, ROOT_INT));
                 }
             }
             Tri {
@@ -466,39 +528,111 @@ pub fn encode_keyed(tris: &[[u32; 3]], verts: &[[f32; 3]], keys: &[u32]) -> (Vec
         })
         .collect();
 
-    // Quantize a world coordinate on `axis` to a root byte operand, rounding OUTWARD so the recovered
-    // plane conservatively brackets `world`: `q_up` (an upper bound) rounds UP, `q_down` (a lower
-    // bound) rounds DOWN. `plane_int = byte << ROOT_SHIFT`; `plane_world = plane_int*scale + offset`, so
-    // `byte = (world-offset)/scale / 2^ROOT_SHIFT`. The `2^16` divisor MUST equal the shift the engine
-    // walks at (16) — an 8-shift frame lands every RIGHT-child plane ~256× beyond the mesh, unreachable.
-    let step = (1u32 << ROOT_SHIFT) as f32; // 2^16
-    let q_up = move |world: f32, axis: usize| -> u8 {
-        (((world - info.offset[axis]) / info.scale / step).ceil()).clamp(0.0, 255.0) as u8
-    };
-    let q_down = move |world: f32, axis: usize| -> u8 {
-        (((world - info.offset[axis]) / info.scale / step).floor()).clamp(0.0, 255.0) as u8
-    };
+    /// A branch's frame: a byte operand `b` on axis `k` is the plane `origin[k] + (b << shift)` of the
+    /// root's integer frame. The root's is origin 0 at [`ROOT_SHIFT`]; a re-anchor of `op` (`0x01–0x04`)
+    /// with bytes `b` moves the origin to those planes and lowers the shift by `op`. The retail walkers
+    /// do exactly this (OBB `0xA49203`, long ray `0xA4A765`, pc-v10), so a node's operands stay bytes
+    /// while its planes get finer.
+    #[derive(Clone, Copy)]
+    struct Frame {
+        origin: [i64; 3],
+        shift: u32,
+    }
+    impl Frame {
+        /// The operand of the last plane at or below `v`.
+        fn below(&self, v: i64, k: usize) -> i64 {
+            (v - self.origin[k]) >> self.shift
+        }
+        /// The operand of the first plane at or above `v`.
+        fn above(&self, v: i64, k: usize) -> i64 {
+            (v - self.origin[k] + (1i64 << self.shift) - 1) >> self.shift
+        }
+        fn plane(&self, b: i64, k: usize) -> i64 {
+            self.origin[k] + (b << self.shift)
+        }
+    }
 
-    // Recursively split `idx` (indices into `tri`); returns (subtree bytes, subtree world AABB). The
-    // node is a Bounding-Interval-Hierarchy split: the inline child is bounded ABOVE by `code[+1]`
-    // (its true max on the axis, rounded up); the offset child bounded BELOW by `code[+2]` (its true
-    // min, rounded down). Correct regardless of which geometric half lands inline.
-    fn emit(
-        idx: &mut [usize],
-        tri: &[Tri],
-        keys: &[u32],
-        q_up: &dyn Fn(f32, usize) -> u8,
-        q_down: &dyn Fn(f32, usize) -> u8,
-    ) -> (Vec<u8>, [f32; 3], [f32; 3]) {
-        let (mut slo, mut shi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    /// What a walk holds where it enters a node: its frame, its key base, and the box `[blo, bhi]` the
+    /// node's ancestors' planes leave it.
+    #[derive(Clone, Copy)]
+    struct Branch {
+        frame: Frame,
+        base: u32,
+        blo: [i64; 3],
+        bhi: [i64; 3],
+    }
+
+    // The code of the triangles `idx`, for a walk that enters it as `at`.
+    //
+    // A node re-anchors once where a frame of its own corner holds it at a finer shift, then cuts each axis
+    // its box is slack on (`0x26–0x28`: the walk goes on only where the query reaches `[code[+1],
+    // code[+2]]`), then is a leaf or a split. A split is a Bounding-Interval-Hierarchy node: the half
+    // lower on the axis goes inline, where `code[+1]` bounds it above; the upper half goes at the
+    // offset, where `code[+2]` bounds it below. The other way round each plane would bound a half on
+    // the side its parent already bounds, and the split would prune nothing.
+    //
+    // An upper bound is the first plane at or above the box, a lower bound the last at or below. The
+    // walkers hold a query a unit wider than it is on each side, so a query that touches a box on a
+    // plane still reaches it.
+    fn emit(idx: &mut [usize], tri: &[Tri], keys: &[u32], tuning: Tuning, at: Branch) -> Vec<u8> {
+        let Branch { mut frame, mut base, mut blo, mut bhi } = at;
+        let (mut nlo, mut nhi) = ([i64::MAX; 3], [i64::MIN; 3]);
         for &i in idx.iter() {
             for k in 0..3 {
-                slo[k] = slo[k].min(tri[i].lo[k]);
-                shi[k] = shi[k].max(tri[i].hi[k]);
+                nlo[k] = nlo[k].min(tri[i].lo[k]);
+                nhi[k] = nhi[k].max(tri[i].hi[k]);
             }
         }
+        let mut out = Vec::new();
+        // One re-anchor to a node, and none below `MIN_SHIFT`: retail's codes hold no re-anchor that
+        // follows another.
+        if idx.len() > 1 && frame.shift > MIN_SHIFT {
+            let b = [frame.below(nlo[0], 0), frame.below(nlo[1], 1), frame.below(nlo[2], 2)];
+            let corner = [frame.plane(b[0], 0), frame.plane(b[1], 1), frame.plane(b[2], 2)];
+            let span = (0..3).map(|k| nhi[k] - corner[k]).max().unwrap();
+            let op = (1..=4.min(frame.shift - MIN_SHIFT)).take_while(|o| span <= 255i64 << (frame.shift - o)).last().unwrap_or(0);
+            if op >= tuning.reanchor_min_bits {
+                out.extend_from_slice(&[op as u8, b[0] as u8, b[1] as u8, b[2] as u8]);
+                frame = Frame { origin: corner, shift: frame.shift - op };
+            }
+        }
+        for k in 0..3 {
+            let (mut c1, mut c2) = (frame.below(nlo[k], k), frame.above(nhi[k], k));
+            // A node flat on a plane: keep the cut a plane wide. None of retail's 7.5 million cuts has
+            // its bounds on one plane.
+            if c1 == c2 {
+                if c2 < 0xFF {
+                    c2 += 1;
+                } else {
+                    c1 -= 1;
+                }
+            }
+            let (p1, p2) = (frame.plane(c1, k), frame.plane(c2, k));
+            let gain = (p1 - blo[k]).max(0) + (bhi[k] - p2).max(0);
+            if tuning.cut_min_gain < 1.0 && gain as f64 > tuning.cut_min_gain * (bhi[k] - blo[k]) as f64 {
+                out.extend_from_slice(&[0x26 + k as u8, c1 as u8, c2 as u8]);
+                blo[k] = blo[k].max(p1);
+                bhi[k] = bhi[k].min(p2);
+            }
+        }
+        // Raise the key base to the node's lowest key where that shortens its terminals by more than
+        // the op costs: a terminal adds its operand to the base (`0x09` and `0x0a` add to it, `0x0b`
+        // sets it), and a mesh of several subparts keys a triangle past 24 bits.
+        let low = idx.iter().map(|&i| keys[i]).min().unwrap();
+        let saved: usize = idx.iter().map(|&i| leaf(keys[i] - base).len() - leaf(keys[i] - low).len()).sum();
+        let raise: Vec<u8> = match low - base {
+            0 => Vec::new(),
+            d @ 1..=0xFF => vec![0x09, d as u8],
+            d @ 0x100..=0xFFFF => vec![0x0a, (d >> 8) as u8, d as u8],
+            _ => [&[0x0b][..], &low.to_be_bytes()].concat(),
+        };
+        if saved > raise.len() {
+            out.extend_from_slice(&raise);
+            base = low;
+        }
         if idx.len() == 1 {
-            return (leaf(keys[idx[0]]), slo, shi);
+            out.extend_from_slice(&leaf(keys[idx[0]] - base));
+            return out;
         }
 
         // Split axis = widest centroid spread; median split keeps the tree balanced.
@@ -515,26 +649,20 @@ pub fn encode_keyed(tris: &[[u32; 3]], verts: &[[f32; 3]], keys: &[u32]) -> (Vec
         idx.sort_by(|&a, &b| tri[a].c[axis].partial_cmp(&tri[b].c[axis]).unwrap());
         let mid = idx.len() / 2;
         let (left, right) = idx.split_at_mut(mid);
-
-        let (lb, llo, lhi) = emit(left, tri, keys, q_up, q_down);
-        let (rb, rlo, rhi) = emit(right, tri, keys, q_up, q_down);
-        // Place the SMALLER subtree inline (offset 0) so the offset field stays ≤ half the tree —
-        // keeps the u8/BE16 offset valid for large meshes. `first` = inline (LEFT position → its MAX
-        // is `code[+1]`); `second` = offset (RIGHT position → its MIN is `code[+2]`).
-        let ((first, _flo, fhi), (second, slo2, _shi)) = if lb.len() <= rb.len() {
-            ((lb, llo, lhi), (rb, rlo, rhi))
-        } else {
-            ((rb, rlo, rhi), (lb, llo, lhi))
-        };
-        let lmax = q_up(fhi[axis], axis); // inline child's upper bound (rounded UP)
-        let rmin = q_down(slo2[axis], axis); // offset child's lower bound (rounded DOWN)
-        let mut out = Vec::with_capacity(11 + first.len() + second.len());
-        push_split(&mut out, axis as u8, lmax, rmin, &first, &second);
-        (out, slo, shi)
+        let lmax = frame.above(left.iter().map(|&i| tri[i].hi[axis]).max().unwrap(), axis);
+        let rmin = frame.below(right.iter().map(|&i| tri[i].lo[axis]).min().unwrap(), axis);
+        let (mut lhi, mut rlo) = (bhi, blo);
+        lhi[axis] = lhi[axis].min(frame.plane(lmax, axis));
+        rlo[axis] = rlo[axis].max(frame.plane(rmin, axis));
+        let first = emit(left, tri, keys, tuning, Branch { frame, base, blo, bhi: lhi });
+        let second = emit(right, tri, keys, tuning, Branch { frame, base, blo: rlo, bhi });
+        push_split(&mut out, axis as u8, lmax as u8, rmin as u8, &first, &second);
+        out
     }
 
     let mut idx: Vec<usize> = (0..tris.len()).collect();
-    let (code, _lo, _hi) = emit(&mut idx, &tri, keys, &q_up, &q_down);
+    let root = Branch { frame: Frame { origin: [0; 3], shift: ROOT_SHIFT }, base: 0, blo: [0; 3], bhi: [ROOT_INT; 3] };
+    let code = emit(&mut idx, &tri, keys, tuning, root);
     (code, info)
 }
 
@@ -715,6 +843,12 @@ pub(crate) fn leaf_boxes(
                     fr.kb = be(code, fr.pc + 1, 4);
                     fr.pc += 5;
                 }
+                0x0c => {
+                    // Jump to a chunk, as the retail walkers' case 12 does (OBB `0xA491E8`, long ray
+                    // `0xA4A74A`, pc-v10): `pc = m_data + BE16(+1) * 512`.
+                    need!(3);
+                    fr.pc = be(code, fr.pc + 1, 2) as usize * CHUNK;
+                }
                 0x10..=0x12 => {
                     need!(4);
                     let axis = (op - 0x10) as usize;
@@ -838,6 +972,38 @@ pub(crate) const ROOT_SHIFT: u32 = 16;
 /// frame `scale = ext_max / ROOT_INT_MAX` so the AABB-max face lands exactly on byte operand `0xFF`,
 /// representable as an *upper* bound (`code[+1]`) — the whole mesh fits in `int ∈ [0, ROOT_INT_MAX]`.
 pub(crate) const ROOT_INT_MAX: f32 = (0xFFu32 << 16) as f32; // 16_711_680
+/// [`ROOT_INT_MAX`] as the integer the encoder's boxes are held in.
+const ROOT_INT: i64 = 0xFF << 16;
+
+/// What [`encode`] spends a code's bytes on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tuning {
+    /// The fewest bits of shift a re-anchor must gain to be emitted (4 bytes). Past 4, none is.
+    pub reanchor_min_bits: u32,
+    /// The share of a node's inherited extent on an axis a cut must remove to be emitted (3 bytes). At
+    /// 1, none is.
+    pub cut_min_gain: f64,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self { reanchor_min_bits: 2, cut_min_gain: 0.15 }
+    }
+}
+
+impl Tuning {
+    /// The tunings to try in turn for a code that has to fit a length: the default, then three that cut
+    /// less, then one with neither cuts nor re-anchors, which is the shortest code [`encode`] makes. The
+    /// ones between are not in order of length: a cut left out at a node can cost more in the cuts its
+    /// descendants then make.
+    pub const TO_FIT: [Tuning; 5] = [
+        Tuning { reanchor_min_bits: 2, cut_min_gain: 0.15 },
+        Tuning { reanchor_min_bits: 2, cut_min_gain: 0.3 },
+        Tuning { reanchor_min_bits: 2, cut_min_gain: 0.5 },
+        Tuning { reanchor_min_bits: 2, cut_min_gain: 1.0 },
+        Tuning { reanchor_min_bits: 5, cut_min_gain: 1.0 },
+    ];
+}
 
 /// Geometric MOPP walk mirroring the HCT OBB/KDop virtual machine with narrowphase stripped — the real
 /// broadphase minus the per-triangle test. Returns the candidate shape-keys whose leaves a query AABB
@@ -853,6 +1019,12 @@ pub(crate) const ROOT_INT_MAX: f32 = (0xFFu32 << 16) as f32; // 16_711_680
 /// A small `scale`-sized slop on the disjoint test absorbs f32-vs-f64 boundary rounding so a triangle
 /// sitting exactly on a plane is never dropped.
 pub fn query_aabb(code: &[u8], info: &MoppInfo, qmin: [f32; 3], qmax: [f32; 3]) -> Vec<u32> {
+    query_aabb_shift(code, info, qmin, qmax, ROOT_SHIFT).0
+}
+
+/// [`query_aabb`] and the count of opcodes the walk ran to answer: what a code costs to walk, where its
+/// candidates are what it costs to test.
+pub fn query_aabb_steps(code: &[u8], info: &MoppInfo, qmin: [f32; 3], qmax: [f32; 3]) -> (Vec<u32>, usize) {
     query_aabb_shift(code, info, qmin, qmax, ROOT_SHIFT)
 }
 
@@ -865,10 +1037,10 @@ pub(crate) fn query_aabb_shift(
     qmin: [f32; 3],
     qmax: [f32; 3],
     root_shift: u32,
-) -> Vec<u32> {
+) -> (Vec<u32>, usize) {
     let mut keys = Vec::new();
     if code.is_empty() {
-        return keys;
+        return (keys, 0);
     }
     let scale = info.scale as f64;
     let offv = info.offset;
@@ -958,6 +1130,12 @@ pub(crate) fn query_aabb_shift(
                     need!(5);
                     fr.kb = be(code, fr.pc + 1, 4);
                     fr.pc += 5;
+                }
+                0x0c => {
+                    // Jump to a chunk, as the retail walkers' case 12 does (OBB `0xA491E8`, long ray
+                    // `0xA4A74A`, pc-v10): `pc = m_data + BE16(+1) * 512`.
+                    need!(3);
+                    fr.pc = be(code, fr.pc + 1, 2) as usize * CHUNK;
                 }
                 0x10..=0x12 => {
                     need!(4);
@@ -1074,7 +1252,7 @@ pub(crate) fn query_aabb_shift(
             }
         }
     }
-    keys
+    (keys, steps)
 }
 
 #[cfg(test)]
@@ -1212,7 +1390,7 @@ mod tests {
         assert_eq!(got, keys);
     }
 
-    /// A chunk jump keeps the walk's key base, and only the chunked walk knows it: PC has no such opcode.
+    /// A chunk jump keeps the walk's key base, and only the chunked walk knows it: no PC code holds one.
     #[test]
     fn a_chunked_code_is_walked_across_its_jumps() {
         let mut code = vec![0xCDu8; 1024];
@@ -1227,6 +1405,108 @@ mod tests {
         got.sort_unstable();
         assert_eq!(got, [0x21, 0x22]);
         assert!(decode(&code).error.is_some());
+    }
+
+    /// The tunings a code is fitted with start at the default and end at the shortest code, on a mesh of
+    /// several subparts' keys; every one walks to the mesh's keys.
+    #[test]
+    fn the_fitting_tunings_start_at_the_default_and_end_at_the_shortest() {
+        assert_eq!(Tuning::TO_FIT[0], Tuning::default());
+        let n = 24u32;
+        let verts: Vec<[f32; 3]> = (0..n * n).map(|i| [(i % n) as f32 * 1.7, ((i * 37) % 11) as f32 * 0.4, (i / n) as f32 * 2.3]).collect();
+        let mut tris = Vec::new();
+        for z in 0..n - 1 {
+            for x in 0..n - 1 {
+                let a = z * n + x;
+                tris.push([a, a + 1, a + n]);
+                tris.push([a + 1, a + n + 1, a + n]);
+            }
+        }
+        let keys: Vec<u32> = (0..tris.len() as u32).map(|t| ((t % 3) << 24) | (t / 3)).collect();
+        let mut want = keys.clone();
+        want.sort_unstable();
+        let mut lengths = Vec::new();
+        for tuning in Tuning::TO_FIT {
+            let (code, _) = encode_keyed_tuned(&tris, &verts, &keys, tuning);
+            let d = decode(&code);
+            assert!(d.error.is_none() && d.consumed == code.len(), "{tuning:?}: {:?}", d.error);
+            let mut got = d.keys;
+            got.sort_unstable();
+            assert_eq!(got, want, "{tuning:?}");
+            lengths.push(code.len());
+        }
+        assert_eq!(lengths.iter().min(), lengths.last(), "{lengths:?}");
+    }
+
+    /// A code of ours holds nothing retail's codes do not: no `0x52` terminal, no re-anchor straight
+    /// after a re-anchor, no frame below [`MIN_SHIFT`], no cut with both bounds on one plane. The mesh
+    /// asks for each: keys past 16 bits, a floor flat on the frame's lowest plane, and a cluster a
+    /// hundred-thousandth of the frame wide.
+    #[test]
+    fn a_code_stays_inside_what_retail_codes_hold() {
+        let n = 20u32;
+        let mut verts: Vec<[f32; 3]> = (0..n * n).map(|i| [(i % n) as f32 * 50.0, 0.0, (i / n) as f32 * 50.0]).collect();
+        let mut tris = Vec::new();
+        for z in 0..n - 1 {
+            for x in 0..n - 1 {
+                let a = z * n + x;
+                tris.push([a, a + 1, a + n]);
+                tris.push([a + 1, a + n + 1, a + n]);
+            }
+        }
+        for i in 0..64u32 {
+            let base = verts.len() as u32;
+            let at = [400.0 + (i % 8) as f32 * 0.001, 30.0 + (i / 8) as f32 * 0.001, 400.0];
+            verts.extend([at, [at[0] + 0.0008, at[1], at[2]], [at[0], at[1] + 0.0008, at[2] + 0.0008]]);
+            tris.push([base, base + 1, base + 2]);
+        }
+        let keys: Vec<u32> = (0..tris.len() as u32).map(|t| ((t % 2) << 20) | t).collect();
+        for tuning in Tuning::TO_FIT {
+            let (code, _) = encode_keyed_tuned(&tris, &verts, &keys, tuning);
+            let (steps, error) = steps(&code);
+            assert_eq!(error, None, "{tuning:?}");
+            let mut got: Vec<u32> = decode(&code).keys;
+            got.sort_unstable();
+            let mut want = keys.clone();
+            want.sort_unstable();
+            assert_eq!(got, want, "{tuning:?}");
+            for s in &steps {
+                assert_ne!(s.op, 0x52, "{tuning:?}: a 0x52 terminal at {}", s.pc);
+                assert!(s.shift >= MIN_SHIFT as i32, "{tuning:?}: shift {} at {}", s.shift, s.pc);
+                if (0x01..=0x04).contains(&s.op) {
+                    assert!(!matches!(s.after, Some((0x01..=0x04, _))), "{tuning:?}: a re-anchor after a re-anchor at {}", s.pc);
+                }
+                if (0x26..=0x28).contains(&s.op) {
+                    assert!(code[s.pc + 1] < code[s.pc + 2], "{tuning:?}: a cut of no width at {}", s.pc);
+                }
+            }
+            // A re-anchor is 1 to 4 bits, so a tuning that asks for 5 has none.
+            let reanchors = steps.iter().any(|s| (0x01..=0x04).contains(&s.op));
+            assert_eq!(reanchors, tuning.reanchor_min_bits <= 4, "{tuning:?}: the mesh was to draw re-anchors");
+            assert!(steps.iter().any(|s| s.op == 0x53), "{tuning:?}: the mesh was to draw keys past 16 bits");
+        }
+    }
+
+    /// The query walk follows a chunk jump with its box and key base: the split's inline child, bounded
+    /// above at byte `0x80`, is the leaf in the second chunk.
+    #[test]
+    fn a_query_follows_a_chunk_jump() {
+        let mut code = vec![0xCDu8; 1024];
+        code[..3].copy_from_slice(&[0x09, 0x20, 0x10]);
+        code[3..6].copy_from_slice(&[0x80, 0x70, 0x03]);
+        code[6..9].copy_from_slice(&[0x0C, 0x00, 0x01]);
+        code[9] = 0x31;
+        code[512] = 0x32;
+        // One byte of the root frame is one metre: the planes are at x = 128 (inline max) and 112 (offset min).
+        let info = MoppInfo { offset: [0.0; 3], scale: 1.0 / (1u32 << ROOT_SHIFT) as f32 };
+        let at = |x: f32| {
+            let mut k = query_aabb(&code, &info, [x, 0.0, 0.0], [x, 0.0, 0.0]);
+            k.sort_unstable();
+            k
+        };
+        assert_eq!(at(50.0), [0x22]);
+        assert_eq!(at(120.0), [0x21, 0x22]);
+        assert_eq!(at(200.0), [0x21]);
     }
 
     // ── return-all (universal-collision) MOPP gate ──

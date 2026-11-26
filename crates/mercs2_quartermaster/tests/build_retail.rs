@@ -183,7 +183,7 @@ fn two_models_sharing_a_rung_block_keep_their_own_rungs() {
         assert_chain_carried(&contents, m, &m.rungs[0].container);
     }
 
-    let again = mercs2_formats::patch_wad::build_patch_wad_multi(&contents.blocks, contents.csum_value, None, &mercs2_formats::patch_wad::FFCS_CERT_BLOB)
+    let again = mercs2_formats::patch_wad::build_patch_wad_multi(&contents.blocks, contents.csum_value, &mercs2_formats::patch_wad::FFCS_CERT_BLOB)
         .expect("write the read-back blocks again");
     let round = mercs2_formats::patch_wad::read_patch_wad(&again).expect("re-read the rewrite");
     for m in [&a, &b] {

@@ -118,6 +118,12 @@ zeros. Their tests are game-gated (`--features retail`) and read `memory_dumps_d
   `docs/data/aset_names.csv`. Subcommands `tex-rungs` (every texture chunk of a
   big-endian archive and its PC twin, a row per block) and `tex-compare` (an Xbox archive's textures,
   converted and decoded mip by mip against PC, or a PS3 archive with `--ps3`).
+* **Collision**: subcommands `mopp-selectivity` (the triangles a ray-like segment is handed by each
+  collider's MOPP code, by the code the encoder computes over the same mesh, and exactly; a PC WAD, or a
+  console archive's codes as its platform baked them with `--archive`) and `mopp-census` (the opcodes,
+  opcode pairs, shifts and bounds every MOPP code of a PC WAD or console archive is made of; with
+  `--never-in` only what a saved census lacks). The census of retail PC `vz.wad` is
+  `docs/data/mopp_census_pc_retail.tsv`.
 * **DLC**: subcommand `dlc-census` (every chunk of a big-endian DLC archive against the retail build of
   its platform, each `new`, `same` or `changed`, with the UCFX rows and bytes a `changed` one differs in),
   `clip-compare` (every clip of a converted WAD decoded against PC), `pc-diff` (every chunk of a

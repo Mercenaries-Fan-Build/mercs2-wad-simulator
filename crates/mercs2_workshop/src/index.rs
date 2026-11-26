@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn harvested_names_drop_debris() {
         let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
-        assert_eq!(rejected.len(), 18);
+        assert_eq!(rejected.len(), 42);
         for (h, n) in &rejected {
             assert_eq!(m2(n), *h, "{n}");
         }

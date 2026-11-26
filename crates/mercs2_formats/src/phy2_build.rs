@@ -2119,6 +2119,21 @@ mod tests {
             );
             cursor = at + code.len();
         }
+        // A return-all code shorter than the spatial one also differs in its `m_data` array's count and
+        // capacity words (`bake_shape_mopp`); each build's count is its own code's length.
+        let pk = spatial.windows(crate::havok::HAVOK_MAGIC.len()).position(|w| w == crate::havok::HAVOK_MAGIC).expect("packfile magic");
+        let raw = crate::havok::parse_packfile_raw(&spatial[pk..]).expect("packfile");
+        let codes: Vec<usize> = raw.vfixups.iter().filter(|(_, c)| c == "hkpMoppCode").map(|(s, _)| pk + raw.data_pk + s).collect();
+        assert_eq!(codes.len(), n, "one hkpMoppCode per shape");
+        for (i, &obj) in codes.iter().enumerate() {
+            for (tag, body, code) in [("spatial", spatial, &ms[i].0), ("returnall", returnall, &mr[i].0)] {
+                let count = u32::from_le_bytes(body[obj + 36..obj + 40].try_into().unwrap()) as usize;
+                assert_eq!(count, code.len(), "shape {i} {tag}: m_data count is the code's length");
+            }
+            for b in mask.iter_mut().take(obj + 44).skip(obj + 36) {
+                *b = true;
+            }
+        }
         let mut ndiff = 0usize;
         for (idx, (&a, &b)) in spatial.iter().zip(returnall.iter()).enumerate() {
             if a != b {

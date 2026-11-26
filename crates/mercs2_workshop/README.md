@@ -18,6 +18,19 @@ its foot:
   (so a defector sits with the faction it serves), any other row by its name's prefix; each marker
   is labelled with the prefix it pairs with across the world's templates. The inspector's Lens card
   starts a contribution of that domain's kinds.
+- **Driving** (`drivingpage`) lists the vehicle models by class and reads the loaded one's driving
+  systems from its car template (`_CarPhysicsV2`, chosen in the toolbar's Template picker). A
+  systems bar opens Chassis, Powertrain, Steering or Coupling; each has a bench under the viewport
+  (a to-scale blueprint, the gearing and torque charts, steering lock and response, the hardpoint
+  table) and cards in the inspector, every value read by field name (`drivingdata`) with a tick at
+  its place among every car template. The charts follow the executable's own gearbox and steering
+  math (`drivingmath`). Chips over the viewport mark wheels, suspension travel, torque split and
+  hardpoints on the model, and Show full lock turns the steered wheels to the lock at rest. The
+  Trailer picker draws a trailer template on the hitch node and frames the two together; the
+  Exhaust picker plays each exhaust part's effect at its node (the part names a template, and that
+  template's `RedEffectComponent` the effect). A selected hardpoint lists the vehicle models that
+  carry it. A vehicle with no car template shows Inspect's model sections alone. Contract:
+  `docs/modernization/workshop_pages/driving.md`.
 - **Audio** (Inspect's AUDIO tab, `audiopage`) lists the 12,988 voice-over lines by the banks whose
   cues play them, read from `English.wad` (`audioroute`, through `sound::wavebank_players`): the 27
   labelled `vo_*` banks, 19 per-scene banks known by hash, and the 34 lines no cue plays. Search
@@ -164,9 +177,9 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 ```
 
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
-`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), on `"tab": "FACEFX"` with a `load` `face_pose` (a pose of the opened actor, held at full weight) or `face_time` (seconds into the opened set's first anim, paused), on `"tab": "WORLD LAYERS"` with a `load` `entity` (an entity of the opened layer by its label, selected and framed), `shipment` + `contribution`,
+`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), on `"tab": "FACEFX"` with a `load` `face_pose` (a pose of the opened actor, held at full weight) or `face_time` (seconds into the opened set's first anim, paused), on `"tab": "WORLD LAYERS"` with a `load` `entity` (an entity of the opened layer by its label, selected and framed), `orbit` (the model viewport's camera yaw and pitch, radians; `ui_states/driving_steering_lock.json`), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
-applied once the tab's routing is read (`ui_states/audio.json`), `run_wad` / `run_data` (a path
+applied once the tab's routing is read (`ui_states/audio.json`), on `"page": "Driving"` `system` (a systems-bar tab), `overlays` (the viewport chips to turn on, by label), `exhaust` (`Off` or `On`; `ui_states/driving_exhaust.json`) and with a `load` `template` (the loaded model's template to read, by name) and `trailer` (a trailer template by name; `ui_states/driving_coupling_trailer.json`), `run_wad` / `run_data` (a path
 used for this run as Settings' "Use for this run only…" does, after the first load; the capture
 waits for the reload it starts, and a path that starts none exits 2) — plus `capture` (the PNG to write,
 relative to the working directory) and `settle_frames` (default 8). The window opens, applies the state once the reference data is in

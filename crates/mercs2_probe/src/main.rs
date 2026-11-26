@@ -80,6 +80,8 @@ mod lua_debug_live;
 mod lua_vehicle_hashes;
 mod model_chains;
 mod model_names;
+mod mopp_census;
+mod mopp_selectivity;
 mod phy2_probe;
 mod place_forge;
 mod place_lift;
@@ -155,6 +157,10 @@ fn usage() -> ! {
          \x20 model-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every model converted against PC over its whole chain; no --wad)\n\
          \x20 scrub-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every scrub converted against PC; no --wad)\n\
          \x20 phy2-diff <big-endian PHY2 body> <PC body or container>   (a collider converted, its differences by region; no --wad)\n\
+         \x20 mopp-selectivity <pc wad> (--blocks a,b,c | --match <path part> [--limit N]) [--anchors N]   (triangles a ray-like query is handed by each collider's MOPP code, by the code recomputed over its mesh, and exactly; no --wad)\n\
+         \x20 mopp-selectivity --archive <big-endian archive> [--match <path part>] [--limit N] [--anchors N]   (the same over a console archive's codes as its platform baked them)\n\
+         \x20 mopp-census <pc wad> [--never-in <census.tsv>]   (opcodes, opcode pairs, shifts and bounds of every MOPP code, a kind/key/count line each; with --never-in only what a saved census lacks; no --wad)\n\
+         \x20 mopp-census --archive <big-endian archive> [--never-in <census.tsv>]   (the same over a console archive's codes)\n\
          \x20 rung-words <pc wad>   (each type's chains against the rule for their table words; no --wad)\n\
          \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
@@ -1169,6 +1175,12 @@ fn main() {
     }
     if cmd == "ess-menu-check" {
         std::process::exit(ess_menu_check::main(&args));
+    }
+    if cmd == "mopp-selectivity" {
+        std::process::exit(mopp_selectivity::run(&args));
+    }
+    if cmd == "mopp-census" {
+        std::process::exit(mopp_census::run(&args));
     }
     if cmd == "prof-samples" {
         std::process::exit(prof_samples::main(&args));

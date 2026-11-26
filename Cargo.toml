@@ -18,21 +18,21 @@ repository = "https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator"
 # with it — a consumer pinned to an earlier major (e.g. mercs2-modkit) will NOT pick 6.0.0 up until it
 # is edited too.
 [workspace.dependencies]
-mercs2_formats = { path = "crates/mercs2_formats", version = "7.1.0" }
+mercs2_formats = { path = "crates/mercs2_formats", version = "7.1.1" }
 loadprobe = { path = "crates/loadprobe", version = "2.4.2" }
-mercs2_luac = { path = "crates/mercs2_luac", version = "1.3.1" }
-mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.1.1" }
-ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "3.0.2" }
+mercs2_luac = { path = "crates/mercs2_luac", version = "1.3.2" }
+mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.1.2" }
+ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "3.0.3" }
 # The console DLC converter, as a LIBRARY: qm's `fetch_package` runs it on the player's machine.
 dlc_port = { path = "crates/dlc_port", version = "0.1.1" }
 mercs2_core = { path = "crates/mercs2_core", version = "1.1.0" }
 mercs2_audio = { path = "crates/mercs2_audio", version = "3.0.3" }
 mercs2_script = { path = "crates/mercs2_script", version = "4.0.0" }
 mercs2_physics = { path = "crates/mercs2_physics", version = "1.2.2" }
-mercs2_vehicle = { path = "crates/mercs2_vehicle", version = "1.2.2" }
+mercs2_vehicle = { path = "crates/mercs2_vehicle", version = "1.2.3" }
 mercs2_destruction = { path = "crates/mercs2_destruction", version = "1.1.4" }
 mercs2_ai = { path = "crates/mercs2_ai", version = "1.0.6" }
-mercs2_anim = { path = "crates/mercs2_anim", version = "1.2.1" }
+mercs2_anim = { path = "crates/mercs2_anim", version = "1.2.2" }
 mercs2_water = { path = "crates/mercs2_water", version = "1.2.5" }
 mercs2_decal = { path = "crates/mercs2_decal", version = "1.0.6" }
 mercs2_population = { path = "crates/mercs2_population", version = "1.0.6" }
@@ -42,12 +42,12 @@ mercs2_ui = { path = "crates/mercs2_ui", version = "1.2.2" }
 mercs2_gfx = { path = "crates/mercs2_gfx", version = "0.2.0" }
 mercs2_bink = { path = "crates/mercs2_bink", version = "0.1.1" }
 mercs2_player = { path = "crates/mercs2_player", version = "1.2.0" }
-mercs2_engine = { path = "crates/mercs2_engine", version = "4.0.0" }
+mercs2_engine = { path = "crates/mercs2_engine", version = "4.1.1" }
 # The Shipment format, linter and builder. Registered here because neither the Workshop nor Modkit
 # owns the format — this crate does, and both are clients. Without an entry they cannot write
 # `mercs2_quartermaster = { workspace = true }` at all.
-mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "7.3.0" }
-mercs2_bridge = { path = "crates/mercs2_bridge", version = "0.1.4" }
+mercs2_quartermaster = { path = "crates/mercs2_quartermaster", version = "7.4.1" }
+mercs2_bridge = { path = "crates/mercs2_bridge", version = "0.1.5" }
 mercs2_exemap = { path = "crates/mercs2_exemap", version = "1.1.3" }
 securom_unwrap = { path = "crates/securom_unwrap", version = "0.1.0" }
 # The consumption simulator, as a LIBRARY. Registered because its engine-accurate predicates are the
