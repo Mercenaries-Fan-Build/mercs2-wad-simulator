@@ -97,7 +97,10 @@ mod retail_movies;
 mod prof_samples;
 mod splice_emu;
 mod stockpile_restore;
+mod vehicle_tuning;
+mod we_tables;
 mod we_template;
+mod weapon_configs;
 mod worldentity_probe;
 
 use mercs2_engine::diag;
@@ -191,6 +194,8 @@ fn usage() -> ! {
          \x20 ragdoll-probe [--hashes] [--extract-fixture]  (Havok physics classes across vz.wad)\n\
          \x20 lua-vehicle-hashes [out.csv]                  (vehicle names in the decompiled Lua; run from the notes repo root)\n\
          \x20 model-names [--names <names.json>] [--tsv P]   (each model's catalog name against its own templates and textures)\n\
+         \x20 weapon-configs [--dir <dir>] [--names <names.json>]   (every weapon template and every template it reaches, field by field; writes weapon_tuning.tsv, weapon_fields.tsv and worldentity_enums.tsv, by default into docs/data/)\n\
+         \x20 vehicle-tuning [--tsv P] [--out <dir>] [--fields A,B,...] [--names <names.json>]   (every vehicle template's physics record; the per-model table defaults to docs/data/vehicle_tuning.tsv)\n\
          \x20 shaderforge <list|static-vs|consts|splice|bundle|disasm|roles> <shader3.bin> [rec|role|out] [out] | asm <in.asm> <out.sho> [--target T] | store-id <stem> [--low]\n\
          (vz.wad auto-discovers from MERCS2_GAME_DIR / VZ_WAD, then the registry; override with --wad <path>)"
     );
@@ -1668,6 +1673,16 @@ fn main() {
         }
         "model-names" => {
             std::process::exit(model_names::run(&wadpath, flag_val(&args, "--names"), flag_val(&args, "--tsv")))
+        }
+        "vehicle-tuning" => std::process::exit(vehicle_tuning::run(
+            &wadpath,
+            flag_val(&args, "--tsv"),
+            flag_val(&args, "--out"),
+            flag_val(&args, "--fields"),
+            flag_val(&args, "--names"),
+        )),
+        "weapon-configs" => {
+            std::process::exit(weapon_configs::run(&wadpath, flag_val(&args, "--dir"), flag_val(&args, "--names")))
         }
         "overlays" => {
             let prof = first_positional(&args).unwrap_or_else(|| {
